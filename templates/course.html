@@ -55,7 +55,7 @@
   <form method="post" action="{{ url_for('homework_create', cid=course.id) }}"
         enctype="multipart/form-data" class="stack-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <input name="title" placeholder="作业标题，如：第三章 化学平衡 练习" required>
+    <input name="title" placeholder="作业标题，如：第三章 综合练习" required>
     <textarea name="description" rows="2" placeholder="作业说明（可选）"></textarea>
     <label>截止时间 <input type="datetime-local" name="deadline"></label>
     <label>标准答案 PDF（可选，AI 批改时会作参考）<input type="file" name="answer_pdf" accept=".pdf"></label>
