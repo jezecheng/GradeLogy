@@ -18,6 +18,7 @@
         <a class="btn-link" href="{{ url_for('workflow_design', pid=p.id) }}">编辑</a>
         <form method="post" action="{{ url_for('workflow_delete', pid=p.id) }}" style="display:inline"
               onsubmit="return confirm('删除流程「{{ p.name }}」？已绑定该流程的作业会退回默认流程。')">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
           <button type="submit" class="btn-link danger">删除</button>
         </form>
       </td>

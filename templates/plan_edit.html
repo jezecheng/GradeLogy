@@ -6,6 +6,7 @@
 <p class="muted">最近更新：{{ plan.updated_at }}</p>
 <div class="card">
   <form method="post" class="stack-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <input name="title" value="{{ plan.title }}" required>
     <textarea name="content" rows="20" placeholder="在这里编写教案内容……">{{ plan.content }}</textarea>
     <button type="submit">保存</button>

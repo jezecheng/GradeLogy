@@ -10,6 +10,7 @@
 <div class="card">
   <h2>上传作业扫描件</h2>
   <form method="post" enctype="multipart/form-data" class="stack-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <label>文件（png / jpg / webp / pdf，≤20MB）
       <input type="file" name="file" accept=".png,.jpg,.jpeg,.webp,.pdf" required>
     </label>

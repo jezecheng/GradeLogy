@@ -8,6 +8,7 @@
   <p class="muted small">勾选后点「AI 识别切分」不会联网：按页纵向等分成 4 段生成占位题目，
     你可以照常体验三栏批改、修改 OCR、填写标准答案、保存和查看学生端效果。真实使用时请取消勾选。</p>
   <form method="post">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <input type="hidden" name="demo_only" value="1">
     <label class="check-line">
       <input type="checkbox" name="ai_demo" value="1" {% if cfg.ai_demo == '1' %}checked{% endif %}
@@ -32,6 +33,7 @@
     <tr><td>本地 Ollama</td><td>http://localhost:11434/v1</td><td>qwen2.5vl:7b（Key 随便填）</td></tr>
   </table>
   <form method="post" class="stack-form" style="margin-top:14px">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <label>接口基地址
       <input name="ai_api_url" value="{{ cfg.ai_api_url }}" placeholder="https://api.openai.com/v1">
     </label>
@@ -53,6 +55,7 @@
     <button type="submit">保存设置</button>
   </form>
   <form method="post" action="{{ url_for('settings_test') }}" style="margin-top:10px">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <button class="small">测试连接</button>
     <span class="muted small">保存后点这里，确认 Key 是否可用</span>
   </form>

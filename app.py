@@ -77,6 +77,21 @@ def _json_or_none(value):
 
 app.jinja_env.filters["fromjson"] = _json_or_none
 
+
+def csrf_token():
+    """为当前会话生成并复用 CSRF token；模板里用 csrf_token() 写入表单隐藏域。"""
+    token = session.get("_csrf")
+    if not token:
+        token = secrets.token_hex(32)
+        session["_csrf"] = token
+    return token
+
+
+app.jinja_env.globals["csrf_token"] = csrf_token
+
+# 无需 CSRF 校验的端点：健康检查（只读）、静态资源
+CSRF_EXEMPT = {"healthz", "static"}
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -310,6 +325,22 @@ def load_user():
             session.clear()
 
 
+@app.before_request
+def csrf_protect():
+    """所有写操作必须带本次会话的 CSRF token（表单隐藏域 _csrf 或请求头 X-CSRF-Token）。"""
+    if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
+        return None
+    if request.endpoint in CSRF_EXEMPT:
+        return None
+    expect = session.get("_csrf") or ""
+    got = request.headers.get("X-CSRF-Token") or request.form.get("_csrf") or ""
+    if not expect or not got or not secrets.compare_digest(expect, got):
+        log.warning("CSRF 校验失败 method=%s path=%s ip=%s",
+                    request.method, request.path, request.remote_addr)
+        abort(400, description="页面已过期或请求来源不可信，请刷新页面后重试。")
+    return None
+
+
 def login_required(f):
     @wraps(f)
     def wrapper(*a, **kw):
@@ -330,6 +361,12 @@ def role_required(*roles):
             return f(*a, **kw)
         return wrapper
     return deco
+
+
+@app.errorhandler(400)
+def bad_request(e):
+    msg = getattr(e, "description", "") or "请求无效。"
+    return render_template("error.html", code=400, msg=msg), 400
 
 
 @app.errorhandler(403)

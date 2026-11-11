@@ -8,6 +8,7 @@
 <div class="card">
   <h2>学生名单（{{ students|length }}）</h2>
   <form method="post" action="{{ url_for('course_enroll', cid=course.id) }}" class="inline-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <select name="student_id" required>
       <option value="">从学生账号中选择…</option>
       {% for s in candidates %}
@@ -27,6 +28,7 @@
       <td>
         <form method="post" action="{{ url_for('course_unenroll', cid=course.id, sid=s.id) }}"
               onsubmit="return confirm('将该学生移出课程？')">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
           <button class="danger small">移出</button>
         </form>
       </td>
@@ -40,6 +42,7 @@
   <h2>作业（{{ homeworks|length }}）</h2>
   <form method="post" action="{{ url_for('homework_create', cid=course.id) }}"
         enctype="multipart/form-data" class="stack-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <input name="title" placeholder="作业标题，如：第三章 化学平衡 练习" required>
     <textarea name="description" rows="2" placeholder="作业说明（可选）"></textarea>
     <label>截止时间 <input type="datetime-local" name="deadline"></label>
@@ -58,6 +61,7 @@
       <td>
         <form method="post" action="{{ url_for('homework_delete', hid=h.id) }}"
               onsubmit="return confirm('删除作业及其全部提交？')">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
           <button class="danger small">删除</button>
         </form>
       </td>
@@ -70,6 +74,7 @@
 <div class="card">
   <h2>教案（{{ plans|length }}）</h2>
   <form method="post" action="{{ url_for('plan_create', cid=course.id) }}" class="inline-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <input name="title" placeholder="教案标题，如：氧化还原反应 教学设计" required>
     <button type="submit">新建教案</button>
   </form>
@@ -83,6 +88,7 @@
       <td>
         <form method="post" action="{{ url_for('plan_delete', pid=p.id) }}"
               onsubmit="return confirm('删除该教案？')">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
           <button class="danger small">删除</button>
         </form>
       </td>

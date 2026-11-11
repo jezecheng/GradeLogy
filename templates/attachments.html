@@ -25,6 +25,7 @@
       <td>
         <form method="post" action="{{ url_for('attachments_delete') }}" style="display:inline"
               onsubmit="return confirm('删除目录「{{ d.name }}」及其下 {{ d.files }} 个文件？')">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
           <input type="hidden" name="path" value="{{ (rel ~ '/' if rel else '') ~ d.name }}">
           <input type="hidden" name="back" value="{{ rel }}">
           <button type="submit" class="btn-link danger">删除</button>
@@ -46,6 +47,7 @@
       <td>
         <form method="post" action="{{ url_for('attachments_delete') }}" style="display:inline"
               onsubmit="return confirm('删除文件「{{ f.name }}」？')">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
           <input type="hidden" name="path" value="{{ (rel ~ '/' if rel else '') ~ f.name }}">
           <input type="hidden" name="back" value="{{ rel }}">
           <button type="submit" class="btn-link danger">删除</button>

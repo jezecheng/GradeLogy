@@ -14,11 +14,13 @@
   {% endif %}
   <form method="post" action="{{ url_for('homework_answer', hid=hw.id) }}"
         enctype="multipart/form-data" class="inline-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <input type="file" name="answer_pdf" accept=".pdf" required>
     <button type="submit">{{ '更换' if hw.answer_pdf else '上传' }}答案 PDF</button>
   </form>
   {% if hw.answer_pdf %}
   <form method="post" action="{{ url_for('homework_extract', hid=hw.id) }}" class="inline-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <button type="submit">{{ '重新提取' if answer_count else '提取标准答案' }}</button>
     {% if answer_count %}<span class="muted small">已缓存 {{ answer_count }} 道题的标准答案，批改时直接使用</span>{% endif %}
   </form>
@@ -28,6 +30,7 @@
 <div class="card">
   <h2>批改流程</h2>
   <form method="post" action="{{ url_for('homework_pipeline', hid=hw.id) }}" class="inline-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <select name="pipeline_id">
       <option value="0">默认流程（按页切题 → 定位答案 → 逐题判分）</option>
       {% for p in pipelines %}
@@ -52,6 +55,7 @@
       <a class="btn-link" href="{{ url_for('uploaded_file', filename=s.file_path) }}" target="_blank">查看扫描件</a>
       <a class="btn-link" href="{{ url_for('submission_review', sid=s.id) }}">逐题批改</a>
       <form method="post" action="{{ url_for('submission_segment', sid=s.id) }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
         <button class="small">{{ '重新识别' if s.status == '待批改' or s.feedback else 'AI 识别切分' }}</button>
       </form>
     </div>
@@ -60,6 +64,7 @@
     <details {% if not s.feedback %}open{% endif %}>
       <summary class="small">手动更正批改</summary>
       <form method="post" action="{{ url_for('submission_correct', sid=s.id) }}" class="stack-form correct-form">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
         <label>得分 <input name="score" value="{{ s.score }}" placeholder="如：85 或 85/100"></label>
         <label>评语 / 批改意见
           <textarea name="feedback" rows="5" placeholder="填写批改意见，学生登录后可见">{{ s.feedback }}</textarea>

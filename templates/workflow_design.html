@@ -153,7 +153,9 @@ document.getElementById("wf-save").addEventListener("click", async () => {
   const payload = { name: document.getElementById("wf-name").value.trim(),
                     graph: exportGraph(), pid: {{ pipeline.id if pipeline else "null" }} };
   const resp = await fetch("{{ url_for('workflow_save') }}", {
-    method: "POST", headers: { "Content-Type": "application/json" },
+    method: "POST",
+    headers: { "Content-Type": "application/json",
+               "X-CSRF-Token": document.querySelector('meta[name="csrf-token"]').content },
     body: JSON.stringify(payload) });
   const data = await resp.json();
   if (data.ok) {

@@ -35,6 +35,7 @@
   </table>
   <form method="post" action="{{ url_for('consistency_fix') }}"
         onsubmit="return confirm('执行安全修复？只会删除孤儿记录、重置失效的流程绑定，不会删除任何作业文件。')">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <button type="submit">执行安全修复</button>
     <span class="muted small">文件丢失类问题只报告不自动处理，避免误删数据。</span>
   </form>

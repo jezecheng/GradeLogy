@@ -245,4 +245,6 @@ docker compose up -d --build
 ## 安全提示
 
 - `data.sqlite`（含 API Key 与密码哈希）、`uploads/`、`.secret_key`、`logs/` 均在 `.gitignore` 中，不会进入仓库
+- 所有写操作（POST/PUT/PATCH/DELETE）启用 CSRF 校验：表单需带隐藏域 `_csrf`（Jinja 里写 `{{ csrf_token() }}`），fetch 请求带请求头 `X-CSRF-Token`；漏带会直接 400
+- 学生只能访问自己提交的原件与本人提交下的裁剪图，教师版答案与其他学生的文件一律 403
 - 部署到公网前请：修改默认 admin 密码、配置 HTTPS 反向代理、显式设置 `SECRET_KEY`、把 AI Key 改为环境变量注入

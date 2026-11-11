@@ -53,12 +53,14 @@
 <div class="card">
   <p class="muted">还没有切分结果。先点「AI 识别切分」，AI 会按题裁剪小图、做 OCR，并给出判定与建议分数。</p>
   <form method="post" action="{{ url_for('submission_segment', sid=sub.id) }}">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <button>AI 识别切分</button>
   </form>
 </div>
 {% else %}
 <div class="card">
   <form method="post" action="{{ url_for('submission_review_save', sid=sub.id) }}">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     {% for q in questions %}
     <div class="review-row">
       <div class="review-col img-col">

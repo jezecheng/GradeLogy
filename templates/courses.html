@@ -6,6 +6,7 @@
 <div class="card">
   <h2>新建课程</h2>
   <form method="post" action="{{ url_for('course_create') }}" class="inline-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <input name="name" placeholder="课程名称，如：高二化学竞赛班" required>
     <input name="description" placeholder="简介（可选）">
     <button type="submit">创建</button>
@@ -21,6 +22,7 @@
     <p class="muted">{{ c.n_students }} 名学生 · {{ c.n_homeworks }} 份作业</p>
     <form method="post" action="{{ url_for('course_delete', cid=c.id) }}"
           onsubmit="return confirm('删除课程会同时删除其学生关系、作业和教案，确定？')">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
       <button class="danger small">删除课程</button>
     </form>
   </div>

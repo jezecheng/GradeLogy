@@ -7,6 +7,7 @@
 <div class="card">
   <h2>创建账号</h2>
   <form method="post" action="{{ url_for('admin_user_create') }}" class="inline-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <input name="username" placeholder="用户名（登录用，如 teacher01）" required>
     <input name="display_name" placeholder="姓名">
     <select name="role">
@@ -36,12 +37,14 @@
       <td class="muted">{{ u.created_at }}</td>
       <td class="actions">
         <form method="post" action="{{ url_for('admin_user_reset', uid=u.id) }}" class="inline">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
           <input name="password" placeholder="新密码" class="tiny">
           <button class="small">重置密码</button>
         </form>
         {% if u.id != g.user.id %}
         <form method="post" action="{{ url_for('admin_user_delete', uid=u.id) }}" class="inline"
               onsubmit="return confirm('删除账号 {{ u.username }}？其课程、作业与提交会一起删除。')">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
           <button class="danger small">删除</button>
         </form>
         {% endif %}
