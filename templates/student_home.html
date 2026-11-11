@@ -11,7 +11,7 @@
   <tr>
     <td><a href="{{ url_for('student_homework_page', hid=h.id) }}">{{ h.title }}</a></td>
     <td class="muted">{{ h.course_name }}</td>
-    <td class="muted">{{ h.deadline.replace('T',' ') or '—' }}</td>
+    <td class="muted">{{ (h.deadline or '').replace('T',' ') or '—' }}</td>
     <td>
       {% if h.my_subs %}
         <span class="tag tag-{{ h.my_status }}">{{ h.my_status }}</span>
@@ -19,9 +19,9 @@
         <span class="tag tag-未提交">未提交</span>
       {% endif %}
     </td>
-    <td>{{ h.my_score or '—' }}</td>
+    <td>{% if h.my_status == '已批改' %}{{ h.my_score or '—' }}{% else %}—{% endif %}</td>
     <td><a class="btn-link" href="{{ url_for('student_homework_page', hid=h.id) }}">
-      {{ '查看批改' if h.my_subs else '去提交' }}</a></td>
+      {% if not h.my_subs %}去提交{% elif h.my_status == '已批改' %}查看批改{% else %}查看进度{% endif %}</a></td>
   </tr>
   {% endfor %}
 </table>
