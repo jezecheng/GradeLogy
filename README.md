@@ -156,14 +156,18 @@ uploads/
 
 ```
 GradeLogy/
-├── app.py               # Flask 单体：路由 / 权限 / DB 迁移 / 批改入口（~1100 行）
+├── app.py               # Flask 单体：路由 / 权限 / DB 迁移 / 批改入口
+├── config.py            # 配置中心：路径、端口、密钥、AI 全部走环境变量
 ├── workflow.py          # 流程执行器：拓扑排序 + 默认管线 + 节点调度
 ├── utilities/           # 工具节点库（见上文）
-├── templates/           # Jinja2 模板：登录 / 三端页面 / 批改页 / 流程设计器
+├── templates/           # Jinja2 模板：登录 / 三端页面 / 批改页 / 流程设计器 / 系统维护
 ├── static/
 │   ├── style.css
 │   └── vendor/          # drawflow.min.js / drawflow.min.css（本地化）
+├── Dockerfile           # 单进程 gunicorn 多线程镜像，数据卷 /data
+├── docker-compose.yml   # 一条命令起服务，数据落 ./data
 ├── data.sqlite          # 首次启动自动创建（已 gitignore）
+├── logs/                # app.log，5MB 轮转（已 gitignore）
 └── uploads/             # 学生提交与批改附件（已 gitignore）
 ```
 
@@ -196,9 +200,49 @@ GradeLogy/
 - [ ] 混元视觉模型单页偶发漏题（可调 detect 提示词或多轮投票）
 - [ ] 批量导入学生名单（CSV）
 - [ ] 批改结果导出 Excel
-- [ ] 部署到公网（当前绑定 127.0.0.1，适合本机 / 内网使用）
+- [x] 局域网访问（默认监听 `0.0.0.0`，启动时打印手机可用的地址）
+- [x] Docker 部署与配置解耦
+- [x] 系统数据整体导出、数据一致性检查与修复
+
+## 配置项（环境变量）
+
+所有部署参数集中在 `config.py`，均可用环境变量覆盖；不设置时行为与本地开发一致。
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `DATA_DIR` | 项目目录 | 数据根目录，数据库/附件/日志默认都在其下 |
+| `DB_PATH` | `$DATA_DIR/data.sqlite` | SQLite 文件路径 |
+| `STORAGE_DIR` | `$DATA_DIR/uploads` | 上传件与批改附件目录 |
+| `LOG_DIR` | `$DATA_DIR/logs` | 日志目录（`app.log`，5MB 轮转保留 5 份） |
+| `HOST` / `PORT` | `0.0.0.0` / `5000` | 监听地址与端口 |
+| `MAX_UPLOAD_MB` | `20` | 单次上传上限 |
+| `SECRET_KEY` | 自动生成并存入 `$DATA_DIR/.secret_key` | 会话签名密钥，生产环境建议显式设置 |
+| `AI_API_URL` / `AI_API_KEY` / `AI_MODEL` | 空 | 设置后优先于页面上的 AI 设置，容器部署不必把 Key 存库 |
+| `LOG_LEVEL` | `INFO` | 日志级别 |
+
+## Docker 部署
+
+```bash
+docker compose up -d --build
+```
+
+> 国内网络拉不到 Docker Hub 时，先取消 `docker-compose.yml` 里 `args.BASE_IMAGE` 的注释，
+> 或手动指定：`docker build --build-arg BASE_IMAGE=docker.m.daocloud.io/library/python:3.12-slim -t gradelogy .`
+
+- 数据统一落在 `./data`（容器内挂载为 `/data`），备份就是拷走这个目录
+- 健康检查：`GET /healthz`，返回数据库与存储状态（异常时 503）
+- 容器内用 gunicorn 单进程 8 线程运行：SQLite 不适合多进程写入，单进程多线程可兼顾并发与数据安全
+- 批改是长耗时同步请求，`--timeout 1800` 避免被 worker 杀
+
+## 数据导出与一致性检查
+
+管理员登录后进入「系统维护」：
+
+- **导出全部数据**：生成 zip（数据库在线快照 + 全部附件 + `manifest.json`），用于备份或换机迁移
+- **一致性检查**：比对数据库记录与磁盘文件，报告孤儿题目、丢失的裁剪图/PDF、失效的流程绑定
+- **执行安全修复**：只清理孤儿记录与失效流程绑定；文件丢失类问题只报告、不自动删除，避免误删数据
 
 ## 安全提示
 
-- `data.sqlite`（含 API Key 与密码哈希）、`uploads/`、`.secret_key` 均在 `.gitignore` 中，不会进入仓库
-- 部署到公网前请：修改默认 admin 密码、配置 HTTPS 反向代理、更换 `SECRET_KEY`
+- `data.sqlite`（含 API Key 与密码哈希）、`uploads/`、`.secret_key`、`logs/` 均在 `.gitignore` 中，不会进入仓库
+- 部署到公网前请：修改默认 admin 密码、配置 HTTPS 反向代理、显式设置 `SECRET_KEY`、把 AI Key 改为环境变量注入

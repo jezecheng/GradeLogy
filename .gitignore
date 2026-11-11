@@ -7,6 +7,9 @@ __pycache__/
 .secret_key
 data.sqlite*
 server.log
+logs/
+# docker-compose 挂载的数据卷目录
+data/
 
 # 学生上传件与批改附件（含隐私，不入库）
 uploads/

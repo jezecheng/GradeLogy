@@ -4,28 +4,35 @@
 """
 import base64
 import json
+import logging
 import os
 import re
 import secrets
 import sqlite3
+import tempfile
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from datetime import datetime
 from functools import wraps
 
 from flask import (Flask, abort, flash, g, redirect, render_template, request,
-                   send_from_directory, session, url_for)
+                   send_file, send_from_directory, session, url_for)
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
+import config as cfg
 import workflow as wf
 from utilities import storage
 from utilities.prepare import prepare_answer_key
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-DB_PATH = os.path.join(BASE_DIR, "data.sqlite")
+cfg.ensure_dirs()
+cfg.setup_logging()
+
+BASE_DIR = cfg.BASE_DIR
+UPLOAD_DIR = cfg.STORAGE_DIR
+DB_PATH = cfg.DB_PATH
 ALLOWED_EXT = {"png", "jpg", "jpeg", "webp", "pdf"}
 IMG_EXT = {"png", "jpg", "jpeg", "webp"}
 
@@ -40,21 +47,24 @@ except ImportError:
 ROLE_LABEL = {"admin": "管理员", "teacher": "老师", "student": "学生"}
 
 def load_secret_key():
-    """密钥持久化，避免每次重启把所有人都登出。"""
-    path = os.path.join(BASE_DIR, ".secret_key")
+    """密钥持久化，避免每次重启把所有人都登出（容器里通过 SECRET_KEY 环境变量注入）。"""
+    path = cfg.SECRET_KEY_FILE
     if os.path.exists(path):
         with open(path) as f:
             return f.read().strip()
     key = secrets.token_hex(32)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         f.write(key)
     return key
 
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY") or load_secret_key()
-app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024  # 20MB
+app.config["SECRET_KEY"] = cfg.SECRET_KEY or load_secret_key()
+app.config["MAX_CONTENT_LENGTH"] = cfg.MAX_UPLOAD_MB * 1024 * 1024
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+log = logging.getLogger("gradelogy")
 
 
 def _json_or_none(value):
@@ -224,7 +234,7 @@ def match_answer(no, text, window=400):
 # ---------- 数据库 ----------
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
+        g.db = sqlite3.connect(DB_PATH, timeout=10)
         g.db.row_factory = sqlite3.Row
     return g.db
 
@@ -239,6 +249,9 @@ def close_db(_=None):
 def init_db():
     # 旧版（无账号体系）数据库与本版不兼容，备份后重建；旧库当时仅有测试数据
     con = sqlite3.connect(DB_PATH)
+    # WAL 允许读写并发（长批改占线程时页面仍可访问），busy_timeout 避免瞬时锁直接报错
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA busy_timeout=5000")
     cols = {r[1] for r in con.execute("PRAGMA table_info(homeworks)")}
     if "token" in cols:
         con.close()
@@ -693,11 +706,16 @@ def submission_segment(sid):
     answer_candidates = [{"no": r["no"], "answer": r["answer_text"], "stem": r["stem"] or ""}
                          for r in answer_rows]
 
+    log.info("开始批改 submission=%s homework=%s student=%s file=%s pipeline=%s",
+             sid, hw["id"], student_name, sub["file_path"], hw["pipeline_id"])
     gen = run_grading(g.user["id"], sub["file_path"], hw["answer_pdf"], hw["pipeline_id"],
                       attach, answer_key, answer_candidates)
     if gen["error"]:
+        log.warning("批改失败 submission=%s 原因=%s", sid, gen["error"])
         flash(gen["error"])
         return redirect(url_for("homework_detail", hid=sub["homework_id"]))
+    log.info("批改完成 submission=%s 题数=%s 页数=%s 错误数=%s",
+             sid, len(gen["questions"]), len(gen["pages"] or []), len(gen.get("errors") or []))
 
     db.execute("DELETE FROM questions WHERE submission_id=?", (sid,))
     pages = gen["pages"] or [sub["file_path"]]
@@ -1491,10 +1509,140 @@ def homework_pipeline(hid):
     return redirect(url_for("homework_detail", hid=hid))
 
 
+def _consistency_issues():
+    """扫描数据库记录与磁盘文件的偏差。fixable=True 的项可在页面上安全自动修复。"""
+    db = get_db()
+    issues = []
+
+    def add(code, level, msg, rows, fixable=False, detail=""):
+        if rows:
+            issues.append({"code": code, "level": level, "msg": msg, "count": len(rows),
+                           "sample": ", ".join(str(r[0]) for r in rows[:8]) or detail,
+                           "fixable": fixable})
+
+    def missing(rows, col):
+        return [r for r in rows
+                if r[col] and not os.path.exists(os.path.join(UPLOAD_DIR, r[col]))]
+
+    add("orphan_questions", "error", "题目记录指向已删除的提交",
+        [(r["id"],) for r in db.execute(
+            "SELECT q.id FROM questions q LEFT JOIN submissions s ON s.id=q.submission_id "
+            "WHERE s.id IS NULL")], fixable=True, detail="可安全删除")
+
+    add("missing_submission_file", "error", "提交记录对应的作业文件已丢失",
+        [(r["id"],) for r in missing(
+            db.execute("SELECT id, file_path FROM submissions").fetchall(), "file_path")],
+        detail="原文件不可下载，批改结果仍在")
+
+    add("missing_question_image", "warn", "题目裁剪图丢失",
+        [(r["id"],) for r in missing(
+            db.execute("SELECT id, image_path FROM questions WHERE image_path != ''").fetchall(),
+            "image_path")], detail="批改页会显示破图，重跑批改可恢复")
+
+    if db.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                  "AND name='homework_questions'").fetchone():
+        add("missing_answer_image", "warn", "教师版题目图丢失",
+            [(r["id"],) for r in missing(
+                db.execute("SELECT id, image_path FROM homework_questions "
+                           "WHERE image_path != ''").fetchall(), "image_path")],
+            detail="重新提取标准答案可恢复")
+
+    add("dangling_pipeline", "error", "作业绑定的批改流程已不存在",
+        [(r["id"],) for r in db.execute(
+            "SELECT h.id FROM homeworks h LEFT JOIN pipelines p ON p.id=h.pipeline_id "
+            "WHERE h.pipeline_id > 0 AND p.id IS NULL")], fixable=True,
+        detail="修复后退回默认流程")
+
+    add("missing_answer_pdf", "warn", "作业的教师版 PDF 丢失",
+        [(r["id"],) for r in missing(
+            db.execute("SELECT id, answer_pdf FROM homeworks WHERE answer_pdf != ''").fetchall(),
+            "answer_pdf")], detail="已缓存的答案不受影响，但无法重新提取")
+    return issues
+
+
+@app.route("/admin/consistency")
+@role_required("admin")
+def consistency_page():
+    stats = {t: get_db().execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+             for t in ("users", "courses", "homeworks", "submissions", "questions")}
+    return render_template("consistency.html", issues=_consistency_issues(), stats=stats,
+                           data_dir=cfg.DATA_DIR, db_path=DB_PATH)
+
+
+@app.route("/admin/consistency/fix", methods=["POST"])
+@role_required("admin")
+def consistency_fix():
+    db = get_db()
+    n1 = db.execute("DELETE FROM questions WHERE submission_id NOT IN "
+                    "(SELECT id FROM submissions)").rowcount
+    n2 = db.execute("UPDATE homeworks SET pipeline_id=0 WHERE pipeline_id > 0 AND "
+                    "pipeline_id NOT IN (SELECT id FROM pipelines)").rowcount
+    db.commit()
+    log.info("一致性修复：孤儿题目 %s 条，失效流程绑定 %s 条", n1, n2)
+    flash(f"已修复：清理孤儿题目 {n1} 条，重置失效流程绑定 {n2} 条")
+    return redirect(url_for("consistency_page"))
+
+
+@app.route("/admin/export")
+@role_required("admin")
+def admin_export():
+    """整体导出数据库快照 + 全部附件 + manifest，用于备份或迁移到新机器。"""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    snap = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False)
+    snap.close()
+    src = sqlite3.connect(DB_PATH)
+    dst = sqlite3.connect(snap.name)
+    try:
+        with dst:
+            src.backup(dst)  # 在线备份，避免 WAL 下拷到半截数据
+    finally:
+        src.close()
+        dst.close()
+
+    db = get_db()
+    manifest = {
+        "app": "GradeLogy", "version": cfg.APP_VERSION,
+        "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "counts": {t: db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                   for t in ("users", "courses", "homeworks", "submissions", "questions",
+                             "pipelines")},
+    }
+    out = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    out.close()
+    try:
+        with zipfile.ZipFile(out.name, "w", zipfile.ZIP_DEFLATED) as z:
+            z.write(snap.name, "data.sqlite")
+            for root, _, files in os.walk(UPLOAD_DIR):
+                for name in files:
+                    full = os.path.join(root, name)
+                    z.write(full, os.path.join("uploads", os.path.relpath(full, UPLOAD_DIR)))
+            z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+    finally:
+        os.remove(snap.name)
+    log.info("导出系统数据：%s", ts)
+    return send_file(out.name, as_attachment=True, download_name=f"gradelogy_{ts}.zip")
+
+
 @app.route("/files/<path:filename>")
 @login_required
 def uploaded_file(filename):
     return send_from_directory(UPLOAD_DIR, filename)
+
+
+@app.route("/healthz")
+def healthz():
+    """容器健康检查：不要求登录，只报告数据库与存储是否可用。"""
+    checks, ok = {}, True
+    try:
+        get_db().execute("SELECT 1").fetchone()
+        checks["db"] = "ok"
+    except Exception as e:  # noqa: BLE001 健康检查需要兜住一切异常
+        checks["db"] = f"error: {e}"
+        ok = False
+    checks["storage"] = "ok" if os.access(UPLOAD_DIR, os.W_OK) else "readonly"
+    ok = ok and checks["storage"] == "ok"
+    return {"status": "ok" if ok else "degraded",
+            "version": cfg.APP_VERSION, "checks": checks}, (200 if ok else 503)
 
 
 def _lan_ip():
@@ -1510,10 +1658,13 @@ def _lan_ip():
         s.close()
 
 
+# 模块导入时即完成建表与迁移，gunicorn 直接加载 app:app 也能拿到完整 schema
+init_db()
+
+
 if __name__ == "__main__":
-    init_db()
-    host = os.environ.get("HOST", "0.0.0.0")
-    port = int(os.environ.get("PORT", "5000"))
+    host = cfg.HOST
+    port = cfg.PORT
     ip = _lan_ip()
     print("\n  本机访问：http://127.0.0.1:%d" % port)
     if ip:

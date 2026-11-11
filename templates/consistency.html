@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}系统维护{% endblock %}
+{% block content %}
+<h1>系统维护</h1>
+
+<div class="card">
+  <h2>数据概览</h2>
+  <table class="card-table">
+    <tr><th>用户</th><th>课程</th><th>作业</th><th>提交</th><th>题目记录</th></tr>
+    <tr>
+      <td>{{ stats.users }}</td><td>{{ stats.courses }}</td><td>{{ stats.homeworks }}</td>
+      <td>{{ stats.submissions }}</td><td>{{ stats.questions }}</td>
+    </tr>
+  </table>
+  <p class="muted small">数据目录：<code>{{ data_dir }}</code><br>数据库：<code>{{ db_path }}</code></p>
+  <p><a class="btn" href="{{ url_for('admin_export') }}">导出全部数据（zip）</a>
+    <span class="muted small">包含数据库快照、全部附件与 manifest，可用于备份或迁移。</span></p>
+</div>
+
+<div class="card">
+  <h2>一致性检查</h2>
+  {% if issues %}
+  <table class="card-table">
+    <tr><th>级别</th><th>问题</th><th>数量</th><th>涉及记录 / 说明</th><th></th></tr>
+    {% for i in issues %}
+    <tr>
+      <td>{% if i.level == 'error' %}<span class="verdict verdict-wrong">错误</span>
+          {% else %}<span class="verdict verdict-half">警告</span>{% endif %}</td>
+      <td>{{ i.msg }}</td>
+      <td>{{ i.count }}</td>
+      <td class="muted small">{{ i.sample }}</td>
+      <td>{% if i.fixable %}<span class="small">可自动修复</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <form method="post" action="{{ url_for('consistency_fix') }}"
+        onsubmit="return confirm('执行安全修复？只会删除孤儿记录、重置失效的流程绑定，不会删除任何作业文件。')">
+    <button type="submit">执行安全修复</button>
+    <span class="muted small">文件丢失类问题只报告不自动处理，避免误删数据。</span>
+  </form>
+  {% else %}
+  <p class="muted">未发现不一致：数据库记录与磁盘文件完全对应。</p>
+  {% endif %}
+</div>
+{% endblock %}

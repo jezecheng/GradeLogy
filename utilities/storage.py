@@ -12,9 +12,11 @@ import re
 import shutil
 from datetime import datetime
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-ATTACH_ROOT = os.path.join(UPLOAD_DIR, "attachments")
+import config
+
+BASE_DIR = config.BASE_DIR
+UPLOAD_DIR = config.STORAGE_DIR
+ATTACH_ROOT = config.ATTACH_ROOT
 
 
 def safe_name(text, default="未命名"):

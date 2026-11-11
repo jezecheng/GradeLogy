@@ -1,0 +1,14 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+data.sqlite
+data.sqlite-*
+uploads
+logs
+.secret_key
+server.log
+*.log
+.DS_Store
+.pytest_cache

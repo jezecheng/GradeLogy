@@ -7,9 +7,11 @@ import time
 import urllib.error
 import urllib.request
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-DB_PATH = os.path.join(BASE_DIR, "data.sqlite")
+import config
+
+BASE_DIR = config.BASE_DIR
+UPLOAD_DIR = config.STORAGE_DIR
+DB_PATH = config.DB_PATH
 
 # macOS 自带 Python 往往没有 CA 证书链，用 certifi 兜底
 try:
@@ -88,7 +90,8 @@ def extract_json(text):
 def resolve_config(teacher_id=None):
     """解析 AI 配置。不传 teacher_id 时，取 settings 表里第一个配了 api_key 的老师，
     方便 POC 命令行不登录也能直接跑。返回 {api_url, api_key, model, extra}。"""
-    cfg = {"api_url": "", "api_key": "", "model": "", "extra": ""}
+    cfg = {"api_url": config.AI_API_URL.rstrip("/"), "api_key": config.AI_API_KEY,
+           "model": config.AI_MODEL, "extra": ""}
     if not os.path.exists(DB_PATH):
         return cfg
     con = sqlite3.connect(DB_PATH)
@@ -105,10 +108,18 @@ def resolve_config(teacher_id=None):
     finally:
         con.close()
     d = dict(rows)
-    return {"api_url": (d.get("ai_api_url") or "").rstrip("/"),
-            "api_key": d.get("ai_api_key") or "",
-            "model": d.get("ai_model") or "",
-            "extra": (d.get("ai_prompt") or "").strip()}
+    result = {"api_url": (d.get("ai_api_url") or "").rstrip("/"),
+              "api_key": d.get("ai_api_key") or "",
+              "model": d.get("ai_model") or "",
+              "extra": (d.get("ai_prompt") or "").strip()}
+    # 环境变量优先：容器部署时 Key 走 secrets/env，不落数据库
+    if config.AI_API_URL:
+        result["api_url"] = config.AI_API_URL.rstrip("/")
+    if config.AI_API_KEY:
+        result["api_key"] = config.AI_API_KEY
+    if config.AI_MODEL:
+        result["model"] = config.AI_MODEL
+    return result
 
 
 def resolve_cli_config(args):
