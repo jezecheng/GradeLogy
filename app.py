@@ -860,11 +860,16 @@ def submission_review_save(sid):
     own_course(hw["course_id"])
     for q in db.execute("SELECT id FROM questions WHERE submission_id=?", (sid,)).fetchall():
         qid = q["id"]
-        db.execute("UPDATE questions SET ocr_text=?, standard_answer=?, score=?, note=? WHERE id=?",
-                   (request.form.get(f"ocr_{qid}", "").strip(),
-                    request.form.get(f"standard_{qid}", "").strip(),
-                    request.form.get(f"score_{qid}", "").strip(),
-                    request.form.get(f"note_{qid}", "").strip(), qid))
+        fields = {"ocr_text": request.form.get(f"ocr_{qid}", "").strip(),
+                  "standard_answer": request.form.get(f"standard_{qid}", "").strip(),
+                  "score": request.form.get(f"score_{qid}", "").strip(),
+                  "note": request.form.get(f"note_{qid}", "").strip()}
+        # 判定可人工修正；旧页面没有该字段时保持原值不动
+        if f"verdict_{qid}" in request.form:
+            v = request.form.get(f"verdict_{qid}", "").strip()
+            fields["verdict"] = v if v in ("", "对", "半对", "错", "无法判定") else ""
+        sets = ", ".join(f"{k}=?" for k in fields)
+        db.execute(f"UPDATE questions SET {sets} WHERE id=?", (*fields.values(), qid))
     db.execute("UPDATE submissions SET score=?, feedback=?, status='已批改', grader=?, "
                "updated_at=CURRENT_TIMESTAMP WHERE id=?",
                (request.form.get("total_score", "").strip(),
@@ -893,6 +898,85 @@ def submission_correct(sid):
     db.commit()
     flash("批改结果已更新")
     return redirect(url_for("homework_detail", hid=sub["homework_id"]))
+
+
+# ---------- 错题本 ----------
+# 判定为「错」「半对」的题目都会进入错题本；仅统计已发布（已批改）的提交
+WRONG_VERDICTS = ("错", "半对")
+
+
+@app.route("/wrongbook")
+@login_required
+def wrongbook():
+    """错题本：按课程汇总，老师看自己课程下的学生，学生只看自己。"""
+    db = get_db()
+    cid = request.args.get("course", type=int)
+    sid = request.args.get("student", type=int)
+    is_teacher = g.user["role"] == "teacher"
+    if not is_teacher and g.user["role"] != "student":
+        abort(403)
+
+    if is_teacher:
+        courses = db.execute("""
+            SELECT c.id, c.name,
+                   COUNT(q.id) AS n_wrong,
+                   COUNT(DISTINCT CASE WHEN q.id IS NOT NULL THEN s.student_id END) AS n_students
+            FROM courses c
+            LEFT JOIN homeworks h ON h.course_id=c.id
+            LEFT JOIN submissions s ON s.homework_id=h.id AND s.status='已批改'
+            LEFT JOIN questions q ON q.submission_id=s.id AND q.verdict IN ('错','半对')
+            WHERE c.teacher_id=?
+            GROUP BY c.id ORDER BY c.id DESC""", (g.user["id"],)).fetchall()
+        if cid:
+            own_course(cid)
+    else:
+        courses = db.execute("""
+            SELECT c.id, c.name,
+                   COUNT(q.id) AS n_wrong,
+                   COUNT(DISTINCT CASE WHEN q.id IS NOT NULL THEN h.id END) AS n_homeworks
+            FROM courses c
+            JOIN enrollments e ON e.course_id=c.id AND e.student_id=?
+            LEFT JOIN homeworks h ON h.course_id=c.id
+            LEFT JOIN submissions s ON s.homework_id=h.id AND s.student_id=? AND s.status='已批改'
+            LEFT JOIN questions q ON q.submission_id=s.id AND q.verdict IN ('错','半对')
+            GROUP BY c.id ORDER BY c.id DESC""", (g.user["id"], g.user["id"])).fetchall()
+
+    course = next((c for c in courses if c["id"] == cid), None) if cid else None
+    rows, students = [], []
+    if course:
+        where = ["c.id=?", "s.status='已批改'", "q.verdict IN ('错','半对')"]
+        args = [cid]
+        if is_teacher:
+            if sid:
+                where.append("s.student_id=?")
+                args.append(sid)
+            students = db.execute("""
+                SELECT u.id, u.display_name, COUNT(*) AS n
+                FROM questions q
+                JOIN submissions s ON s.id=q.submission_id
+                JOIN homeworks h ON h.id=s.homework_id
+                JOIN users u ON u.id=s.student_id
+                WHERE h.course_id=? AND s.status='已批改' AND q.verdict IN ('错','半对')
+                GROUP BY u.id ORDER BY u.display_name""", (cid,)).fetchall()
+        else:
+            where.append("s.student_id=?")
+            args.append(g.user["id"])
+        rows = db.execute(f"""
+            SELECT q.id, q.no, q.verdict, q.score, q.max_score, q.note, q.ai_comment,
+                   q.ocr_text, q.standard_answer, q.image_path, q.page_no,
+                   s.id AS sid, h.id AS hid, h.title AS hw_title,
+                   c.name AS course_name, u.display_name AS student_name
+            FROM questions q
+            JOIN submissions s ON s.id=q.submission_id
+            JOIN homeworks h ON h.id=s.homework_id
+            JOIN courses c ON c.id=h.course_id
+            JOIN users u ON u.id=s.student_id
+            WHERE {' AND '.join(where)}
+            ORDER BY u.display_name, h.id DESC, q.page_no, q.id""", args).fetchall()
+
+    return render_template("wrongbook.html", courses=courses, course=course,
+                           rows=rows, students=students, cur_student=sid,
+                           is_teacher=is_teacher)
 
 
 # ---------- 教案 ----------

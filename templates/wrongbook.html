@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}错题本{% endblock %}
+{% block content %}
+{% set verdict_cls = {'对': 'right', '半对': 'partial', '错': 'wrong', '无法判定': 'unknown'} %}
+<h1>错题本</h1>
+
+{% if not course %}
+<p class="muted small">
+  {% if is_teacher %}
+  按课程汇总学生被判「错」「半对」的题目（仅统计已发布批改结果的提交），可逐题回看学生作答、评语与标准答案。
+  {% else %}
+  你在各课程里被判「错」「半对」的题目都收在这里，按课程整理，方便集中复习。
+  {% endif %}
+</p>
+<div class="card">
+  {% if courses %}
+  <table class="card-table">
+    <tr>
+      <th>课程</th><th>待复习错题</th>
+      {% if is_teacher %}<th>涉及学生</th>{% else %}<th>涉及作业</th>{% endif %}
+      <th></th>
+    </tr>
+    {% for c in courses %}
+    <tr>
+      <td><a href="{{ url_for('wrongbook', course=c.id) }}">{{ c.name }}</a></td>
+      <td>{% if c.n_wrong %}<span class="score">{{ c.n_wrong }}</span>{% else %}<span class="muted">0</span>{% endif %}</td>
+      <td class="muted">{% if is_teacher %}{{ c.n_students }} 人{% else %}{{ c.n_homeworks }} 份作业{% endif %}</td>
+      <td><a class="btn-link" href="{{ url_for('wrongbook', course=c.id) }}">查看错题</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">
+    {% if is_teacher %}你还没有课程。{% else %}你还没有加入任何课程。{% endif %}
+  </p>
+  {% endif %}
+</div>
+
+{% else %}
+<p class="small">
+  <a href="{{ url_for('wrongbook') }}">← 全部课程</a>
+  / {{ course.name }}
+</p>
+
+{% if is_teacher and students %}
+{% set total = students | sum(attribute='n') %}
+<p class="chips">
+  <a class="chip {% if not cur_student %}on{% endif %}"
+     href="{{ url_for('wrongbook', course=course.id) }}">全部学生（{{ total }}）</a>
+  {% for s in students %}
+  <a class="chip {% if cur_student == s.id %}on{% endif %}"
+     href="{{ url_for('wrongbook', course=course.id, student=s.id) }}">{{ s.display_name }}（{{ s.n }}）</a>
+  {% endfor %}
+</p>
+{% endif %}
+
+{% if rows %}
+{% for r in rows %}
+<div class="sub-card">
+  <div class="sub-head">
+    {% if is_teacher %}<strong>{{ r.student_name }}</strong>{% endif %}
+    <strong>第 {{ r.no }} 题</strong>
+    <span class="verdict verdict-{{ verdict_cls.get(r.verdict, '') }}">{{ r.verdict }}</span>
+    {% if r.score or r.max_score %}
+    <span class="score">{{ r.score or '—' }}{% if r.max_score %} / {{ '%g'|format(r.max_score|float) }}{% endif %}</span>
+    {% endif %}
+    <span class="muted small">{{ r.hw_title }}</span>
+    <a class="btn-link"
+       href="{% if is_teacher %}{{ url_for('submission_review', sid=r.sid) }}{% else %}{{ url_for('student_homework_page', hid=r.hid) }}{% endif %}">
+      {% if is_teacher %}查看原批改{% else %}查看本次作业{% endif %}
+    </a>
+  </div>
+  <div class="wrong-body">
+    {% if r.image_path %}
+    <a href="{{ url_for('uploaded_file', filename=r.image_path) }}" target="_blank">
+      <img class="crop-img wrong-img" src="{{ url_for('uploaded_file', filename=r.image_path) }}"
+           alt="第 {{ r.no }} 题">
+    </a>
+    {% endif %}
+    <div class="wrong-info">
+      <p class="small"><strong>评语：</strong>{{ r.note or r.ai_comment or '—' }}</p>
+      {% if r.ocr_text %}
+      <details class="small">
+        <summary>学生作答（OCR）</summary>
+        <pre class="feedback">{{ r.ocr_text }}</pre>
+      </details>
+      {% endif %}
+      {% if r.standard_answer %}
+      <details class="small">
+        <summary>标准答案</summary>
+        <pre class="feedback">{{ r.standard_answer }}</pre>
+      </details>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endfor %}
+{% else %}
+<div class="card">
+  <p class="muted">
+    {% if is_teacher %}该课程暂无已发布的错题。{% else %}这门课暂时没有错题，继续保持。{% endif %}
+  </p>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

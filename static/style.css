@@ -104,3 +104,19 @@ details summary { cursor: pointer; color: #1456f0; }
 .weak-list { margin: 6px 0 8px 18px; font-size: 14px; }
 .weak-list li { margin-bottom: 4px; }
 @media (max-width: 860px) { .review-row, .total-row { grid-template-columns: 1fr; } }
+
+/* 错题本 */
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.chip { display: inline-block; padding: 3px 12px; border-radius: 999px; font-size: 13px;
+        background: #eef1f5; color: #4a5260; text-decoration: none; }
+.chip:hover { background: #e3e8f0; }
+.chip.on { background: #1456f0; color: #fff; }
+.wrong-body { display: flex; gap: 14px; margin-top: 10px; align-items: flex-start; }
+.wrong-img { width: 220px; flex: none; }
+.wrong-info { flex: 1; min-width: 0; }
+.wrong-info p { margin: 0 0 6px; }
+.wrong-info details { margin-bottom: 6px; }
+@media (max-width: 640px) {
+  .wrong-body { flex-direction: column; }
+  .wrong-img { width: 100%; }
+}

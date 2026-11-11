@@ -16,11 +16,13 @@
     <a href="{{ url_for('consistency_page') }}">系统维护</a>
   {% elif g.user.role == 'teacher' %}
     <a href="{{ url_for('courses') }}">我的课程</a>
+    <a href="{{ url_for('wrongbook') }}">错题本</a>
     <a href="{{ url_for('workflow_list') }}">批改流程</a>
     <a href="{{ url_for('attachments') }}">附件</a>
     <a href="{{ url_for('settings_page') }}">AI 设置</a>
   {% else %}
     <a href="{{ url_for('student_home') }}">我的作业</a>
+    <a href="{{ url_for('wrongbook') }}">错题本</a>
   {% endif %}
   <span class="nav-right">
     <a href="{{ url_for('change_password') }}">{{ g.user.display_name }}</a>

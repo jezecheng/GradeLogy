@@ -83,6 +83,14 @@
           {% endif %}
         </div>
         <textarea name="ocr_{{ q.id }}" rows="7">{{ q.ocr_text }}</textarea>
+        <label>本题判定
+          <select name="verdict_{{ q.id }}" class="small">
+            <option value="" {% if not q.verdict %}selected{% endif %}>（未判定）</option>
+            {% for v in ['对', '半对', '错', '无法判定'] %}
+            <option value="{{ v }}" {% if q.verdict == v %}selected{% endif %}>{{ v }}</option>
+            {% endfor %}
+          </select>
+        </label>
         <label>本题得分{% if q.max_score %}（满分 {{ '%g'|format(q.max_score|float) }}）{% endif %}<input name="score_{{ q.id }}" value="{{ q.score }}" placeholder="如 4"></label>
         <label>本题评语 <textarea name="note_{{ q.id }}" rows="2">{{ q.note }}</textarea></label>
       </div>
