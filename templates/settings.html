@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 {% block title %}AI 设置{% endblock %}
 {% block content %}
-<h1>AI 识别设置</h1>
+<h1>AI 批阅设置</h1>
 
 <div class="card narrow">
   <h2>演示模式（没有 API 时用）</h2>
-  <p class="muted small">勾选后点「AI 识别切分」不会联网：按页纵向等分成 4 段生成占位题目，
-    你可以照常体验三栏批改、修改 OCR、填写标准答案、保存和查看学生端效果。真实使用时请取消勾选。</p>
+  <p class="muted small">勾选后点「AI 批阅」不会联网：生成 6 道占位结果，
+    你可以照常体验逐题核对、修改 OCR、填写标准答案、保存和查看学生端效果。真实使用时请取消勾选。</p>
   <form method="post">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <input type="hidden" name="demo_only" value="1">
@@ -21,10 +21,10 @@
 
 <div class="card narrow">
   <h2>真实接口</h2>
-  <p class="muted small">需要支持图片输入的多模态模型（要能输出每题的坐标）。填 OpenAI 兼容的基地址：</p>
-  <p class="muted small">腾讯混元备选模型：hunyuan-turbos-vision、hunyuan-standard-vision；纯文本模型（如 hunyuan-turbos-latest）无法识别扫描件。</p>
+  <p class="muted small">需要支持 PDF 输入的多模态模型：批阅时会把学生作业与标准答案两份 PDF 一起发送。填 OpenAI 兼容的基地址：</p>
+  <p class="muted small">纯文本模型无法读取扫描件；若模型不支持 PDF 文件输入，请改用支持 PDF 的视觉模型。</p>
   <table class="small">
-    <tr><th>服务</th><th>基地址</th><th>模型示例</th></tr>
+    <tr><th>服务</th><th>基地址</th><th>模型示例（需支持 PDF）</th></tr>
     <tr><td>智谱（有免费模型）</td><td>https://open.bigmodel.cn/api/paas/v4</td><td>glm-4.6v-flash</td></tr>
     <tr><td>腾讯混元</td><td>https://api.hunyuan.cloud.tencent.com/v1</td><td>hunyuan-vision</td></tr>
     <tr><td>阿里百炼（有免费额度）</td><td>https://dashscope.aliyuncs.com/compatible-mode/v1</td><td>qwen-vl-max</td></tr>
@@ -44,8 +44,8 @@
     <label>模型
       <input name="ai_model" value="{{ cfg.ai_model }}" placeholder="glm-4.6v-flash">
     </label>
-    <label>额外要求（可选，会追加到识别提示词后面）
-      <textarea name="ai_prompt" rows="4" placeholder="如：按 1-10 题切分；有机题要识别结构简式。">{{ cfg.ai_prompt }}</textarea>
+    <label>额外要求（可选，会追加到批阅提示词后面）
+      <textarea name="ai_prompt" rows="4" placeholder="如：按题号逐题批阅；有机题要识别结构简式。">{{ cfg.ai_prompt }}</textarea>
     </label>
     <label class="check-line">
       <input type="checkbox" name="ai_demo" value="1" {% if cfg.ai_demo == '1' %}checked{% endif %}

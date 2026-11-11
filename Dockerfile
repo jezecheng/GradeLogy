@@ -13,7 +13,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# pypdfium2 自带上游二进制，无需额外系统库；只补时区数据
+# 只补时区数据；PDF 由模型直接读取，无需本地渲染库
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tzdata \
     && rm -rf /var/lib/apt/lists/*

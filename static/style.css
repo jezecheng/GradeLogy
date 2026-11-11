@@ -76,13 +76,12 @@ details summary { cursor: pointer; color: #1456f0; }
 .flash { background: #e6f6ec; color: #18794e; padding: 10px 14px;
          border-radius: 6px; margin-bottom: 14px; }
 
-/* 逐题批改三栏布局 */
-.review-row { display: grid; grid-template-columns: 260px 1fr 1fr; gap: 16px;
+/* 逐题批改两栏布局：左侧学生作答与评分，右侧标准答案 */
+.review-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
               padding: 16px 0; border-bottom: 1px solid #eef0f3; }
 .review-row:last-of-type { border-bottom: none; }
 .review-col { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .col-title { font-size: 13px; color: #8a8f99; }
-.crop-img { width: 100%; border: 1px solid #e5e8ee; border-radius: 6px; display: block; }
 .total-row { grid-template-columns: 200px 1fr; background: #fafbfc;
              border-radius: 8px; padding: 14px; margin-top: 12px; }
 .save-bar { display: flex; gap: 12px; align-items: center; margin-top: 16px; }
@@ -104,6 +103,21 @@ details summary { cursor: pointer; color: #1456f0; }
 .weak-list { margin: 6px 0 8px 18px; font-size: 14px; }
 .weak-list li { margin-bottom: 4px; }
 @media (max-width: 860px) { .review-row, .total-row { grid-template-columns: 1fr; } }
+
+/* 批改页右侧同页 PDF 面板：打开后左侧内容自动收窄，不跳新标签 */
+.pdf-panel { position: fixed; top: 0; right: 0; height: 100vh; width: 46vw; min-width: 400px;
+             background: #fff; border-left: 1px solid #e5e8ee; box-shadow: -4px 0 16px rgba(20, 30, 50, .12);
+             display: flex; flex-direction: column; z-index: 50; }
+.pdf-panel[hidden] { display: none; }
+.pdf-panel-bar { display: flex; justify-content: space-between; align-items: center;
+                 padding: 10px 14px; border-bottom: 1px solid #e5e8ee; }
+.pdf-panel-actions { display: flex; gap: 12px; align-items: center; }
+.pdf-panel iframe { flex: 1; width: 100%; border: 0; }
+body.pdf-open .container { max-width: none; margin: 24px calc(46vw + 24px) 24px 16px; }
+@media (max-width: 1100px) {
+  body.pdf-open .container { margin-right: 16px; }
+  .pdf-panel { width: 100vw; min-width: 0; }
+}
 
 /* 错题本 */
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }

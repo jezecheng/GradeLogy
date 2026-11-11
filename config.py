@@ -22,7 +22,6 @@ DATA_DIR = os.path.abspath(_env("DATA_DIR", BASE_DIR))
 
 DB_PATH = os.path.abspath(_env("DB_PATH", os.path.join(DATA_DIR, "data.sqlite")))
 STORAGE_DIR = os.path.abspath(_env("STORAGE_DIR", os.path.join(DATA_DIR, "uploads")))
-ATTACH_SUBDIR = _env("ATTACH_SUBDIR", "attachments")
 LOG_DIR = os.path.abspath(_env("LOG_DIR", os.path.join(DATA_DIR, "logs")))
 
 HOST = _env("HOST", "0.0.0.0")
@@ -47,16 +46,10 @@ BACKUP_DIR = os.path.abspath(_env("BACKUP_DIR", os.path.join(DATA_DIR, "backups"
 BACKUP_KEEP = int(_env("BACKUP_KEEP", "7"))
 AUTO_BACKUP = _env("AUTO_BACKUP", "1").lower() not in ("0", "false", "no", "off")
 
-# 单次批改的并发出图/出题线程数（API 限额低时可调小）
-AI_WORKERS = int(_env("AI_WORKERS", "4"))
-
-# 附件目录绝对路径（批改产物、教师版题目图都放这里）
-ATTACH_ROOT = os.path.join(STORAGE_DIR, ATTACH_SUBDIR)
-
 
 def ensure_dirs():
     """确保所有数据目录存在；容器首次启动、只读镜像下都靠它兜底。"""
-    for path in (DATA_DIR, STORAGE_DIR, ATTACH_ROOT, LOG_DIR, BACKUP_DIR,
+    for path in (DATA_DIR, STORAGE_DIR, LOG_DIR, BACKUP_DIR,
                  os.path.dirname(DB_PATH)):
         os.makedirs(path, exist_ok=True)
 

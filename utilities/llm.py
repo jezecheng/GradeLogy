@@ -25,10 +25,11 @@ except ImportError:
     pass
 
 
-def chat(api_url, api_key, model, content, max_tokens=1500):
+def chat(api_url, api_key, model, content, max_tokens=1500, timeout=180):
     """通用 OpenAI 兼容调用，返回 (reply, finish_reason, error)。失败自动重试（含 429 退避）。
 
     每次调用记录模型、耗时与结束原因；限流、失败、输出截断记 warning，便于排查额度与 max_tokens 问题。
+    timeout: 单次请求超时秒数；整份 PDF 批阅耗时较长，调用方可调大。
     """
     body = json.dumps({"model": model,
                        "messages": [{"role": "user", "content": content}],
@@ -39,7 +40,7 @@ def chat(api_url, api_key, model, content, max_tokens=1500):
     started = time.perf_counter()
     for attempt in range(3):
         try:
-            with urllib.request.urlopen(req, timeout=180) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read())
             choice = data["choices"][0]
             finish = (choice.get("finish_reason") or "").lower()

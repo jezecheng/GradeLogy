@@ -69,7 +69,7 @@
     {% for h in homeworks %}
     <tr>
       <td><a href="{{ url_for('homework_detail', hid=h.id) }}">{{ h.title }}</a></td>
-      <td class="muted">{{ h.deadline.replace('T',' ') or '—' }}</td>
+      <td class="muted">{{ (h.deadline or '').replace('T',' ') or '—' }}</td>
       <td>{{ h.n_subs }} / {{ h.n_students }}</td>
       <td>{% if h.answer_pdf %}<a href="{{ url_for('uploaded_file', filename=h.answer_pdf) }}">PDF</a>{% else %}—{% endif %}</td>
       <td>

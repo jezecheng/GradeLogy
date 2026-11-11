@@ -3,17 +3,18 @@
 {% block content %}
 {% set summary = sub.ai_summary|fromjson %}
 {% set verdict_cls = {'对': 'right', '半对': 'partial', '错': 'wrong', '无法判定': 'unknown'} %}
+{% set pdf_url = url_for('uploaded_file', filename=sub.file_path) %}
 <p><a href="{{ url_for('homework_detail', hid=hw.id) }}">← 返回 {{ hw.title }}</a></p>
 <h1>逐题批改：{{ sub.display_name }}</h1>
 <p class="muted">
   {{ sub.username }} · {{ hw.title }} · 提交于 {{ sub.created_at }}
-  · <a href="{{ url_for('uploaded_file', filename=sub.file_path) }}" target="_blank">查看原始扫描件</a>
+  · <a href="{{ pdf_url }}" target="_blank" data-pdf-toggle>查看原始扫描件</a>
 </p>
 
 {% if summary and summary.errors %}
 <div class="card ai-alert">
   <h2>部分批次未完整处理</h2>
-  <p>以下批次未完整处理，请检查对应页的原件，必要时补录题目或重新识别：</p>
+  <p>批阅过程中出现以下问题，请核对原件后补录或重新批阅：</p>
   <ul class="weak-list">
     {% for e in summary.errors %}<li>{{ e }}</li>{% endfor %}
   </ul>
@@ -51,10 +52,10 @@
 
 {% if not questions %}
 <div class="card">
-  <p class="muted">还没有切分结果。先点「AI 识别切分」，AI 会按题裁剪小图、做 OCR，并给出判定与建议分数。</p>
-  <form method="post" action="{{ url_for('submission_segment', sid=sub.id) }}">
+  <p class="muted">还没有批阅结果。点「AI 批阅」后，AI 会把整份学生作业与标准答案对照，逐题给出判定、评语与建议分数。</p>
+  <form method="post" action="{{ url_for('submission_grade', sid=sub.id) }}">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <button>AI 识别切分</button>
+    <button>AI 批阅</button>
   </form>
 </div>
 {% else %}
@@ -63,18 +64,8 @@
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     {% for q in questions %}
     <div class="review-row">
-      <div class="review-col img-col">
-        <div class="col-title">第 {{ q.no }} 题 · 学生作答</div>
-        {% if q.image_path %}
-          <a href="{{ url_for('uploaded_file', filename=q.image_path) }}" target="_blank">
-            <img class="crop-img" src="{{ url_for('uploaded_file', filename=q.image_path) }}" alt="第 {{ q.no }} 题">
-          </a>
-        {% else %}
-          <p class="muted small">无法裁剪出该题区域，请查看<a href="{{ url_for('uploaded_file', filename=sub.file_path) }}" target="_blank">原始扫描件</a>。</p>
-        {% endif %}
-      </div>
       <div class="review-col">
-        <div class="col-title">OCR 结果（可手动修正）
+        <div class="col-title">第 {{ q.no }} 题 · 学生作答（OCR，可修正）
           {% if q.verdict %}
           <span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">AI 判定：{{ q.verdict }}</span>
           {% endif %}
@@ -97,6 +88,7 @@
       <div class="review-col">
         <div class="col-title">标准答案（可修正）</div>
         <textarea name="standard_{{ q.id }}" rows="7">{{ q.standard_answer }}</textarea>
+        <p class="muted small">如需核对原卷，点右上角「查看原始扫描件」。</p>
       </div>
     </div>
     {% endfor %}
@@ -119,4 +111,35 @@
   </form>
 </div>
 {% endif %}
+
+<aside id="pdf-panel" class="pdf-panel" hidden>
+  <div class="pdf-panel-bar">
+    <strong>原始扫描件</strong>
+    <span class="pdf-panel-actions">
+      <a href="{{ pdf_url }}" target="_blank">新标签打开</a>
+      <button type="button" id="pdf-close" class="small">关闭 Esc</button>
+    </span>
+  </div>
+  <iframe data-src="{{ pdf_url }}" title="原始扫描件 PDF"></iframe>
+</aside>
+
+<script>
+(function () {
+  var panel = document.getElementById('pdf-panel');
+  var frame = panel.querySelector('iframe');
+  function toggle(show) {
+    var open = show === undefined ? panel.hidden : show;
+    if (open && !frame.getAttribute('src')) {
+      frame.src = frame.dataset.src;  // 首次打开才加载 PDF
+    }
+    panel.hidden = !open;
+    document.body.classList.toggle('pdf-open', open);
+  }
+  document.querySelectorAll('[data-pdf-toggle]').forEach(function (a) {
+    a.addEventListener('click', function (e) { e.preventDefault(); toggle(); });
+  });
+  document.getElementById('pdf-close').addEventListener('click', function () { toggle(false); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') toggle(false); });
+})();
+</script>
 {% endblock %}

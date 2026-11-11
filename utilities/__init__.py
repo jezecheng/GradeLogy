@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""utilities：化学作业批改流水线的可独立运行 POC 模块。
+"""utilities：AI 批阅、名单导入、日志与存储等可复用模块。
 
-每个节点模块既能被 import 调用（纯函数），也能命令行直接跑：
-    python -m utilities.detect --pdf uploads/test_stu.pdf
-    python -m utilities.match --no 3.1 --pdf uploads/test_ans.pdf
-    python -m utilities.grade  --image uploads/crop_x.jpg --pdf uploads/test_ans.pdf --no 3.1
+- pdfgrade：学生作业 + 标准答案整份 PDF 交给模型逐题批阅
+- roster：学生名单 CSV 解析
+- llm：OpenAI 兼容调用、JSON 解析与日志
+- storage：通用小工具
 """
