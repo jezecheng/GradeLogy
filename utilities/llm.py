@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """共享的 OpenAI 兼容调用与教师配置解析（供各 POC 节点复用）。"""
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -8,6 +9,8 @@ import urllib.error
 import urllib.request
 
 import config
+
+_log = logging.getLogger("gradelogy.ai")
 
 BASE_DIR = config.BASE_DIR
 UPLOAD_DIR = config.STORAGE_DIR
@@ -23,31 +26,44 @@ except ImportError:
 
 
 def chat(api_url, api_key, model, content, max_tokens=1500):
-    """通用 OpenAI 兼容调用，返回 (reply, finish_reason, error)。失败自动重试（含 429 退避）。"""
+    """通用 OpenAI 兼容调用，返回 (reply, finish_reason, error)。失败自动重试（含 429 退避）。
+
+    每次调用记录模型、耗时与结束原因；限流、失败、输出截断记 warning，便于排查额度与 max_tokens 问题。
+    """
     body = json.dumps({"model": model,
                        "messages": [{"role": "user", "content": content}],
                        "max_tokens": max_tokens}).encode()
     req = urllib.request.Request(
         f"{api_url}/chat/completions", data=body,
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"})
+    started = time.perf_counter()
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=180) as resp:
                 data = json.loads(resp.read())
             choice = data["choices"][0]
-            return (choice["message"].get("content") or ""),\
-                    (choice.get("finish_reason") or "").lower(), ""
+            finish = (choice.get("finish_reason") or "").lower()
+            _log.info("AI 调用 model=%s %.1fs finish=%s",
+                      model, time.perf_counter() - started, finish or "-")
+            if finish == "length":
+                _log.warning("AI 输出被截断 model=%s max_tokens=%s，考虑调大上限", model, max_tokens)
+            return (choice["message"].get("content") or ""), finish, ""
         except urllib.error.HTTPError as e:
             detail = e.read().decode()[:200]
             if e.code == 429 and attempt < 2:
+                _log.warning("AI 限流 429 model=%s，第 %s 次重试", model, attempt + 1)
                 time.sleep(5 * (attempt + 1))
                 continue
+            _log.warning("AI 请求失败 model=%s HTTP %s %s", model, e.code, detail[:120])
             return "", "", f"HTTP {e.code} {detail}"
         except Exception as e:
             if attempt < 2:
+                _log.warning("AI 请求异常 model=%s %s，重试", model, str(e)[:120])
                 time.sleep(2)
                 continue
+            _log.warning("AI 请求异常 model=%s %s", model, str(e)[:120])
             return "", "", str(e)
+    _log.warning("AI 请求多次失败 model=%s", model)
     return "", "", "请求多次失败"
 
 

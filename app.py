@@ -208,32 +208,12 @@ DETECT_BATCH_PAGES = 1  # 单页最稳：混入空页不会拖累整批
 
 
 def _request_json(api_url, api_key, model, content, max_tokens):
-    """通用 OpenAI 兼容调用，返回 (reply, finish_reason, error)。失败会自动重试（含 429 退避）。"""
-    body = json.dumps({"model": model,
-                       "messages": [{"role": "user", "content": content}],
-                       "max_tokens": max_tokens}).encode()
-    req = urllib.request.Request(
-        f"{api_url}/chat/completions", data=body,
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"})
-    for attempt in range(3):
-        try:
-            with urllib.request.urlopen(req, timeout=180) as resp:
-                data = json.loads(resp.read())
-            choice = data["choices"][0]
-            return (choice["message"].get("content") or ""),\
-                    (choice.get("finish_reason") or "").lower(), ""
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode()[:200]
-            if e.code == 429 and attempt < 2:
-                time.sleep(5 * (attempt + 1))
-                continue
-            return "", "", f"HTTP {e.code} {detail}"
-        except Exception as e:
-            if attempt < 2:
-                time.sleep(2)
-                continue
-            return "", "", str(e)
-    return "", "", "请求多次失败"
+    """通用 OpenAI 兼容调用，返回 (reply, finish_reason, error)。
+
+    实现与日志统一在 utilities.llm.chat，这里保留薄封装给「测试连接」等场景使用。
+    """
+    from utilities.llm import chat
+    return chat(api_url, api_key, model, content, max_tokens=max_tokens)
 
 
 def match_answer(no, text, window=400):
@@ -327,6 +307,29 @@ def save_setting(teacher_id, key, value):
         "INSERT INTO settings(teacher_id,key,value) VALUES(?,?,?) "
         "ON CONFLICT(teacher_id,key) DO UPDATE SET value=excluded.value",
         (teacher_id, key, value))
+
+
+# ---------- 访问日志 ----------
+@app.before_request
+def _mark_request_start():
+    g.request_started = time.perf_counter()
+
+
+@app.after_request
+def _access_log(resp):
+    """每个请求写入一条访问日志；静态资源与健康检查跳过，避免轮询刷屏。"""
+    if request.endpoint in ("static", "healthz"):
+        return resp
+    started = getattr(g, "request_started", None)
+    cost_ms = (time.perf_counter() - started) * 1000 if started else 0.0
+    user = g.get("user")
+    who = f"{user['username']}#{user['id']}" if user else "-"
+    log.info("HTTP %s %s %s %.0fms user=%s ip=%s", request.method,
+             request.path, resp.status_code, cost_ms, who, request.remote_addr or "-")
+    # 批改是长任务，单独看；其余接口超过 3 秒视为慢请求
+    if cost_ms >= 3000 and request.endpoint != "submission_segment":
+        log.warning("慢请求 %s %s %.0fms", request.method, request.path, cost_ms)
+    return resp
 
 
 # ---------- 登录与权限 ----------
@@ -433,8 +436,11 @@ def login():
         if user and check_password_hash(user["password_hash"], password):
             session.clear()
             session["uid"] = user["id"]
+            log.info("登录成功 user=%s role=%s ip=%s",
+                     username, user["role"], request.remote_addr or "-")
             nxt = request.args.get("next")
             return redirect(nxt if nxt and nxt.startswith("/") else url_for("index"))
+        log.warning("登录失败 user=%s ip=%s", username or "-", request.remote_addr or "-")
         flash("用户名或密码错误")
     return render_template("login.html")
 
@@ -460,6 +466,8 @@ def change_password():
             db.execute("UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?",
                        (generate_password_hash(new), g.user["id"]))
             db.commit()
+            log.info("修改密码 user=%s#%s ip=%s", g.user["username"], g.user["id"],
+                     request.remote_addr or "-")
             flash("密码已更新")
             return redirect(url_for("index"))
     return render_template("password.html")
@@ -519,6 +527,8 @@ def admin_user_create():
                        (username, generate_password_hash(password), name, role,
                         1 if password in DEFAULT_PASSWORDS else 0))
             db.commit()
+            log.info("创建账号 operator=%s#%s user=%s role=%s",
+                     g.user["username"], g.user["id"], username, role)
             flash(f"已创建{ROLE_LABEL[role]}账号 {username}，初始密码 {password}")
         except sqlite3.IntegrityError:
             flash(f"用户名 {username} 已存在")
@@ -533,6 +543,7 @@ def admin_user_reset(uid):
     db.execute("UPDATE users SET password_hash=?, must_change_password=? WHERE id=?",
                (generate_password_hash(password), 1 if password in DEFAULT_PASSWORDS else 0, uid))
     db.commit()
+    log.info("重置密码 operator=%s#%s uid=%s", g.user["username"], g.user["id"], uid)
     flash(f"密码已重置为 {password}")
     return redirect(url_for("admin_users"))
 
@@ -544,6 +555,7 @@ def admin_user_delete(uid):
         flash("不能删除当前登录的管理员账号")
         return redirect(url_for("admin_users"))
     db = get_db()
+    target = db.execute("SELECT username, role FROM users WHERE id=?", (uid,)).fetchone()
     db.execute("DELETE FROM enrollments WHERE student_id=?", (uid,))
     db.execute("DELETE FROM submissions WHERE student_id=?", (uid,))
     for c in db.execute("SELECT id FROM courses WHERE teacher_id=?", (uid,)).fetchall():
@@ -555,6 +567,10 @@ def admin_user_delete(uid):
         db.execute("DELETE FROM courses WHERE id=?", (c["id"],))
     db.execute("DELETE FROM users WHERE id=?", (uid,))
     db.commit()
+    log.info("删除账号 operator=%s#%s user=%s role=%s uid=%s",
+             g.user["username"], g.user["id"],
+             target["username"] if target else "-",
+             target["role"] if target else "-", uid)
     flash("账号已删除")
     return redirect(url_for("admin_users"))
 
