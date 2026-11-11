@@ -1836,6 +1836,9 @@ def admin_restore():
         if not {"users", "homeworks", "submissions"} <= tables:
             flash("备份包里的数据库结构不符合本系统，已拒绝导入")
             return redirect(url_for("consistency_page"))
+        if src.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            flash("备份包里的数据库未通过完整性检查，已拒绝导入")
+            return redirect(url_for("consistency_page"))
 
         # 破坏性操作前，先把当前数据完整备份一份，失败可人工回退
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1857,6 +1860,8 @@ def admin_restore():
         if os.path.isdir(new_uploads):
             shutil.move(new_uploads, UPLOAD_DIR)
         cfg.ensure_dirs()
+        # 旧备份可能缺后续版本新增的列/表，恢复后立刻跑一次迁移
+        init_db()
 
         db = get_db()
         n_users = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
