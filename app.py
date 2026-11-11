@@ -1497,7 +1497,26 @@ def uploaded_file(filename):
     return send_from_directory(UPLOAD_DIR, filename)
 
 
+def _lan_ip():
+    """取本机在局域网中的 IP（不实际发包，只是让系统选路由）。取不到返回 None。"""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
 if __name__ == "__main__":
     init_db()
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", "5000"))
+    ip = _lan_ip()
+    print("\n  本机访问：http://127.0.0.1:%d" % port)
+    if ip:
+        print("  手机/其他电脑（同一 WiFi）：http://%s:%d\n" % (ip, port))
     # debug=False 避免 stat watcher 触发代码重载把长耗时批改请求掐掉
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    app.run(host=host, port=port, debug=False)
