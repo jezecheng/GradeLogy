@@ -57,6 +57,11 @@ def grade_question(image_path, answer_text, api_url, api_key, model, extra="", m
         return {"ocr": "", "standard_answer": answer_text, "verdict": "",
                 "max_score": 0.0, "score": None, "comment": "", "error": err}
     parsed = llm.extract_json(reply) or {}
+    if not parsed.get("verdict") and not parsed.get("ocr"):
+        # 输出为空/不可解析时不静默吞掉，让上层把该题记为失败
+        return {"ocr": "", "standard_answer": answer_text, "verdict": "",
+                "max_score": 0.0, "score": None, "comment": "",
+                "error": f"模型输出无法解析为批改 JSON（前 120 字：{reply[:120]}）"}
     return {
         "ocr": str(parsed.get("ocr", "")).strip(),
         "standard_answer": str(parsed.get("standard_answer", answer_text)).strip() or answer_text,

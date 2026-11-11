@@ -6,6 +6,8 @@ graph 规范格式（设计器保存的就是它）：
      "connections": [{"from": "1", "to": "2"}, ...]}
 也兼容 Drawflow 原生 export 的 {"drawflow": {"Home": {"data": {...}}}}。
 """
+from concurrent.futures import ThreadPoolExecutor
+
 from utilities import detect as detect_mod
 from utilities import grade as grade_mod
 from utilities import match as match_mod
@@ -14,7 +16,7 @@ from utilities import storage
 # 内置默认流程：detect → match → grade，等价于原 call_ai_segment 的三步流水线
 DEFAULT_PIPELINE = {
     "nodes": [
-        {"id": "1", "type": "detect", "data": {"batch": 4}},
+        {"id": "1", "type": "detect", "data": {"batch": 1}},
         {"id": "2", "type": "match", "data": {"window": 400}},
         {"id": "3", "type": "grade", "data": {"max_tokens": 6000}},
     ],
@@ -100,7 +102,7 @@ def _run_detect(state, cfg, params, errors):
     questions, errs = detect_mod.detect_questions(
         state["pages"], cfg["api_url"], cfg["api_key"], cfg["model"],
         params.get("extra") or cfg.get("extra", ""),
-        batch=int(params.get("batch") or 4))
+        batch=int(params.get("batch") or 1))
     state["questions"] = questions
     errors.extend(errs)
     if not questions:
@@ -117,7 +119,10 @@ def _run_match(state, _cfg, params, errors):
     answer_key = state.get("answer_key") or {}  # 预处理缓存的标准答案（prepare 节点产物）
     answers = {}
     for q in questions:
-        ans = answer_key.get(q.get("no")) or match_mod.match_answer(q.get("no"), answer_text, window=window)
+        ans = match_mod.match_answer(q.get("no"), answer_text, window=window)
+        # 现场匹配失败时再 fallback 到缓存（避免缓存里题号与 detect 产物对不上时强制乱配）
+        if not ans and answer_key:
+            ans = answer_key.get(q.get("no")) or ""
         q["standard_answer"] = ans
         answers[q.get("no")] = ans
     state["answers"] = answers
@@ -136,8 +141,10 @@ def _run_grade(state, cfg, params, errors):
     # glm-5v-turbo 等思考模型的 reasoning 会吃掉 token 配额，1500 时输出为空，至少给 6000
     max_tokens = int(params.get("max_tokens") or 6000)
     extra = params.get("extra") or cfg.get("extra", "")
-    graded = []
-    for i, q in enumerate(questions, 1):
+    workers = max(1, int(params.get("workers") or 4))  # 题与题相互独立，可并行判分
+
+    def grade_one(item):
+        i, q = item
         pno = q.get("page") or 1
         page = pages[pno - 1] if 1 <= pno <= len(pages) else (pages[0] if pages else "")
         no = q.get("no") or str(i)
@@ -148,8 +155,8 @@ def _run_grade(state, cfg, params, errors):
             img, ans, cfg["api_url"], cfg["api_key"], cfg["model"],
             extra=extra, max_tokens=max_tokens)
         if result.get("error"):
-            errors.append(f"第 {q.get('no')} 题批改失败：{result['error']}")
-        graded.append({
+            return {"_error": f"第 {q.get('no')} 题批改失败：{result['error']}", "no": q.get("no")}
+        return {
             "no": q.get("no"), "page": pno, "bbox": q.get("bbox"), "image_path": img,
             "ocr": result.get("ocr", ""),
             "standard_answer": result.get("standard_answer") or ans,
@@ -157,7 +164,20 @@ def _run_grade(state, cfg, params, errors):
             "score": result.get("score"),
             "verdict": result.get("verdict", ""),
             "comment": result.get("comment", ""),
-        })
+        }
+
+    indexed = list(enumerate(questions, 1))
+    if workers > 1 and len(indexed) > 1:
+        with ThreadPoolExecutor(max_workers=min(workers, len(indexed))) as ex:
+            results = list(ex.map(grade_one, indexed))
+    else:
+        results = [grade_one(it) for it in indexed]
+    graded = []
+    for r in results:
+        if "_error" in r:
+            errors.append(r["_error"])
+            continue
+        graded.append(r)
     state["graded"] = graded
 
 

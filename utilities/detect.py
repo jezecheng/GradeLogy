@@ -9,6 +9,7 @@ import json
 import os
 import re
 import secrets
+from concurrent.futures import ThreadPoolExecutor
 
 from . import llm
 
@@ -18,10 +19,12 @@ DETECT_PROMPT = (
     '{"questions":[{"no":"3.1","page":1,"bbox":[x1,y1,x2,y2]}]}\n'
     "要求：\n"
     "1. bbox 用 0-1000 归一化坐标（以该页左上角为原点），紧贴该题作答区，禁止跨题合并；\n"
-    "2. no 用题面标注的题号，保留原样（如 3.1、例1.1、4(1)、选3）；纯字母子选项如 (a)(b)(c) 忽略，不算独立题；\n"
-    "3. page 必须填页面标签中给出的真实页码，禁止从 1 重新编号；\n"
-    "4. 某页没有学生作答（正文页/空白页）时，questions 里就不要放该页；只输出真正有作答题目的页。\n"
-    "5. 只输出题目位置，不要写答案、不要批改。")
+    "2. bbox 必须只覆盖学生用笔写出的墨迹区域（手写答案/演算），"
+    "绝对不要把印刷体题目文字框进去；学生写在印刷题目旁空白处时，框住手写部分即可；\n"
+    "3. no 用题面标注的题号，保留原样（如 3.1、例1.1、4(1)、选3）；纯字母子选项如 (a)(b)(c) 忽略，不算独立题；\n"
+    "4. page 必须填页面标签中给出的真实页码，禁止从 1 重新编号；\n"
+    "5. 某页没有学生手写笔迹（纯印刷正文页/空白页）时，questions 里就不要放该页；只输出真正有手写作答的页。\n"
+    "6. 只输出题目位置，不要写答案、不要批改。")
 
 
 # ---------- 图片工具 ----------
@@ -153,51 +156,68 @@ def _salvage_questions(text):
 
 
 # ---------- 节点主函数 ----------
-def detect_questions(pages, api_url, api_key, model, extra="", batch=1):
-    """按页识别题目位置。默认 batch=1（单页检测最稳：学生版每页 1-3 题，成本低且不会因混入空页整批跳过）。
-
-    pages: uploads 目录下的整页图片文件名列表。
-    返回 (questions, errors)，questions 为 [{no, page, bbox}, ...]。
-    """
-    prompt = DETECT_PROMPT + (f"\n补充要求：{extra}" if extra else "")
-    detected = []
-    errors = []
-    for start in range(0, len(pages), batch):
-        group = pages[start:start + batch]
-        last = start + len(group)
-        content = [{"type": "text", "text": (
-            prompt +
-            f"\n本次为学生作答第 {start + 1} 页至第 {last} 页，共 {len(group)} 页；"
-            f"page 字段必须填这些真实页码（{start + 1}-{last}），不要从 1 重新编号。")}]
-        for i, pg in enumerate(group):
-            content.append({"type": "text", "text": f"学生作答第 {start + i + 1} 页："})
-            with open(os.path.join(llm.UPLOAD_DIR, pg), "rb") as f:
-                b64 = base64.b64encode(f.read()).decode()
-            content.append({"type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-        reply, finish, err = llm.chat(api_url, api_key, model, content, max_tokens=3000)
-        span = f"第 {start + 1}-{last} 页"
-        if err:
-            errors.append(f"{span}切题失败：{err}")
-            continue
-        parsed = llm.extract_json(reply)
-        raw = parsed.get("questions", []) if parsed else []
-        if not raw and finish == "length":
-            raw = _salvage_questions(reply)
-        if not raw and finish != "length":
-            # 批次里可能恰好没有有作答的页，不算错误，静默跳过
-            continue
-        if not raw:
-            errors.append(f"{span}：输出被截断，抢救失败")
-            continue
-        for q in raw:
-            if not isinstance(q, dict):
-                continue
-            detected.append({
+def _detect_one_group(start, group, prompt, api_url, api_key, model):
+    """检测一组页（通常 1 页）。返回 (题目列表, 错误信息或 None)。"""
+    last = start + len(group)
+    content = [{"type": "text", "text": (
+        prompt +
+        f"\n本次为学生作答第 {start + 1} 页至第 {last} 页，共 {len(group)} 页；"
+        f"page 字段必须填这些真实页码（{start + 1}-{last}），不要从 1 重新编号。")}]
+    for i, pg in enumerate(group):
+        content.append({"type": "text", "text": f"学生作答第 {start + i + 1} 页："})
+        with open(os.path.join(llm.UPLOAD_DIR, pg), "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        content.append({"type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+    reply, finish, err = llm.chat(api_url, api_key, model, content, max_tokens=3000)
+    span = f"第 {start + 1}-{last} 页"
+    if err:
+        return [], f"{span}切题失败：{err}"
+    parsed = llm.extract_json(reply)
+    raw = parsed.get("questions", []) if parsed else []
+    if not raw and finish == "length":
+        raw = _salvage_questions(reply)
+    if not raw and finish != "length":
+        # 批次里可能恰好没有有作答的页（正文页/空白页），不算错误，静默跳过
+        return [], None
+    if not raw:
+        return [], f"{span}：输出被截断，抢救失败"
+    items = []
+    for q in raw:
+        if isinstance(q, dict):
+            items.append({
                 "no": str(q.get("no", "")).strip(),
                 "page": _fix_page(_as_int(q.get("page"), start + 1), start, len(group)),
                 "bbox": q.get("bbox"),
             })
+    return items, None
+
+
+def detect_questions(pages, api_url, api_key, model, extra="", batch=1, workers=4):
+    """按页识别题目位置。默认 batch=1（单页检测最稳：学生版每页 1-3 题，成本低且不会因混入空页整批跳过）。
+
+    pages: uploads 目录下的整页图片文件名列表。
+    workers: 并发请求数（页与页之间相互独立，可并行）。
+    返回 (questions, errors)，questions 为 [{no, page, bbox}, ...]。
+    """
+    prompt = DETECT_PROMPT + (f"\n补充要求：{extra}" if extra else "")
+    groups = [(start, pages[start:start + batch]) for start in range(0, len(pages), batch)]
+    detected, errors = [], []
+
+    def run(g):
+        start, group = g
+        return _detect_one_group(start, group, prompt, api_url, api_key, model)
+
+    max_workers = max(1, min(workers, len(groups)))
+    if max_workers > 1:
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            results = list(ex.map(run, groups))
+    else:
+        results = [run(g) for g in groups]
+    for items, err in results:
+        detected.extend(items)
+        if err:
+            errors.append(err)
 
     # 同页同题号去重，保留 bbox 面积更大的那条
     merged = {}
