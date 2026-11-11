@@ -144,6 +144,7 @@ CREATE TABLE IF NOT EXISTS homework_questions(
   page_no INTEGER DEFAULT 1,
   image_path TEXT DEFAULT '',
   answer_text TEXT DEFAULT '',
+  stem TEXT DEFAULT '',
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(homework_id, no));
 """
@@ -261,6 +262,10 @@ def init_db():
     hcols = {r[1] for r in con.execute("PRAGMA table_info(homeworks)")}
     if "pipeline_id" not in hcols:
         con.execute("ALTER TABLE homeworks ADD COLUMN pipeline_id INTEGER DEFAULT 0")
+    # 轻量迁移：教师版题目缓存增加题干，用于跨版本按内容匹配（题号可能同名不同题）
+    hqcols = {r[1] for r in con.execute("PRAGMA table_info(homework_questions)")}
+    if "stem" not in hqcols:
+        con.execute("ALTER TABLE homework_questions ADD COLUMN stem TEXT DEFAULT ''")
     if con.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
         con.execute("INSERT INTO users(username,password_hash,display_name,role) VALUES(?,?,?,?)",
                     ("admin", generate_password_hash("admin123"), "系统管理员", "admin"))
@@ -623,9 +628,10 @@ def homework_extract(hid):
 
     db.execute("DELETE FROM homework_questions WHERE homework_id=?", (hid,))
     for it in items:
-        db.execute("INSERT OR REPLACE INTO homework_questions(homework_id,no,page_no,image_path,answer_text) "
-                   "VALUES(?,?,?,?,?)",
-                   (hid, it["no"], it["page"], it["image_path"], it["answer"]))
+        db.execute("INSERT OR REPLACE INTO homework_questions"
+                   "(homework_id,no,page_no,image_path,answer_text,stem) VALUES(?,?,?,?,?,?)",
+                   (hid, it["no"], it["page"], it["image_path"], it["answer"],
+                    it.get("stem", "")))
     db.commit()
     msg = f"已提取 {len(items)} 道题的标准答案（重跑会覆盖旧结果）"
     if errors:
@@ -680,12 +686,15 @@ def submission_segment(sid):
     # 附件按 课程/讲次/ 组织，命名 {学生}_p{页码} / {学生}_q_{题号}，重跑覆盖不堆碎片
     attach = {"dir": storage.attach_dir(course["name"], hw["title"]),
               "student": student_name}
-    answer_key = {r["no"]: r["answer_text"] for r in db.execute(
-        "SELECT no, answer_text FROM homework_questions WHERE homework_id=? AND answer_text!=''",
-        (hw["id"],)).fetchall()}
+    answer_rows = db.execute(
+        "SELECT no, answer_text, stem FROM homework_questions WHERE homework_id=?",
+        (hw["id"],)).fetchall()
+    answer_key = {r["no"]: r["answer_text"] for r in answer_rows if r["answer_text"]}
+    answer_candidates = [{"no": r["no"], "answer": r["answer_text"], "stem": r["stem"] or ""}
+                         for r in answer_rows]
 
     gen = run_grading(g.user["id"], sub["file_path"], hw["answer_pdf"], hw["pipeline_id"],
-                      attach, answer_key)
+                      attach, answer_key, answer_candidates)
     if gen["error"]:
         flash(gen["error"])
         return redirect(url_for("homework_detail", hid=sub["homework_id"]))
@@ -1305,11 +1314,13 @@ def call_ai_segment(teacher_id, file_name, answer_pdf="", attach=None):
             "errors": errors, "error": ""}
 
 
-def run_grading(teacher_id, file_name, answer_pdf="", pipeline_id=0, attach=None, answer_key=None):
+def run_grading(teacher_id, file_name, answer_pdf="", pipeline_id=0, attach=None,
+                answer_key=None, answer_candidates=None):
     """批改入口：走流程执行器（作业绑定的自定义流程或内置 DEFAULT_PIPELINE）。
 
     attach: {"dir": 附件子目录, "student": 学生名}，由 submission_segment 按课程/讲次/学生生成。
     answer_key: {题号: 标准答案}，来自 homework_questions 缓存；为空则批改时现场匹配。
+    answer_candidates: [{no, stem, answer}]，带题干，用于学生版/教师版题号不一致时按内容匹配。
     """
     attach = attach or {}
     if get_setting(teacher_id, "ai_demo") == "1":
@@ -1350,7 +1361,8 @@ def run_grading(teacher_id, file_name, answer_pdf="", pipeline_id=0, attach=None
              "file_path": file_name,
              "attach_dir": attach.get("dir", ""),
              "student": attach.get("student", ""),
-             "answer_key": answer_key or {}}
+             "answer_key": answer_key or {},
+             "answer_candidates": answer_candidates or []}
     cfg = {"api_url": api_url, "api_key": api_key,
            "model": get_setting(teacher_id, "ai_model") or "gpt-4o",
            "extra": get_setting(teacher_id, "ai_prompt").strip()}

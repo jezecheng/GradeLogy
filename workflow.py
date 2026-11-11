@@ -118,17 +118,33 @@ def _run_match(state, _cfg, params, errors):
     window = int(params.get("window") or 400)
     answer_text = state.get("answer_text") or ""
     answer_key = state.get("answer_key") or {}  # 预处理缓存的标准答案（prepare 节点产物）
+    candidates = state.get("answer_candidates") or []  # [{no, stem, answer}]，带题干供跨版本匹配
+    stem_ready = sum(1 for c in candidates if c.get("stem"))
+    # 教师版题目普遍带题干时，按题干相似度匹配（学生版/教师版题号体系不同也能对上）；
+    # 匹配不上就留空，宁可让模型"无标准答案"也不按同名题号错配。
+    use_stem = bool(candidates) and stem_ready >= max(1, len(candidates) // 2)
     numbers = [q.get("no") for q in questions]
     answers = {}
+    matched = 0
     for q in questions:
         no = q.get("no")
-        # 预处理缓存优先：prepare 已按题号切好整段原文，质量高于现场正则；
-        # 缓存里没有时才用「本题到下一题」的区间切分兜底。
-        ans = answer_key.get(no) or match_mod.match_answer(
-            no, answer_text, window=window, numbers=numbers)
+        ans = ""
+        if use_stem:
+            cand, _how = match_mod.match_answer_smart(q.get("stem"), no, candidates)
+            if cand:
+                ans = cand.get("answer") or ""
+        if not ans:
+            ans = answer_key.get(no) or match_mod.match_answer(
+                no, answer_text, window=window, numbers=numbers)
+            if use_stem:
+                ans = ""  # 题干匹配失败时不信题号，避免同名错配
+        if ans:
+            matched += 1
         q["standard_answer"] = ans
         answers[no] = ans
     state["answers"] = answers
+    state["match_stat"] = {"total": len(questions), "matched": matched,
+                           "mode": "stem" if use_stem else "no"}
 
 
 def _run_grade(state, cfg, params, errors):

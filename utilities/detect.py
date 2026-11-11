@@ -16,15 +16,29 @@ from . import llm
 DETECT_PROMPT = (
     "你是试卷切题助手。输入是学生手写作答的扫描页（可能多页）。\n"
     "请识别每页中每道题的作答区域，只输出 JSON，不要输出解释或代码块标记：\n"
-    '{"questions":[{"no":"3.1","page":1,"bbox":[x1,y1,x2,y2]}]}\n'
+    '{"questions":[{"no":"3.1","page":1,"bbox":[x1,y1,x2,y2],"stem":"该题题干前 30 字"}]}\n'
     "要求：\n"
     "1. bbox 用 0-1000 归一化坐标（以该页左上角为原点），紧贴该题作答区，禁止跨题合并；\n"
     "2. bbox 必须只覆盖学生用笔写出的墨迹区域（手写答案/演算），"
     "绝对不要把印刷体题目文字框进去；学生写在印刷题目旁空白处时，框住手写部分即可；\n"
     "3. no 用题面标注的题号，保留原样（如 3.1、例1.1、4(1)、选3）；纯字母子选项如 (a)(b)(c) 忽略，不算独立题；\n"
+    "4. stem 抄录该题印刷题干的前 30 个字（用于跨版本匹配题目，务必逐字照抄，不要改写）；\n"
+    "5. page 必须填页面标签中给出的真实页码，禁止从 1 重新编号；\n"
+    "6. 某页没有学生手写笔迹（纯印刷正文页/空白页）时，questions 里就不要放该页；只输出真正有手写作答的页。\n"
+    "7. 只输出题目位置与题干，不要写答案、不要批改。")
+
+# 教师版是纯印刷讲义，没有学生笔迹；用学生版提示词会让模型把整页判为"无作答"而跳过
+TEACHER_DETECT_PROMPT = (
+    "你是讲义切题助手。输入是教师版讲义（印刷体，含题目与解析答案）的页面。\n"
+    "请识别每页中每道题的完整区域（从题号到该题答案结束），只输出 JSON，不要解释或代码块标记：\n"
+    '{"questions":[{"no":"3.1","page":1,"bbox":[x1,y1,x2,y2],"stem":"该题题干前 30 字"}]}\n'
+    "要求：\n"
+    "1. bbox 用 0-1000 归一化坐标（以该页左上角为原点），框住该题题目与答案的完整区域，禁止跨题合并；\n"
+    "2. no 用题面标注的题号，保留原样（如 3.1、例1.1、4(1)、选3）；纯字母子选项如 (a)(b)(c) 忽略；\n"
+    "3. stem 抄录该题印刷题干的前 30 个字，务必逐字照抄，不要改写或概括；\n"
     "4. page 必须填页面标签中给出的真实页码，禁止从 1 重新编号；\n"
-    "5. 某页没有学生手写笔迹（纯印刷正文页/空白页）时，questions 里就不要放该页；只输出真正有手写作答的页。\n"
-    "6. 只输出题目位置，不要写答案、不要批改。")
+    "5. 目录页、纯章节标题页不要输出题目；\n"
+    "6. 只输出题目位置与题干，不要批改、不要写答案。")
 
 
 # ---------- 图片工具 ----------
@@ -37,6 +51,8 @@ def pdf_to_pages(pdf_path, max_pages=12, prefix="page", subdir="", stem=""):
     """
     import pypdfium2 as pdfium
     doc = pdfium.PdfDocument(pdf_path)
+    if subdir:
+        os.makedirs(os.path.join(llm.UPLOAD_DIR, subdir), exist_ok=True)
     out = []
     for i in range(min(len(doc), max_pages)):
         img = doc[i].render(scale=2.0).to_pil()
@@ -156,15 +172,15 @@ def _salvage_questions(text):
 
 
 # ---------- 节点主函数 ----------
-def _detect_one_group(start, group, prompt, api_url, api_key, model):
+def _detect_one_group(start, group, prompt, api_url, api_key, model, label="学生作答"):
     """检测一组页（通常 1 页）。返回 (题目列表, 错误信息或 None)。"""
     last = start + len(group)
     content = [{"type": "text", "text": (
         prompt +
-        f"\n本次为学生作答第 {start + 1} 页至第 {last} 页，共 {len(group)} 页；"
+        f"\n本次为{label}第 {start + 1} 页至第 {last} 页，共 {len(group)} 页；"
         f"page 字段必须填这些真实页码（{start + 1}-{last}），不要从 1 重新编号。")}]
     for i, pg in enumerate(group):
-        content.append({"type": "text", "text": f"学生作答第 {start + i + 1} 页："})
+        content.append({"type": "text", "text": f"{label}第 {start + i + 1} 页："})
         with open(os.path.join(llm.UPLOAD_DIR, pg), "rb") as f:
             b64 = base64.b64encode(f.read()).decode()
         content.append({"type": "image_url",
@@ -189,24 +205,28 @@ def _detect_one_group(start, group, prompt, api_url, api_key, model):
                 "no": str(q.get("no", "")).strip(),
                 "page": _fix_page(_as_int(q.get("page"), start + 1), start, len(group)),
                 "bbox": q.get("bbox"),
+                "stem": str(q.get("stem", "") or "").strip(),
             })
     return items, None
 
 
-def detect_questions(pages, api_url, api_key, model, extra="", batch=1, workers=4):
+def detect_questions(pages, api_url, api_key, model, extra="", batch=1, workers=4,
+                     prompt=None, label="学生作答"):
     """按页识别题目位置。默认 batch=1（单页检测最稳：学生版每页 1-3 题，成本低且不会因混入空页整批跳过）。
 
     pages: uploads 目录下的整页图片文件名列表。
     workers: 并发请求数（页与页之间相互独立，可并行）。
-    返回 (questions, errors)，questions 为 [{no, page, bbox}, ...]。
+    prompt: 切题提示词；教师版讲义传 TEACHER_DETECT_PROMPT（无学生笔迹，规则相反）。
+    label: 页面前缀文案，如「学生作答」「教师版讲义」。
+    返回 (questions, errors)，questions 为 [{no, page, bbox, stem}, ...]。
     """
-    prompt = DETECT_PROMPT + (f"\n补充要求：{extra}" if extra else "")
+    prompt = (prompt or DETECT_PROMPT) + (f"\n补充要求：{extra}" if extra else "")
     groups = [(start, pages[start:start + batch]) for start in range(0, len(pages), batch)]
     detected, errors = [], []
 
     def run(g):
         start, group = g
-        return _detect_one_group(start, group, prompt, api_url, api_key, model)
+        return _detect_one_group(start, group, prompt, api_url, api_key, model, label)
 
     max_workers = max(1, min(workers, len(groups)))
     if max_workers > 1:

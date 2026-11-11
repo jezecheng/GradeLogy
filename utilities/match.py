@@ -4,6 +4,7 @@
 POC：python -m utilities.match --no 3.1 --pdf uploads/test_ans.pdf [--window 400]
 """
 import argparse
+import difflib
 import os
 import re
 
@@ -79,6 +80,46 @@ def match_answer(no, answer_text, window=400, numbers=None, max_len=1200):
     start = max(0, m.start() - 15)
     end = min(len(answer_text), m.start() + window)
     return answer_text[start:end].strip()
+
+
+def _norm_text(text):
+    """题干归一化：去空白与标点，只留下用于比对的有效字符。"""
+    return re.sub(r"[\s\u3000，。、；：？！（）()\[\]【】“”\"'’‘·,.;:?!—\-_/\\|]+", "",
+                  str(text or ""))
+
+
+def stem_similarity(a, b):
+    """两段题干的相似度（0-1）。只比较归一化后的字符序列。"""
+    na, nb = _norm_text(a), _norm_text(b)
+    if not na or not nb:
+        return 0.0
+    return difflib.SequenceMatcher(None, na, nb).ratio()
+
+
+def match_answer_smart(stem, no, candidates, threshold=0.45, no_threshold=0.3):
+    """按题干在教师版题目清单里找对应题，题号只作兜底校验。
+
+    candidates: [{no, stem, answer}, ...]（教师版预处理产物）。
+    返回 (候选 dict 或 None, 匹配方式 'stem'|'no'|'')。
+
+    跨版本（学生版是作业、教师版是讲义）时题号同名但内容不同，
+    因此题号兜底还要用题干相似度把关，宁可返回 None 也不错配答案。
+    """
+    candidates = candidates or []
+    best, best_score = None, 0.0
+    for c in candidates:
+        s = stem_similarity(stem, c.get("stem"))
+        if s > best_score:
+            best, best_score = c, s
+    if best is not None and best_score >= threshold:
+        return best, "stem"
+    by_no = next((c for c in candidates if str(c.get("no")) == str(no)), None)
+    if by_no is not None:
+        if not stem or not by_no.get("stem"):
+            return by_no, "no"
+        if stem_similarity(stem, by_no.get("stem")) >= no_threshold:
+            return by_no, "no"
+    return None, ""
 
 
 def main():

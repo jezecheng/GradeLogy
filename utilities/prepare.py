@@ -11,7 +11,8 @@ import json
 import os
 
 from . import llm, storage
-from .detect import detect_questions, pdf_to_pages, crop_bbox
+from .detect import (TEACHER_DETECT_PROMPT, crop_bbox, detect_questions,
+                     pdf_to_pages)
 from .match import load_answer_text, split_sections
 
 
@@ -31,7 +32,9 @@ def prepare_answer_key(answer_pdf, attach_dir, api_url, api_key, model,
     if not pages:
         return [], ["教师版 PDF 无法渲染成图片（请确认未加密），或安装 pypdfium2 后重试。"]
 
-    questions, errors = detect_questions(pages, api_url, api_key, model, batch=batch)
+    questions, errors = detect_questions(
+        pages, api_url, api_key, model, batch=batch,
+        prompt=TEACHER_DETECT_PROMPT, label="教师版讲义")
     # 教师版通常带文字层；预处理要拿全量文本（20 页讲义可达 2 万字）
     answer_text = load_answer_text(pdf_path, limit=100000, max_pages=None)
     # 一次性按题号把整份答案切段，得到「题号 → 本题到下一题原文」的完整清单，
@@ -49,6 +52,7 @@ def prepare_answer_key(answer_pdf, attach_dir, api_url, api_key, model,
             "page": pno,
             "image_path": crop_bbox(page, q.get("bbox"), stem, subdir=attach_dir),
             "answer": sections.get(str(no), ""),
+            "stem": q.get("stem", ""),
         })
     return items, errors
 
