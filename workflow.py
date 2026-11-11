@@ -18,7 +18,7 @@ DEFAULT_PIPELINE = {
     "nodes": [
         {"id": "1", "type": "detect", "data": {"batch": 1}},
         {"id": "2", "type": "match", "data": {"window": 400}},
-        {"id": "3", "type": "grade", "data": {"max_tokens": 6000}},
+        {"id": "3", "type": "grade", "data": {"max_tokens": 12000}},
     ],
     "connections": [
         {"from": "1", "to": "2"},
@@ -82,13 +82,14 @@ def _as_num(value, default=0.0):
 
 
 def _build_summary(questions, errors):
-    """总分/满分/对错分布由后端按题汇总（与 app.py 的 _build_summary 同口径）。"""
+    """总分/满分/判定分布由后端按题汇总（与 app.py 的 _build_summary 同口径）。"""
     return {
         "total": sum(_as_num(q.get("score")) for q in questions),
         "max_total": sum(_as_num(q.get("max_score")) for q in questions),
         "right": [q["no"] for q in questions if q.get("verdict") == "对"],
         "partial": [q["no"] for q in questions if q.get("verdict") == "半对"],
         "wrong": [q["no"] for q in questions if q.get("verdict") == "错"],
+        "unknown": [q["no"] for q in questions if q.get("verdict") == "无法判定"],
         "weak_points": [],
         "evaluation": "",
         "errors": errors,
@@ -117,14 +118,16 @@ def _run_match(state, _cfg, params, errors):
     window = int(params.get("window") or 400)
     answer_text = state.get("answer_text") or ""
     answer_key = state.get("answer_key") or {}  # 预处理缓存的标准答案（prepare 节点产物）
+    numbers = [q.get("no") for q in questions]
     answers = {}
     for q in questions:
-        ans = match_mod.match_answer(q.get("no"), answer_text, window=window)
-        # 现场匹配失败时再 fallback 到缓存（避免缓存里题号与 detect 产物对不上时强制乱配）
-        if not ans and answer_key:
-            ans = answer_key.get(q.get("no")) or ""
+        no = q.get("no")
+        # 预处理缓存优先：prepare 已按题号切好整段原文，质量高于现场正则；
+        # 缓存里没有时才用「本题到下一题」的区间切分兜底。
+        ans = answer_key.get(no) or match_mod.match_answer(
+            no, answer_text, window=window, numbers=numbers)
         q["standard_answer"] = ans
-        answers[q.get("no")] = ans
+        answers[no] = ans
     state["answers"] = answers
 
 
@@ -139,9 +142,11 @@ def _run_grade(state, cfg, params, errors):
     attach_dir = state.get("attach_dir") or ""
     student = state.get("student") or ""
     # glm-5v-turbo 等思考模型的 reasoning 会吃掉 token 配额，1500 时输出为空，至少给 6000
-    max_tokens = int(params.get("max_tokens") or 6000)
+    max_tokens = int(params.get("max_tokens") or 12000)
     extra = params.get("extra") or cfg.get("extra", "")
     workers = max(1, int(params.get("workers") or 4))  # 题与题相互独立，可并行判分
+    # 教师在流程里配置的每题满分；为 0 表示纯定性批改（不给分，避免模型编造分数）
+    max_score = _as_num(params.get("max_score"), 0.0)
 
     def grade_one(item):
         i, q = item
@@ -153,7 +158,7 @@ def _run_grade(state, cfg, params, errors):
         ans = answers.get(q.get("no"), q.get("standard_answer", ""))
         result = grade_mod.grade_question(
             img, ans, cfg["api_url"], cfg["api_key"], cfg["model"],
-            extra=extra, max_tokens=max_tokens)
+            extra=extra, max_tokens=max_tokens, max_score=max_score)
         if result.get("error"):
             return {"_error": f"第 {q.get('no')} 题批改失败：{result['error']}", "no": q.get("no")}
         return {

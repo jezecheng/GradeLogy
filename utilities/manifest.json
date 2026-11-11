@@ -7,7 +7,7 @@
       "inputs": [],
       "outputs": ["questions"],
       "params": [
-        {"key": "batch", "label": "每批页数", "default": 4},
+        {"key": "batch", "label": "每批页数（1 最稳）", "default": 1},
         {"key": "extra", "label": "补充提示词", "default": ""}
       ]
     },
@@ -24,11 +24,13 @@
     {
       "type": "grade",
       "label": "逐题判分",
-      "desc": "逐题对照标准答案判分，输出 OCR、对错与评语",
+      "desc": "逐题对照标准答案判定（对/半对/错/无法判定），输出 OCR 与评语；未配置满分时不编造分数",
       "inputs": ["questions", "answers"],
       "outputs": ["graded"],
       "params": [
-        {"key": "max_tokens", "label": "输出上限（思考模型需 ≥6000）", "default": 6000},
+        {"key": "max_tokens", "label": "输出上限（思考模型需 ≥6000）", "default": 12000},
+        {"key": "max_score", "label": "每题满分（0 = 只判定不给分）", "default": 0},
+        {"key": "workers", "label": "并发题数", "default": 4},
         {"key": "extra", "label": "补充提示词", "default": ""}
       ]
     }

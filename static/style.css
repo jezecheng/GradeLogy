@@ -91,6 +91,7 @@ details summary { cursor: pointer; color: #1456f0; }
 .verdict-right { background: #e6f6ec; color: #18794e; }
 .verdict-partial { background: #fff4e0; color: #b25e09; }
 .verdict-wrong { background: #fdecec; color: #c93338; }
+.verdict-unknown { background: #eef1f5; color: #5b6572; }
 .ai-hint { font-size: 12px; color: #1456f0; margin-left: 8px; }
 .ai-summary { border-left: 3px solid #1456f0; }
 .ai-summary p { margin-bottom: 6px; }

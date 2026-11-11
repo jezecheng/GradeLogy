@@ -2,7 +2,7 @@
 {% block title %}逐题批改 - {{ sub.display_name }}{% endblock %}
 {% block content %}
 {% set summary = sub.ai_summary|fromjson %}
-{% set verdict_cls = {'对': 'right', '半对': 'partial', '错': 'wrong'} %}
+{% set verdict_cls = {'对': 'right', '半对': 'partial', '错': 'wrong', '无法判定': 'unknown'} %}
 <p><a href="{{ url_for('homework_detail', hid=hw.id) }}">← 返回 {{ hw.title }}</a></p>
 <h1>逐题批改：{{ sub.display_name }}</h1>
 <p class="muted">
@@ -23,11 +23,16 @@
 {% if summary %}
 <div class="card ai-summary">
   <h2>AI 汇总</h2>
+  {% if summary.max_total %}
   <p>总分 <span class="score">{{ '%g'|format(summary.total|float) }}/{{ '%g'|format(summary.max_total|float) }}</span>
+  {% else %}
+  <p>本次为定性批改（教师版未提供每题分值，AI 不编造分数，请老师手动给分）
+  {% endif %}
     <span class="muted small">
       对 {{ summary.right|length }} 题{% if summary.right %}（{{ summary.right|join('、') }}）{% endif %}
       · 半对 {{ summary.partial|length }} 题{% if summary.partial %}（{{ summary.partial|join('、') }}）{% endif %}
       · 错 {{ summary.wrong|length }} 题{% if summary.wrong %}（{{ summary.wrong|join('、') }}）{% endif %}
+      {% if summary.unknown %}· 无法判定 {{ summary.unknown|length }} 题（{{ summary.unknown|join('、') }}）{% endif %}
     </span>
   </p>
   {% if summary.weak_points %}
@@ -71,7 +76,7 @@
           {% if q.verdict %}
           <span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">AI 判定：{{ q.verdict }}</span>
           {% endif %}
-          {% if q.verdict or q.score or q.max_score %}
+          {% if q.verdict and q.max_score %}
           <span class="ai-hint">AI 建议 {{ q.score if q.score != '' else '—' }}/{{ '%g'|format(q.max_score|float) }}</span>
           {% endif %}
         </div>
@@ -86,7 +91,7 @@
     </div>
     {% endfor %}
 
-    {% set auto_total = '%g/%g'|format(summary.total|float, summary.max_total|float) if summary else '' %}
+    {% set auto_total = '%g/%g'|format(summary.total|float, summary.max_total|float) if summary and summary.max_total else '' %}
     <div class="review-row total-row">
       <div class="review-col">
         <div class="col-title">总分</div>

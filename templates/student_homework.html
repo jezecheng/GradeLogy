@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ hw.title }} - 提交作业{% endblock %}
 {% block content %}
-{% set verdict_cls = {'对': 'right', '半对': 'partial', '错': 'wrong'} %}
+{% set verdict_cls = {'对': 'right', '半对': 'partial', '错': 'wrong', '无法判定': 'unknown'} %}
 <p><a href="{{ url_for('student_home') }}">← 返回我的作业</a></p>
 <h1>{{ hw.title }}</h1>
 <p class="muted">{{ hw.course_name }}{% if hw.deadline %} · 截止 {{ hw.deadline.replace('T',' ') }}{% endif %}</p>
@@ -31,9 +31,9 @@
       {% if s.score %}<span class="score">{{ s.score }}</span>{% endif %}
     </div>
     {% if sm %}
-    <p class="small">AI 汇总：总分
-      <span class="score">{{ '%g'|format(sm.total|float) }}/{{ '%g'|format(sm.max_total|float) }}</span>
-      <span class="muted">· 对 {{ sm.right|length }} 题 · 半对 {{ sm.partial|length }} 题 · 错 {{ sm.wrong|length }} 题</span>
+    <p class="small">AI 汇总：
+      {% if sm.max_total %}总分 <span class="score">{{ '%g'|format(sm.total|float) }}/{{ '%g'|format(sm.max_total|float) }}</span> · {% endif %}
+      <span class="muted">对 {{ sm.right|length }} 题 · 半对 {{ sm.partial|length }} 题 · 错 {{ sm.wrong|length }} 题{% if sm.unknown %} · 无法判定 {{ sm.unknown|length }} 题{% endif %}</span>
     </p>
     {% endif %}
     {% if s.feedback %}<pre class="feedback">{{ s.feedback }}</pre>
@@ -49,7 +49,7 @@
     {% if q.verdict %}
     <span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">{{ q.verdict }}</span>
     {% endif %}
-    <span class="score">{{ q.score }}{% if q.max_score %} / {{ '%g'|format(q.max_score|float) }}{% endif %}</span>
+    {% if q.score or q.max_score %}<span class="score">{{ q.score }}{% if q.max_score %} / {{ '%g'|format(q.max_score|float) }}{% endif %}</span>{% endif %}
     {% if q.note %} — {{ q.note }}{% endif %}
   </div>
   {% endfor %}

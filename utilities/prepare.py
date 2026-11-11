@@ -12,7 +12,7 @@ import os
 
 from . import llm, storage
 from .detect import detect_questions, pdf_to_pages, crop_bbox
-from .match import load_answer_text, match_answer
+from .match import load_answer_text, split_sections
 
 
 def prepare_answer_key(answer_pdf, attach_dir, api_url, api_key, model,
@@ -34,6 +34,9 @@ def prepare_answer_key(answer_pdf, attach_dir, api_url, api_key, model,
     questions, errors = detect_questions(pages, api_url, api_key, model, batch=batch)
     # 教师版通常带文字层；预处理要拿全量文本（20 页讲义可达 2 万字）
     answer_text = load_answer_text(pdf_path, limit=100000, max_pages=None)
+    # 一次性按题号把整份答案切段，得到「题号 → 本题到下一题原文」的完整清单，
+    # 比逐题固定窗口更不容易把题干误当成答案。
+    sections = split_sections(answer_text, [q.get("no") for q in questions])
 
     items = []
     for q in questions:
@@ -45,7 +48,7 @@ def prepare_answer_key(answer_pdf, attach_dir, api_url, api_key, model,
             "no": no,
             "page": pno,
             "image_path": crop_bbox(page, q.get("bbox"), stem, subdir=attach_dir),
-            "answer": match_answer(no, answer_text),
+            "answer": sections.get(str(no), ""),
         })
     return items, errors
 

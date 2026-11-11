@@ -35,12 +35,45 @@ def load_answer_text(answer_pdf, limit=8000, max_pages=5):
         return ""
 
 
-def match_answer(no, answer_text, window=400):
-    """在教师版答案文本中按题号定位，返回附近的答案片段；找不到返回空串。"""
+def _find(no, text):
+    """按题号精确查找位置（3.1 不能命中 3.10，也不能命中 x3.1）。"""
+    if not no:
+        return None
+    return re.search(r"(?<![A-Za-z0-9.])" + re.escape(str(no)) + r"(?![0-9])", text)
+
+
+def split_sections(answer_text, numbers, max_len=1200):
+    """按题号在教师版文本中的出现位置切段，返回 {题号: 本题到下一题之间的原文}。
+
+    比固定字数窗口更可靠：窗口起点是题干、答案在后面的情况也能整段取到。
+    同一题号重复出现时只取第一处（讲义不同页重复编号的已知限制）。
+    """
+    hits = []
+    for no in numbers or []:
+        m = _find(no, answer_text)
+        if m:
+            hits.append((m.start(), str(no)))
+    hits.sort()
+    sections = {}
+    for i, (pos, no) in enumerate(hits):
+        end = hits[i + 1][0] if i + 1 < len(hits) else min(len(answer_text), pos + max_len)
+        sections[no] = answer_text[pos:end].strip()[:max_len]
+    return sections
+
+
+def match_answer(no, answer_text, window=400, numbers=None, max_len=1200):
+    """在教师版答案文本中按题号定位答案；找不到返回空串。
+
+    numbers: 传入整份卷子的题号列表时，按「本题到下一题」整段切分（推荐）；
+             不传则退化为以题号为起点的固定字数窗口。
+    """
     if not no or not answer_text:
         return ""
-    pat = re.escape(str(no))
-    m = re.search(r"(?<![A-Za-z0-9.])" + pat + r"(?![0-9])", answer_text)
+    if numbers:
+        sect = split_sections(answer_text, numbers, max_len=max_len).get(str(no))
+        if sect:
+            return sect
+    m = _find(no, answer_text)
     if not m:
         return ""
     start = max(0, m.start() - 15)

@@ -623,7 +623,7 @@ def homework_extract(hid):
 
     db.execute("DELETE FROM homework_questions WHERE homework_id=?", (hid,))
     for it in items:
-        db.execute("INSERT INTO homework_questions(homework_id,no,page_no,image_path,answer_text) "
+        db.execute("INSERT OR REPLACE INTO homework_questions(homework_id,no,page_no,image_path,answer_text) "
                    "VALUES(?,?,?,?,?)",
                    (hid, it["no"], it["page"], it["image_path"], it["answer"]))
     db.commit()
@@ -1154,13 +1154,14 @@ def _salvage_questions(text):
 
 
 def _build_summary(questions, weak_points, evaluation, errors):
-    """总分/满分/对错分布一律由后端按题汇总，不依赖模型跨批统计。"""
+    """总分/满分/判定分布一律由后端按题汇总，不依赖模型跨批统计。"""
     return {
         "total": sum(_as_num(q.get("score")) for q in questions),
         "max_total": sum(_as_num(q.get("max_score")) for q in questions),
         "right": [q["no"] for q in questions if q.get("verdict") == "对"],
         "partial": [q["no"] for q in questions if q.get("verdict") == "半对"],
         "wrong": [q["no"] for q in questions if q.get("verdict") == "错"],
+        "unknown": [q["no"] for q in questions if q.get("verdict") == "无法判定"],
         "weak_points": weak_points,
         "evaluation": evaluation,
         "errors": errors,
@@ -1438,4 +1439,5 @@ def uploaded_file(filename):
 
 if __name__ == "__main__":
     init_db()
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    # debug=False 避免 stat watcher 触发代码重载把长耗时批改请求掐掉
+    app.run(host="127.0.0.1", port=5000, debug=False)
