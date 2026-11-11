@@ -284,7 +284,10 @@ def init_db():
     # 轻量迁移：接入逐题 AI 批改后新增的字段
     for col, ddl in (("max_score", "REAL DEFAULT 0"),
                      ("verdict", "TEXT DEFAULT ''"),
-                     ("ai_comment", "TEXT DEFAULT ''")):
+                     ("ai_comment", "TEXT DEFAULT ''"),
+                     ("wrong_status", "TEXT DEFAULT ''"),
+                     ("review_count", "INTEGER DEFAULT 0"),
+                     ("reviewed_at", "TEXT DEFAULT ''")):
         if col not in qcols:
             con.execute(f"ALTER TABLE questions ADD COLUMN {col} {ddl}")
     scols = {r[1] for r in con.execute("PRAGMA table_info(submissions)")}
@@ -912,6 +915,9 @@ def wrongbook():
     db = get_db()
     cid = request.args.get("course", type=int)
     sid = request.args.get("student", type=int)
+    status = request.args.get("status", "")
+    if status not in ("", "pending", "mastered"):
+        status = ""
     is_teacher = g.user["role"] == "teacher"
     if not is_teacher and g.user["role"] != "student":
         abort(403)
@@ -920,6 +926,8 @@ def wrongbook():
         courses = db.execute("""
             SELECT c.id, c.name,
                    COUNT(q.id) AS n_wrong,
+                   COUNT(DISTINCT CASE WHEN q.id IS NOT NULL AND COALESCE(NULLIF(q.wrong_status,''),'待复习')='待复习'
+                                       THEN q.id END) AS n_pending,
                    COUNT(DISTINCT CASE WHEN q.id IS NOT NULL THEN s.student_id END) AS n_students
             FROM courses c
             LEFT JOIN homeworks h ON h.course_id=c.id
@@ -933,6 +941,8 @@ def wrongbook():
         courses = db.execute("""
             SELECT c.id, c.name,
                    COUNT(q.id) AS n_wrong,
+                   COUNT(DISTINCT CASE WHEN q.id IS NOT NULL AND COALESCE(NULLIF(q.wrong_status,''),'待复习')='待复习'
+                                       THEN q.id END) AS n_pending,
                    COUNT(DISTINCT CASE WHEN q.id IS NOT NULL THEN h.id END) AS n_homeworks
             FROM courses c
             JOIN enrollments e ON e.course_id=c.id AND e.student_id=?
@@ -946,6 +956,9 @@ def wrongbook():
     if course:
         where = ["c.id=?", "s.status='已批改'", "q.verdict IN ('错','半对')"]
         args = [cid]
+        if status:
+            where.append("COALESCE(NULLIF(q.wrong_status,''),'待复习')=?")
+            args.append("待复习" if status == "pending" else "已掌握")
         if is_teacher:
             if sid:
                 where.append("s.student_id=?")
@@ -964,6 +977,7 @@ def wrongbook():
         rows = db.execute(f"""
             SELECT q.id, q.no, q.verdict, q.score, q.max_score, q.note, q.ai_comment,
                    q.ocr_text, q.standard_answer, q.image_path, q.page_no,
+                   q.wrong_status, q.review_count, q.reviewed_at,
                    s.id AS sid, h.id AS hid, h.title AS hw_title,
                    c.name AS course_name, u.display_name AS student_name
             FROM questions q
@@ -976,7 +990,53 @@ def wrongbook():
 
     return render_template("wrongbook.html", courses=courses, course=course,
                            rows=rows, students=students, cur_student=sid,
-                           is_teacher=is_teacher)
+                           cur_status=status, is_teacher=is_teacher)
+
+
+@app.route("/wrongbook/mark", methods=["POST"])
+@login_required
+def wrongbook_mark():
+    """错题状态维护：标记已掌握 / 恢复待复习 / 复习 +1。老师只能操作自己课程，学生只能操作自己的题。"""
+    qid = request.form.get("qid", type=int)
+    action = request.form.get("action", "")
+    if not qid or action not in ("mastered", "pending", "review"):
+        abort(400)
+    db = get_db()
+    row = db.execute("""
+        SELECT q.id, s.student_id, c.id AS cid, c.teacher_id
+        FROM questions q
+        JOIN submissions s ON s.id=q.submission_id
+        JOIN homeworks h ON h.id=s.homework_id
+        JOIN courses c ON c.id=h.course_id
+        WHERE q.id=?""", (qid,)).fetchone()
+    if not row:
+        abort(404)
+    allowed = ((g.user["role"] == "student" and row["student_id"] == g.user["id"])
+               or (g.user["role"] == "teacher" and row["teacher_id"] == g.user["id"]))
+    if not allowed:
+        log.warning("越权修改错题状态 user=%s qid=%s", g.user["id"], qid)
+        abort(403)
+
+    if action == "mastered":
+        db.execute("UPDATE questions SET wrong_status='已掌握', reviewed_at=CURRENT_TIMESTAMP "
+                   "WHERE id=?", (qid,))
+        flash("已标记为掌握")
+    elif action == "pending":
+        db.execute("UPDATE questions SET wrong_status='待复习' WHERE id=?", (qid,))
+        flash("已恢复为待复习")
+    else:
+        db.execute("UPDATE questions SET review_count=review_count+1, "
+                   "wrong_status=CASE WHEN COALESCE(wrong_status,'')='' THEN '待复习' ELSE wrong_status END, "
+                   "reviewed_at=CURRENT_TIMESTAMP WHERE id=?", (qid,))
+        flash("已记录一次复习")
+    db.commit()
+
+    params = {"course": row["cid"]}
+    if g.user["role"] == "teacher" and request.form.get("student_id", type=int):
+        params["student"] = request.form.get("student_id", type=int)
+    if request.form.get("status") in ("pending", "mastered"):
+        params["status"] = request.form.get("status")
+    return redirect(url_for("wrongbook", **params))
 
 
 # ---------- 教案 ----------

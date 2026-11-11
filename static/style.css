@@ -116,6 +116,10 @@ details summary { cursor: pointer; color: #1456f0; }
 .wrong-info { flex: 1; min-width: 0; }
 .wrong-info p { margin: 0 0 6px; }
 .wrong-info details { margin-bottom: 6px; }
+button.btn-link { background: none; border: 0; padding: 0; color: #1456f0;
+                  font: inherit; font-size: 13px; cursor: pointer; }
+button.btn-link:hover { text-decoration: underline; }
+.wrong-mastered { opacity: .72; }
 @media (max-width: 640px) {
   .wrong-body { flex-direction: column; }
   .wrong-img { width: 100%; }
