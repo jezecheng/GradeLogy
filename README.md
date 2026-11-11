@@ -103,6 +103,15 @@ python app.py
 
 错题记录直接来自 `questions` 表的判定结果，不额外建表；老师在批改页修正判定后，错题本随之更新。状态与复习次数存在 `questions.wrong_status / review_count / reviewed_at`。
 
+查询逻辑独立在 `utilities/wrongbook.py`（纯函数，不依赖 Flask），可脱开网页直接核对：
+
+```bash
+python -m utilities.wrongbook --teacher 1          # 某老师各课程汇总
+python -m utilities.wrongbook --course 1           # 课程错题明细
+python -m utilities.wrongbook --course 1 --status pending --student 3
+python -m utilities.wrongbook --student-user 4     # 学生视角汇总
+```
+
 ## 自定义批改流程（拖拽设计器）
 
 导航栏「批改流程」进入设计器（基于 [Drawflow](https://github.com/jerosoler/Drawflow) 本地化，无 CDN 依赖）：
@@ -121,6 +130,7 @@ utilities/
 ├── grade.py        # 逐题判分节点
 ├── prepare.py      # 教师版讲义预处理节点（切题+裁图+提取答案）
 ├── storage.py      # 附件目录/安全文件名
+├── wrongbook.py    # 错题本查询（纯函数 + CLI，非流水线节点）
 └── manifest.json   # 节点注册表 → 设计器面板由此渲染
 ```
 

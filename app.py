@@ -25,7 +25,7 @@ from werkzeug.utils import secure_filename
 
 import config as cfg
 import workflow as wf
-from utilities import storage
+from utilities import storage, wrongbook as wb
 from utilities.prepare import prepare_answer_key
 
 cfg.ensure_dirs()
@@ -904,15 +904,10 @@ def submission_correct(sid):
 
 
 # ---------- 错题本 ----------
-# 判定为「错」「半对」的题目都会进入错题本；仅统计已发布（已批改）的提交
-WRONG_VERDICTS = ("错", "半对")
-
-
 @app.route("/wrongbook")
 @login_required
 def wrongbook():
     """错题本：按课程汇总，老师看自己课程下的学生，学生只看自己。"""
-    db = get_db()
     cid = request.args.get("course", type=int)
     sid = request.args.get("student", type=int)
     status = request.args.get("status", "")
@@ -922,71 +917,15 @@ def wrongbook():
     if not is_teacher and g.user["role"] != "student":
         abort(403)
 
-    if is_teacher:
-        courses = db.execute("""
-            SELECT c.id, c.name,
-                   COUNT(q.id) AS n_wrong,
-                   COUNT(DISTINCT CASE WHEN q.id IS NOT NULL AND COALESCE(NULLIF(q.wrong_status,''),'待复习')='待复习'
-                                       THEN q.id END) AS n_pending,
-                   COUNT(DISTINCT CASE WHEN q.id IS NOT NULL THEN s.student_id END) AS n_students
-            FROM courses c
-            LEFT JOIN homeworks h ON h.course_id=c.id
-            LEFT JOIN submissions s ON s.homework_id=h.id AND s.status='已批改'
-            LEFT JOIN questions q ON q.submission_id=s.id AND q.verdict IN ('错','半对')
-            WHERE c.teacher_id=?
-            GROUP BY c.id ORDER BY c.id DESC""", (g.user["id"],)).fetchall()
-        if cid:
-            own_course(cid)
-    else:
-        courses = db.execute("""
-            SELECT c.id, c.name,
-                   COUNT(q.id) AS n_wrong,
-                   COUNT(DISTINCT CASE WHEN q.id IS NOT NULL AND COALESCE(NULLIF(q.wrong_status,''),'待复习')='待复习'
-                                       THEN q.id END) AS n_pending,
-                   COUNT(DISTINCT CASE WHEN q.id IS NOT NULL THEN h.id END) AS n_homeworks
-            FROM courses c
-            JOIN enrollments e ON e.course_id=c.id AND e.student_id=?
-            LEFT JOIN homeworks h ON h.course_id=c.id
-            LEFT JOIN submissions s ON s.homework_id=h.id AND s.student_id=? AND s.status='已批改'
-            LEFT JOIN questions q ON q.submission_id=s.id AND q.verdict IN ('错','半对')
-            GROUP BY c.id ORDER BY c.id DESC""", (g.user["id"], g.user["id"])).fetchall()
-
+    courses = wb.course_summary(g.user["role"], g.user["id"])
+    if cid and is_teacher:
+        own_course(cid)
     course = next((c for c in courses if c["id"] == cid), None) if cid else None
     rows, students = [], []
     if course:
-        where = ["c.id=?", "s.status='已批改'", "q.verdict IN ('错','半对')"]
-        args = [cid]
-        if status:
-            where.append("COALESCE(NULLIF(q.wrong_status,''),'待复习')=?")
-            args.append("待复习" if status == "pending" else "已掌握")
-        if is_teacher:
-            if sid:
-                where.append("s.student_id=?")
-                args.append(sid)
-            students = db.execute("""
-                SELECT u.id, u.display_name, COUNT(*) AS n
-                FROM questions q
-                JOIN submissions s ON s.id=q.submission_id
-                JOIN homeworks h ON h.id=s.homework_id
-                JOIN users u ON u.id=s.student_id
-                WHERE h.course_id=? AND s.status='已批改' AND q.verdict IN ('错','半对')
-                GROUP BY u.id ORDER BY u.display_name""", (cid,)).fetchall()
-        else:
-            where.append("s.student_id=?")
-            args.append(g.user["id"])
-        rows = db.execute(f"""
-            SELECT q.id, q.no, q.verdict, q.score, q.max_score, q.note, q.ai_comment,
-                   q.ocr_text, q.standard_answer, q.image_path, q.page_no,
-                   q.wrong_status, q.review_count, q.reviewed_at,
-                   s.id AS sid, h.id AS hid, h.title AS hw_title,
-                   c.name AS course_name, u.display_name AS student_name
-            FROM questions q
-            JOIN submissions s ON s.id=q.submission_id
-            JOIN homeworks h ON h.id=s.homework_id
-            JOIN courses c ON c.id=h.course_id
-            JOIN users u ON u.id=s.student_id
-            WHERE {' AND '.join(where)}
-            ORDER BY u.display_name, h.id DESC, q.page_no, q.id""", args).fetchall()
+        students = wb.list_students(cid) if is_teacher else []
+        rows = wb.collect(cid, status=status,
+                          student_id=sid if is_teacher else g.user["id"])
 
     return render_template("wrongbook.html", courses=courses, course=course,
                            rows=rows, students=students, cur_student=sid,
