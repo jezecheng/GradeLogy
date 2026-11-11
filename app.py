@@ -21,6 +21,7 @@ from werkzeug.utils import secure_filename
 
 import workflow as wf
 from utilities import storage
+from utilities.prepare import prepare_answer_key
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
@@ -136,6 +137,15 @@ CREATE TABLE IF NOT EXISTS pipelines(
   name TEXT NOT NULL,
   graph_json TEXT DEFAULT '',
   created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS homework_questions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  homework_id INTEGER NOT NULL REFERENCES homeworks(id),
+  no TEXT DEFAULT '',
+  page_no INTEGER DEFAULT 1,
+  image_path TEXT DEFAULT '',
+  answer_text TEXT DEFAULT '',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(homework_id, no));
 """
 
 # 阶段一：只识别题目位置（题号 + 坐标），输出极小，不会被截断
@@ -145,9 +155,10 @@ DETECT_PROMPT = (
     '{"questions":[{"no":"3.1","page":1,"bbox":[x1,y1,x2,y2]}]}\n'
     "要求：\n"
     "1. bbox 用 0-1000 归一化坐标（以该页左上角为原点），紧贴该题作答区，禁止跨题合并；\n"
-    "2. no 用题面标注的题号，保留原样（如 3.1、例1.1、4(1)、选3）；\n"
+    "2. no 用题面标注的题号，保留原样（如 3.1、例1.1、4(1)、选3）；纯字母子选项如 (a)(b)(c) 忽略，不算独立题；\n"
     "3. page 必须填页面标签中给出的真实页码，禁止从 1 重新编号；\n"
-    "4. 只输出题目位置，不要写答案、不要批改。")
+    "4. 某页没有学生作答（正文页/空白页）时，questions 里就不要放该页；只输出真正有作答题目的页。\n"
+    "5. 只输出题目位置，不要写答案、不要批改。")
 
 # 阶段三：单题批改——只看一道题的裁剪图 + 该题标准答案，输出小而稳
 GRADE_PROMPT = (
@@ -163,7 +174,7 @@ GRADE_PROMPT = (
     "4. 不给印象分；未作答的题 score=0，comment 写\"未作答\"。\n"
     "5. comment 不超过 60 个汉字，standard_answer 不超过 60 个汉字；只写关键结论，不写完整推导。")
 
-DETECT_BATCH_PAGES = 4  # 阶段一输出只有题号+坐标，量很小，可一次多页
+DETECT_BATCH_PAGES = 1  # 单页最稳：混入空页不会拖累整批
 
 
 def _request_json(api_url, api_key, model, content, max_tokens):
@@ -575,7 +586,52 @@ def homework_detail(hid):
         WHERE s.homework_id=? ORDER BY s.created_at DESC""", (hid,)).fetchall()
     pipelines = db.execute("SELECT id, name FROM pipelines WHERE teacher_id=? ORDER BY id DESC",
                            (g.user["id"],)).fetchall()
-    return render_template("homework.html", hw=hw, course=course, subs=subs, pipelines=pipelines)
+    answer_count = db.execute("SELECT COUNT(*) AS c FROM homework_questions WHERE homework_id=?",
+                              (hid,)).fetchone()["c"]
+    return render_template("homework.html", hw=hw, course=course, subs=subs,
+                           pipelines=pipelines, answer_count=answer_count)
+
+
+@app.route("/homework/<int:hid>/extract", methods=["POST"])
+@role_required("teacher")
+def homework_extract(hid):
+    """教师版讲义一次性预处理：切题 + 裁题目图 + 提取标准答案，缓存到 homework_questions。"""
+    db = get_db()
+    hw = db.execute("SELECT * FROM homeworks WHERE id=?", (hid,)).fetchone()
+    if not hw:
+        abort(404)
+    course = own_course(hw["course_id"])
+    if not hw["answer_pdf"]:
+        flash("请先上传教师版答案 PDF")
+        return redirect(url_for("homework_detail", hid=hid))
+
+    api_url = get_setting(g.user["id"], "ai_api_url").rstrip("/")
+    api_key = get_setting(g.user["id"], "ai_api_key")
+    if not api_url or not api_key:
+        flash("尚未配置 AI 接口，请先到「AI 设置」填写接口地址与密钥。")
+        return redirect(url_for("homework_detail", hid=hid))
+
+    attach_dir = os.path.join(storage.attach_dir(course["name"], hw["title"]), "answer")
+    os.makedirs(os.path.join(UPLOAD_DIR, attach_dir), exist_ok=True)
+    items, errors = prepare_answer_key(
+        hw["answer_pdf"], attach_dir, api_url, api_key,
+        get_setting(g.user["id"], "ai_model") or "gpt-4o")
+
+    if not items:
+        flash("未从教师版讲义中提取到题目" + (f"：{errors[0]}" if errors else ""))
+        return redirect(url_for("homework_detail", hid=hid))
+
+    db.execute("DELETE FROM homework_questions WHERE homework_id=?", (hid,))
+    for it in items:
+        db.execute("INSERT INTO homework_questions(homework_id,no,page_no,image_path,answer_text) "
+                   "VALUES(?,?,?,?,?)",
+                   (hid, it["no"], it["page"], it["image_path"], it["answer"]))
+    db.commit()
+    msg = f"已提取 {len(items)} 道题的标准答案（重跑会覆盖旧结果）"
+    if errors:
+        msg += f"；{len(errors)} 个批次未完整处理：{errors[0]}"
+    flash(msg)
+    return redirect(url_for("homework_detail", hid=hid))
 
 
 @app.route("/homework/<int:hid>/answer", methods=["POST"])
@@ -624,8 +680,12 @@ def submission_segment(sid):
     # 附件按 课程/讲次/ 组织，命名 {学生}_p{页码} / {学生}_q_{题号}，重跑覆盖不堆碎片
     attach = {"dir": storage.attach_dir(course["name"], hw["title"]),
               "student": student_name}
+    answer_key = {r["no"]: r["answer_text"] for r in db.execute(
+        "SELECT no, answer_text FROM homework_questions WHERE homework_id=? AND answer_text!=''",
+        (hw["id"],)).fetchall()}
 
-    gen = run_grading(g.user["id"], sub["file_path"], hw["answer_pdf"], hw["pipeline_id"], attach)
+    gen = run_grading(g.user["id"], sub["file_path"], hw["answer_pdf"], hw["pipeline_id"],
+                      attach, answer_key)
     if gen["error"]:
         flash(gen["error"])
         return redirect(url_for("homework_detail", hid=sub["homework_id"]))
@@ -1244,10 +1304,11 @@ def call_ai_segment(teacher_id, file_name, answer_pdf="", attach=None):
             "errors": errors, "error": ""}
 
 
-def run_grading(teacher_id, file_name, answer_pdf="", pipeline_id=0, attach=None):
+def run_grading(teacher_id, file_name, answer_pdf="", pipeline_id=0, attach=None, answer_key=None):
     """批改入口：走流程执行器（作业绑定的自定义流程或内置 DEFAULT_PIPELINE）。
 
     attach: {"dir": 附件子目录, "student": 学生名}，由 submission_segment 按课程/讲次/学生生成。
+    answer_key: {题号: 标准答案}，来自 homework_questions 缓存；为空则批改时现场匹配。
     """
     attach = attach or {}
     if get_setting(teacher_id, "ai_demo") == "1":
@@ -1287,7 +1348,8 @@ def run_grading(teacher_id, file_name, answer_pdf="", pipeline_id=0, attach=None
              "answer_text": pdf_text(os.path.join(UPLOAD_DIR, answer_pdf)) if answer_pdf else "",
              "file_path": file_name,
              "attach_dir": attach.get("dir", ""),
-             "student": attach.get("student", "")}
+             "student": attach.get("student", ""),
+             "answer_key": answer_key or {}}
     cfg = {"api_url": api_url, "api_key": api_key,
            "model": get_setting(teacher_id, "ai_model") or "gpt-4o",
            "extra": get_setting(teacher_id, "ai_prompt").strip()}

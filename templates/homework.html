@@ -17,6 +17,12 @@
     <input type="file" name="answer_pdf" accept=".pdf" required>
     <button type="submit">{{ '更换' if hw.answer_pdf else '上传' }}答案 PDF</button>
   </form>
+  {% if hw.answer_pdf %}
+  <form method="post" action="{{ url_for('homework_extract', hid=hw.id) }}" class="inline-form">
+    <button type="submit">{{ '重新提取' if answer_count else '提取标准答案' }}</button>
+    {% if answer_count %}<span class="muted small">已缓存 {{ answer_count }} 道题的标准答案，批改时直接使用</span>{% endif %}
+  </form>
+  {% endif %}
 </div>
 
 <div class="card">

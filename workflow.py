@@ -114,9 +114,10 @@ def _run_match(state, _cfg, params, errors):
         return
     window = int(params.get("window") or 400)
     answer_text = state.get("answer_text") or ""
+    answer_key = state.get("answer_key") or {}  # 预处理缓存的标准答案（prepare 节点产物）
     answers = {}
     for q in questions:
-        ans = match_mod.match_answer(q.get("no"), answer_text, window=window)
+        ans = answer_key.get(q.get("no")) or match_mod.match_answer(q.get("no"), answer_text, window=window)
         q["standard_answer"] = ans
         answers[q.get("no")] = ans
     state["answers"] = answers

@@ -10,19 +10,27 @@ import re
 from . import llm
 
 
-def load_answer_text(answer_pdf):
-    """抽取答案 PDF 的文字层；扫描版（无文字层）返回空串。路径可为绝对或项目根相对。"""
+def load_answer_text(answer_pdf, limit=8000, max_pages=5):
+    """抽取答案 PDF 的文字层；扫描版（无文字层）返回空串。路径可为绝对或项目根相对。
+
+    limit/max_pages: 控制抽取量。预处理场景（prepare）应放大 limit 并放开页数，
+    默认参数服务于在线批改的快速匹配。
+    """
     path = answer_pdf if os.path.isabs(answer_pdf) else os.path.join(llm.BASE_DIR, answer_pdf)
     try:
         from pypdf import PdfReader
-        return ("\n".join(p.extract_text() or "" for p in PdfReader(path).pages) or "")[:8000]
+        pages = PdfReader(path).pages
+        if max_pages:
+            pages = pages[:max_pages]
+        return ("\n".join(p.extract_text() or "" for p in pages) or "")[:limit]
     except ImportError:
         pass
     try:
         import pypdfium2 as pdfium
         doc = pdfium.PdfDocument(path)
-        parts = [doc[i].get_textpage().get_text_range() for i in range(min(len(doc), 5))]
-        return "\n".join(parts)[:8000]
+        n = min(len(doc), max_pages) if max_pages else len(doc)
+        parts = [doc[i].get_textpage().get_text_range() for i in range(n)]
+        return "\n".join(parts)[:limit]
     except Exception:
         return ""
 

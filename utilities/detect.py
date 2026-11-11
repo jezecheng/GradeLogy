@@ -18,9 +18,10 @@ DETECT_PROMPT = (
     '{"questions":[{"no":"3.1","page":1,"bbox":[x1,y1,x2,y2]}]}\n'
     "要求：\n"
     "1. bbox 用 0-1000 归一化坐标（以该页左上角为原点），紧贴该题作答区，禁止跨题合并；\n"
-    "2. no 用题面标注的题号，保留原样（如 3.1、例1.1、4(1)、选3）；\n"
+    "2. no 用题面标注的题号，保留原样（如 3.1、例1.1、4(1)、选3）；纯字母子选项如 (a)(b)(c) 忽略，不算独立题；\n"
     "3. page 必须填页面标签中给出的真实页码，禁止从 1 重新编号；\n"
-    "4. 只输出题目位置，不要写答案、不要批改。")
+    "4. 某页没有学生作答（正文页/空白页）时，questions 里就不要放该页；只输出真正有作答题目的页。\n"
+    "5. 只输出题目位置，不要写答案、不要批改。")
 
 
 # ---------- 图片工具 ----------
@@ -152,8 +153,8 @@ def _salvage_questions(text):
 
 
 # ---------- 节点主函数 ----------
-def detect_questions(pages, api_url, api_key, model, extra="", batch=4):
-    """按页（批）识别题目位置。
+def detect_questions(pages, api_url, api_key, model, extra="", batch=1):
+    """按页识别题目位置。默认 batch=1（单页检测最稳：学生版每页 1-3 题，成本低且不会因混入空页整批跳过）。
 
     pages: uploads 目录下的整页图片文件名列表。
     返回 (questions, errors)，questions 为 [{no, page, bbox}, ...]。
@@ -183,8 +184,11 @@ def detect_questions(pages, api_url, api_key, model, extra="", batch=4):
         raw = parsed.get("questions", []) if parsed else []
         if not raw and finish == "length":
             raw = _salvage_questions(reply)
+        if not raw and finish != "length":
+            # 批次里可能恰好没有有作答的页，不算错误，静默跳过
+            continue
         if not raw:
-            errors.append(f"{span}：未识别到题目")
+            errors.append(f"{span}：输出被截断，抢救失败")
             continue
         for q in raw:
             if not isinstance(q, dict):
