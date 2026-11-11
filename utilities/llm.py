@@ -50,14 +50,39 @@ def chat(api_url, api_key, model, content, max_tokens=1500):
 
 
 def extract_json(text):
-    """从模型回复里抠出 JSON 对象（容忍 Markdown 代码块和前后废话）。"""
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end <= start:
+    """从模型回复里抠出第一个完整 JSON 对象（容忍代码块、前后废话、JSON 后的中文解释）。
+
+    按花括号配对扫描并跳过字符串内的括号，比 find/rfind 更稳：
+    模型在 JSON 后面补一句"并说明理由"时也能正确截断。
+    """
+    if not text:
         return None
-    try:
-        return json.loads(text[start:end + 1])
-    except json.JSONDecodeError:
-        return None
+    start = text.find("{")
+    while start >= 0:
+        depth, in_str, esc = 0, False, False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start:i + 1])
+                    except json.JSONDecodeError:
+                        break
+        start = text.find("{", start + 1)
+    return None
 
 
 def resolve_config(teacher_id=None):

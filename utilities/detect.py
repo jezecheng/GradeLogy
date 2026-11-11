@@ -185,14 +185,19 @@ def _detect_one_group(start, group, prompt, api_url, api_key, model, label="学�
             b64 = base64.b64encode(f.read()).decode()
         content.append({"type": "image_url",
                         "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-    reply, finish, err = llm.chat(api_url, api_key, model, content, max_tokens=3000)
     span = f"第 {start + 1}-{last} 页"
-    if err:
-        return [], f"{span}切题失败：{err}"
-    parsed = llm.extract_json(reply)
-    raw = parsed.get("questions", []) if parsed else []
-    if not raw and finish == "length":
-        raw = _salvage_questions(reply)
+    raw, finish = [], ""
+    # 题干让输出变长，题目密的页可能超 token；截断时放大上限重试一次
+    for max_tokens in (6000, 12000):
+        reply, finish, err = llm.chat(api_url, api_key, model, content, max_tokens=max_tokens)
+        if err:
+            return [], f"{span}切题失败：{err}"
+        parsed = llm.extract_json(reply)
+        raw = parsed.get("questions", []) if parsed else []
+        if not raw and finish == "length":
+            raw = _salvage_questions(reply)
+        if raw or finish != "length":
+            break
     if not raw and finish != "length":
         # 批次里可能恰好没有有作答的页（正文页/空白页），不算错误，静默跳过
         return [], None
