@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}附件{% endblock %}
+{% block content %}
+<h1>附件</h1>
+<p class="muted small">批改产生的整页图与题目裁剪图，按「课程 / 讲次」组织。重跑同一次批改会覆盖同名文件，不会产生碎片。</p>
+
+<div class="card">
+  <p class="crumbs small">
+    <a href="{{ url_for('attachments') }}">全部</a>
+    {% for c in crumbs %}
+      / <a href="{{ url_for('attachments', path=c.path) }}">{{ c.name }}</a>
+    {% endfor %}
+  </p>
+
+  {% set base = 'attachments/' ~ (rel ~ '/' if rel else '') %}
+
+  {% if dirs %}
+  <table class="card-table">
+    <tr><th>目录</th><th>文件数</th><th>更新时间</th><th></th></tr>
+    {% for d in dirs %}
+    <tr>
+      <td><a href="{{ url_for('attachments', path=(rel ~ '/' if rel else '') ~ d.name) }}">{{ d.name }}</a></td>
+      <td class="muted">{{ d.files }}</td>
+      <td class="muted">{{ d.mtime }}</td>
+      <td>
+        <form method="post" action="{{ url_for('attachments_delete') }}" style="display:inline"
+              onsubmit="return confirm('删除目录「{{ d.name }}」及其下 {{ d.files }} 个文件？')">
+          <input type="hidden" name="path" value="{{ (rel ~ '/' if rel else '') ~ d.name }}">
+          <input type="hidden" name="back" value="{{ rel }}">
+          <button type="submit" class="btn-link danger">删除</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+
+  {% if files %}
+  <table class="card-table">
+    <tr><th>文件</th><th>大小</th><th>更新时间</th><th></th></tr>
+    {% for f in files %}
+    <tr>
+      <td><a href="{{ url_for('uploaded_file', filename=base ~ f.name) }}" target="_blank">{{ f.name }}</a></td>
+      <td class="muted">{{ f.size }}</td>
+      <td class="muted">{{ f.mtime }}</td>
+      <td>
+        <form method="post" action="{{ url_for('attachments_delete') }}" style="display:inline"
+              onsubmit="return confirm('删除文件「{{ f.name }}」？')">
+          <input type="hidden" name="path" value="{{ (rel ~ '/' if rel else '') ~ f.name }}">
+          <input type="hidden" name="back" value="{{ rel }}">
+          <button type="submit" class="btn-link danger">删除</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+
+  {% if not dirs and not files %}
+  <p class="muted">这里还没有附件。批改作业或提取标准答案后会自动生成。</p>
+  {% endif %}
+</div>
+{% endblock %}

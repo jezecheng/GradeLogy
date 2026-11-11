@@ -1445,6 +1445,33 @@ def workflow_delete(pid):
     return redirect(url_for("workflow_list"))
 
 
+@app.route("/attachments")
+@role_required("teacher")
+def attachments():
+    """浏览 uploads/attachments/ 下按课程/讲次组织的图片，可逐级进入并清理。"""
+    rel = request.args.get("path", "")
+    dirs, files = storage.list_dir(rel)
+    # 面包屑：逐级累积相对路径
+    crumbs, acc = [], ""
+    for part in [p for p in rel.strip("/").split("/") if p]:
+        acc = f"{acc}/{part}" if acc else part
+        crumbs.append({"name": part, "path": acc})
+    return render_template("attachments.html", rel=rel.strip("/"), dirs=dirs,
+                           files=files, crumbs=crumbs)
+
+
+@app.route("/attachments/delete", methods=["POST"])
+@role_required("teacher")
+def attachments_delete():
+    rel = request.form.get("path", "")
+    back = request.form.get("back", "")
+    if not storage.remove(rel):
+        flash("删除失败：路径非法或目标不存在")
+    else:
+        flash("已删除")
+    return redirect(url_for("attachments", path=back))
+
+
 @app.route("/homework/<int:hid>/pipeline", methods=["POST"])
 @role_required("teacher")
 def homework_pipeline(hid):

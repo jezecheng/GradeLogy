@@ -9,6 +9,8 @@
 """
 import os
 import re
+import shutil
+from datetime import datetime
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
@@ -34,3 +36,57 @@ def page_name(student, page_no):
 
 def question_name(student, no):
     return f"{safe_name(student)}_q_{safe_name(no)}.jpg"
+
+
+# ---------- 附件浏览与清理（老师端页面用） ----------
+def safe_rel(rel):
+    """把请求里的相对路径限制在 attachments 根内；越界或非法返回 None。"""
+    rel = (rel or "").strip().strip("/")
+    target = os.path.normpath(os.path.join(ATTACH_ROOT, rel))
+    if target != ATTACH_ROOT and not target.startswith(ATTACH_ROOT + os.sep):
+        return None
+    return target
+
+
+def human_size(n):
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+
+
+def _mtime(path):
+    return datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M")
+
+
+def list_dir(rel):
+    """列出 attachments 下某目录的 (子目录, 文件)；目录不存在时返回空列表。"""
+    target = safe_rel(rel)
+    if not target or not os.path.isdir(target):
+        return [], []
+    dirs, files = [], []
+    for name in sorted(os.listdir(target)):
+        if name.startswith("."):
+            continue
+        full = os.path.join(target, name)
+        if os.path.isdir(full):
+            dirs.append({"name": name,
+                         "files": sum(len(fs) for _, _, fs in os.walk(full)),
+                         "mtime": _mtime(full)})
+        else:
+            files.append({"name": name, "size": human_size(os.path.getsize(full)),
+                          "mtime": _mtime(full)})
+    return dirs, files
+
+
+def remove(rel):
+    """删除 attachments 下的文件或目录（不允许删根目录）；成功返回 True。"""
+    target = safe_rel(rel)
+    if not target or target == ATTACH_ROOT or not os.path.exists(target):
+        return False
+    if os.path.isdir(target):
+        shutil.rmtree(target)
+    else:
+        os.remove(target)
+    return True

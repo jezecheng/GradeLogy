@@ -15,6 +15,7 @@
   {% elif g.user.role == 'teacher' %}
     <a href="{{ url_for('courses') }}">我的课程</a>
     <a href="{{ url_for('workflow_list') }}">批改流程</a>
+    <a href="{{ url_for('attachments') }}">附件</a>
     <a href="{{ url_for('settings_page') }}">AI 设置</a>
   {% else %}
     <a href="{{ url_for('student_home') }}">我的作业</a>
