@@ -1,0 +1,36 @@
+{
+  "nodes": [
+    {
+      "type": "detect",
+      "label": "按页切题",
+      "desc": "识别每道题的作答区域并裁剪（题号 + 页码 + 坐标）",
+      "inputs": [],
+      "outputs": ["questions"],
+      "params": [
+        {"key": "batch", "label": "每批页数", "default": 4},
+        {"key": "extra", "label": "补充提示词", "default": ""}
+      ]
+    },
+    {
+      "type": "match",
+      "label": "定位答案",
+      "desc": "在教师版答案中定位该题的标准答案片段",
+      "inputs": ["questions"],
+      "outputs": ["answers"],
+      "params": [
+        {"key": "window", "label": "答案窗口字数", "default": 400}
+      ]
+    },
+    {
+      "type": "grade",
+      "label": "逐题判分",
+      "desc": "逐题对照标准答案判分，输出 OCR、对错与评语",
+      "inputs": ["questions", "answers"],
+      "outputs": ["graded"],
+      "params": [
+        {"key": "max_tokens", "label": "输出上限（思考模型需 ≥6000）", "default": 6000},
+        {"key": "extra", "label": "补充提示词", "default": ""}
+      ]
+    }
+  ]
+}

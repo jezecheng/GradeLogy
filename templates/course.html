@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}{{ course.name }}{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('courses') }}">← 返回课程列表</a></p>
+<h1>{{ course.name }}</h1>
+<p class="muted">{{ course.description }}</p>
+
+<div class="card">
+  <h2>学生名单（{{ students|length }}）</h2>
+  <form method="post" action="{{ url_for('course_enroll', cid=course.id) }}" class="inline-form">
+    <select name="student_id" required>
+      <option value="">从学生账号中选择…</option>
+      {% for s in candidates %}
+      <option value="{{ s.id }}">{{ s.display_name }}（{{ s.username }}）</option>
+      {% endfor %}
+    </select>
+    <button type="submit">加入课程</button>
+  </form>
+  {% if not candidates %}<p class="muted">没有可添加的学生账号，请联系管理员创建。</p>{% endif %}
+  {% if students %}
+  <table>
+    <tr><th>姓名</th><th>用户名</th><th></th></tr>
+    {% for s in students %}
+    <tr>
+      <td>{{ s.display_name }}</td>
+      <td class="muted">{{ s.username }}</td>
+      <td>
+        <form method="post" action="{{ url_for('course_unenroll', cid=course.id, sid=s.id) }}"
+              onsubmit="return confirm('将该学生移出课程？')">
+          <button class="danger small">移出</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>作业（{{ homeworks|length }}）</h2>
+  <form method="post" action="{{ url_for('homework_create', cid=course.id) }}"
+        enctype="multipart/form-data" class="stack-form">
+    <input name="title" placeholder="作业标题，如：第三章 化学平衡 练习" required>
+    <textarea name="description" rows="2" placeholder="作业说明（可选）"></textarea>
+    <label>截止时间 <input type="datetime-local" name="deadline"></label>
+    <label>标准答案 PDF（可选，AI 批改时会作参考）<input type="file" name="answer_pdf" accept=".pdf"></label>
+    <button type="submit">发布作业</button>
+  </form>
+  {% if homeworks %}
+  <table>
+    <tr><th>标题</th><th>截止时间</th><th>提交进度</th><th>答案</th><th></th></tr>
+    {% for h in homeworks %}
+    <tr>
+      <td><a href="{{ url_for('homework_detail', hid=h.id) }}">{{ h.title }}</a></td>
+      <td class="muted">{{ h.deadline.replace('T',' ') or '—' }}</td>
+      <td>{{ h.n_subs }} / {{ h.n_students }}</td>
+      <td>{% if h.answer_pdf %}<a href="{{ url_for('uploaded_file', filename=h.answer_pdf) }}">PDF</a>{% else %}—{% endif %}</td>
+      <td>
+        <form method="post" action="{{ url_for('homework_delete', hid=h.id) }}"
+              onsubmit="return confirm('删除作业及其全部提交？')">
+          <button class="danger small">删除</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>教案（{{ plans|length }}）</h2>
+  <form method="post" action="{{ url_for('plan_create', cid=course.id) }}" class="inline-form">
+    <input name="title" placeholder="教案标题，如：氧化还原反应 教学设计" required>
+    <button type="submit">新建教案</button>
+  </form>
+  {% if plans %}
+  <table>
+    <tr><th>标题</th><th>最近更新</th><th></th></tr>
+    {% for p in plans %}
+    <tr>
+      <td><a href="{{ url_for('plan_edit', pid=p.id) }}">{{ p.title }}</a></td>
+      <td class="muted">{{ p.updated_at }}</td>
+      <td>
+        <form method="post" action="{{ url_for('plan_delete', pid=p.id) }}"
+              onsubmit="return confirm('删除该教案？')">
+          <button class="danger small">删除</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+{% endblock %}

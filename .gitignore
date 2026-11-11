@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 敏感信息与运行数据
+.secret_key
+data.sqlite*
+server.log
+
+# 学生上传件与批改附件（含隐私，不入库）
+uploads/
+
+# 截图等本地杂物
+.screenshots/
+.DS_Store

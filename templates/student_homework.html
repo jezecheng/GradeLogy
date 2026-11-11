@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}{{ hw.title }} - 提交作业{% endblock %}
+{% block content %}
+{% set verdict_cls = {'对': 'right', '半对': 'partial', '错': 'wrong'} %}
+<p><a href="{{ url_for('student_home') }}">← 返回我的作业</a></p>
+<h1>{{ hw.title }}</h1>
+<p class="muted">{{ hw.course_name }}{% if hw.deadline %} · 截止 {{ hw.deadline.replace('T',' ') }}{% endif %}</p>
+{% if hw.description %}<p>{{ hw.description }}</p>{% endif %}
+
+<div class="card">
+  <h2>上传作业扫描件</h2>
+  <form method="post" enctype="multipart/form-data" class="stack-form">
+    <label>文件（png / jpg / webp / pdf，≤20MB）
+      <input type="file" name="file" accept=".png,.jpg,.jpeg,.webp,.pdf" required>
+    </label>
+    <button type="submit">提交</button>
+  </form>
+  <p class="muted small">可以重复提交，老师以最新一次为准批改。</p>
+</div>
+
+<div class="card">
+  <h2>我的提交记录（{{ subs|length }}）</h2>
+  {% if subs %}
+  {% for s in subs %}
+  {% set sm = s.ai_summary|fromjson %}
+  <div class="sub-card">
+    <div class="sub-head">
+      <a href="{{ url_for('uploaded_file', filename=s.file_path) }}" target="_blank">第 {{ subs|length - loop.index0 }} 次提交</a>
+      <span class="muted">{{ s.created_at }}</span>
+      <span class="tag tag-{{ s.status }}">{{ s.status }}</span>
+      {% if s.score %}<span class="score">{{ s.score }}</span>{% endif %}
+    </div>
+    {% if sm %}
+    <p class="small">AI 汇总：总分
+      <span class="score">{{ '%g'|format(sm.total|float) }}/{{ '%g'|format(sm.max_total|float) }}</span>
+      <span class="muted">· 对 {{ sm.right|length }} 题 · 半对 {{ sm.partial|length }} 题 · 错 {{ sm.wrong|length }} 题</span>
+    </p>
+    {% endif %}
+    {% if s.feedback %}<pre class="feedback">{{ s.feedback }}</pre>
+    {% elif sm and sm.evaluation %}<pre class="feedback">{{ sm.evaluation }}</pre>
+    {% else %}<p class="muted small">等待老师批改…</p>{% endif %}
+  </div>
+  {% endfor %}
+  {% if items %}
+  <h2 style="margin-top:16px">逐题批改明细</h2>
+  {% for q in items %}
+  <div class="qa-item">
+    <strong>第 {{ q.no }} 题</strong>
+    {% if q.verdict %}
+    <span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">{{ q.verdict }}</span>
+    {% endif %}
+    <span class="score">{{ q.score }}{% if q.max_score %} / {{ '%g'|format(q.max_score|float) }}{% endif %}</span>
+    {% if q.note %} — {{ q.note }}{% endif %}
+  </div>
+  {% endfor %}
+  {% endif %}
+  {% else %}
+  <p class="muted">还没有提交记录。</p>
+  {% endif %}
+</div>
+{% endblock %}

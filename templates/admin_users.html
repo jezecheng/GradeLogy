@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}用户管理{% endblock %}
+{% block content %}
+<h1>用户管理</h1>
+<p class="muted">管理员可创建老师与学生账号、重置密码。老师登录后可管理课程与作业，学生登录后可提交作业并查看批改。</p>
+
+<div class="card">
+  <h2>创建账号</h2>
+  <form method="post" action="{{ url_for('admin_user_create') }}" class="inline-form">
+    <input name="username" placeholder="用户名（登录用，如 teacher01）" required>
+    <input name="display_name" placeholder="姓名">
+    <select name="role">
+      <option value="teacher">老师</option>
+      <option value="student">学生</option>
+      <option value="admin">管理员</option>
+    </select>
+    <input name="password" placeholder="初始密码（默认 123456）">
+    <button type="submit">创建</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>账号列表（{{ users|length }}）</h2>
+  <table>
+    <tr><th>用户名</th><th>姓名</th><th>角色</th><th>数据</th><th>创建时间</th><th>操作</th></tr>
+    {% for u in users %}
+    <tr>
+      <td><strong>{{ u.username }}</strong></td>
+      <td>{{ u.display_name }}</td>
+      <td><span class="role-badge role-{{ u.role }}">{{ {'admin':'管理员','teacher':'老师','student':'学生'}[u.role] }}</span></td>
+      <td class="muted">
+        {% if u.role == 'teacher' %}{{ u.n_courses }} 门课程
+        {% elif u.role == 'student' %}{{ u.n_enrolled }} 门课程
+        {% else %}—{% endif %}
+      </td>
+      <td class="muted">{{ u.created_at }}</td>
+      <td class="actions">
+        <form method="post" action="{{ url_for('admin_user_reset', uid=u.id) }}" class="inline">
+          <input name="password" placeholder="新密码" class="tiny">
+          <button class="small">重置密码</button>
+        </form>
+        {% if u.id != g.user.id %}
+        <form method="post" action="{{ url_for('admin_user_delete', uid=u.id) }}" class="inline"
+              onsubmit="return confirm('删除账号 {{ u.username }}？其课程、作业与提交会一起删除。')">
+          <button class="danger small">删除</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}

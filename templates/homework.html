@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}{{ hw.title }}{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('course_detail', cid=course.id) }}">← 返回 {{ course.name }}</a></p>
+<h1>{{ hw.title }}</h1>
+<p class="muted">{{ hw.description }}{% if hw.deadline %} · 截止 {{ hw.deadline.replace('T',' ') }}{% endif %}</p>
+
+<div class="card">
+  <h2>标准答案</h2>
+  {% if hw.answer_pdf %}
+    <p><a href="{{ url_for('uploaded_file', filename=hw.answer_pdf) }}">查看当前答案 PDF</a></p>
+  {% else %}
+    <p class="muted">尚未上传答案。上传后 AI 批改会把它作为参考。</p>
+  {% endif %}
+  <form method="post" action="{{ url_for('homework_answer', hid=hw.id) }}"
+        enctype="multipart/form-data" class="inline-form">
+    <input type="file" name="answer_pdf" accept=".pdf" required>
+    <button type="submit">{{ '更换' if hw.answer_pdf else '上传' }}答案 PDF</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>批改流程</h2>
+  <form method="post" action="{{ url_for('homework_pipeline', hid=hw.id) }}" class="inline-form">
+    <select name="pipeline_id">
+      <option value="0">默认流程（按页切题 → 定位答案 → 逐题判分）</option>
+      {% for p in pipelines %}
+      <option value="{{ p.id }}" {% if hw.pipeline_id == p.id %}selected{% endif %}>{{ p.name }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit" class="small">保存</button>
+    <a class="btn-link" href="{{ url_for('workflow_list') }}">设计新流程</a>
+  </form>
+</div>
+
+<div class="card">
+  <h2>提交与批改（{{ subs|length }} 份）</h2>
+  {% if subs %}
+  {% for s in subs %}
+  <div class="sub-card">
+    <div class="sub-head">
+      <strong>{{ s.display_name }}</strong>
+      <span class="muted">{{ s.username }} · {{ s.created_at }}</span>
+      <span class="tag tag-{{ s.status }}">{{ s.status }}</span>
+      {% if s.score %}<span class="score">{{ s.score }}</span>{% endif %}
+      <a class="btn-link" href="{{ url_for('uploaded_file', filename=s.file_path) }}" target="_blank">查看扫描件</a>
+      <a class="btn-link" href="{{ url_for('submission_review', sid=s.id) }}">逐题批改</a>
+      <form method="post" action="{{ url_for('submission_segment', sid=s.id) }}">
+        <button class="small">{{ '重新识别' if s.status == '待批改' or s.feedback else 'AI 识别切分' }}</button>
+      </form>
+    </div>
+    {% if s.grader %}<p class="muted small">批改来源：{{ s.grader }} · 更新于 {{ s.updated_at }}</p>{% endif %}
+    {% if s.feedback %}<pre class="feedback">{{ s.feedback }}</pre>{% endif %}
+    <details {% if not s.feedback %}open{% endif %}>
+      <summary class="small">手动更正批改</summary>
+      <form method="post" action="{{ url_for('submission_correct', sid=s.id) }}" class="stack-form correct-form">
+        <label>得分 <input name="score" value="{{ s.score }}" placeholder="如：85 或 85/100"></label>
+        <label>评语 / 批改意见
+          <textarea name="feedback" rows="5" placeholder="填写批改意见，学生登录后可见">{{ s.feedback }}</textarea>
+        </label>
+        <button type="submit">保存更正</button>
+      </form>
+    </details>
+  </div>
+  {% endfor %}
+  {% else %}
+  <p class="muted">还没有学生提交。</p>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}AI 设置{% endblock %}
+{% block content %}
+<h1>AI 识别设置</h1>
+
+<div class="card narrow">
+  <h2>演示模式（没有 API 时用）</h2>
+  <p class="muted small">勾选后点「AI 识别切分」不会联网：按页纵向等分成 4 段生成占位题目，
+    你可以照常体验三栏批改、修改 OCR、填写标准答案、保存和查看学生端效果。真实使用时请取消勾选。</p>
+  <form method="post">
+    <input type="hidden" name="demo_only" value="1">
+    <label class="check-line">
+      <input type="checkbox" name="ai_demo" value="1" {% if cfg.ai_demo == '1' %}checked{% endif %}
+             style="width:auto">
+      启用演示模式（不调用 AI）
+    </label>
+    <button type="submit">保存</button>
+  </form>
+</div>
+
+<div class="card narrow">
+  <h2>真实接口</h2>
+  <p class="muted small">需要支持图片输入的多模态模型（要能输出每题的坐标）。填 OpenAI 兼容的基地址：</p>
+  <p class="muted small">腾讯混元备选模型：hunyuan-turbos-vision、hunyuan-standard-vision；纯文本模型（如 hunyuan-turbos-latest）无法识别扫描件。</p>
+  <table class="small">
+    <tr><th>服务</th><th>基地址</th><th>模型示例</th></tr>
+    <tr><td>智谱（有免费模型）</td><td>https://open.bigmodel.cn/api/paas/v4</td><td>glm-4.6v-flash</td></tr>
+    <tr><td>腾讯混元</td><td>https://api.hunyuan.cloud.tencent.com/v1</td><td>hunyuan-vision</td></tr>
+    <tr><td>阿里百炼（有免费额度）</td><td>https://dashscope.aliyuncs.com/compatible-mode/v1</td><td>qwen-vl-max</td></tr>
+    <tr><td>硅基流动</td><td>https://api.siliconflow.cn/v1</td><td>Qwen/Qwen2.5-VL-7B-Instruct</td></tr>
+    <tr><td>OpenAI</td><td>https://api.openai.com/v1</td><td>gpt-4o</td></tr>
+    <tr><td>本地 Ollama</td><td>http://localhost:11434/v1</td><td>qwen2.5vl:7b（Key 随便填）</td></tr>
+  </table>
+  <form method="post" class="stack-form" style="margin-top:14px">
+    <label>接口基地址
+      <input name="ai_api_url" value="{{ cfg.ai_api_url }}" placeholder="https://api.openai.com/v1">
+    </label>
+    <label>API Key
+      <input name="ai_api_key" type="password" value=""
+             placeholder="{% if cfg.ai_api_key %}已保存（留空则不修改）{% else %}粘贴 API Key{% endif %}">
+    </label>
+    <label>模型
+      <input name="ai_model" value="{{ cfg.ai_model }}" placeholder="glm-4.6v-flash">
+    </label>
+    <label>额外要求（可选，会追加到识别提示词后面）
+      <textarea name="ai_prompt" rows="4" placeholder="如：按 1-10 题切分；有机题要识别结构简式。">{{ cfg.ai_prompt }}</textarea>
+    </label>
+    <label class="check-line">
+      <input type="checkbox" name="ai_demo" value="1" {% if cfg.ai_demo == '1' %}checked{% endif %}
+             style="width:auto">
+      启用演示模式（不调用 AI）
+    </label>
+    <button type="submit">保存设置</button>
+  </form>
+  <form method="post" action="{{ url_for('settings_test') }}" style="margin-top:10px">
+    <button class="small">测试连接</button>
+    <span class="muted small">保存后点这里，确认 Key 是否可用</span>
+  </form>
+</div>
+{% endblock %}

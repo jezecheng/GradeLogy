@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}逐题批改 - {{ sub.display_name }}{% endblock %}
+{% block content %}
+{% set summary = sub.ai_summary|fromjson %}
+{% set verdict_cls = {'对': 'right', '半对': 'partial', '错': 'wrong'} %}
+<p><a href="{{ url_for('homework_detail', hid=hw.id) }}">← 返回 {{ hw.title }}</a></p>
+<h1>逐题批改：{{ sub.display_name }}</h1>
+<p class="muted">
+  {{ sub.username }} · {{ hw.title }} · 提交于 {{ sub.created_at }}
+  · <a href="{{ url_for('uploaded_file', filename=sub.file_path) }}" target="_blank">查看原始扫描件</a>
+</p>
+
+{% if summary and summary.errors %}
+<div class="card ai-alert">
+  <h2>部分批次未完整处理</h2>
+  <p>以下批次未完整处理，请检查对应页的原件，必要时补录题目或重新识别：</p>
+  <ul class="weak-list">
+    {% for e in summary.errors %}<li>{{ e }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% if summary %}
+<div class="card ai-summary">
+  <h2>AI 汇总</h2>
+  <p>总分 <span class="score">{{ '%g'|format(summary.total|float) }}/{{ '%g'|format(summary.max_total|float) }}</span>
+    <span class="muted small">
+      对 {{ summary.right|length }} 题{% if summary.right %}（{{ summary.right|join('、') }}）{% endif %}
+      · 半对 {{ summary.partial|length }} 题{% if summary.partial %}（{{ summary.partial|join('、') }}）{% endif %}
+      · 错 {{ summary.wrong|length }} 题{% if summary.wrong %}（{{ summary.wrong|join('、') }}）{% endif %}
+    </span>
+  </p>
+  {% if summary.weak_points %}
+  <div class="col-title">失分点归因</div>
+  <ul class="weak-list">
+    {% for w in summary.weak_points %}
+    <li><strong>第 {{ w.no }} 题</strong>
+      <span class="verdict verdict-wrong">{{ w.type }}</span>
+      {{ w.detail }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if summary.evaluation %}<p class="muted">总评：{{ summary.evaluation }}</p>{% endif %}
+</div>
+{% endif %}
+
+{% if not questions %}
+<div class="card">
+  <p class="muted">还没有切分结果。先点「AI 识别切分」，AI 会按题裁剪小图、做 OCR，并给出判定与建议分数。</p>
+  <form method="post" action="{{ url_for('submission_segment', sid=sub.id) }}">
+    <button>AI 识别切分</button>
+  </form>
+</div>
+{% else %}
+<div class="card">
+  <form method="post" action="{{ url_for('submission_review_save', sid=sub.id) }}">
+    {% for q in questions %}
+    <div class="review-row">
+      <div class="review-col img-col">
+        <div class="col-title">第 {{ q.no }} 题 · 学生作答</div>
+        {% if q.image_path %}
+          <a href="{{ url_for('uploaded_file', filename=q.image_path) }}" target="_blank">
+            <img class="crop-img" src="{{ url_for('uploaded_file', filename=q.image_path) }}" alt="第 {{ q.no }} 题">
+          </a>
+        {% else %}
+          <p class="muted small">无法裁剪出该题区域，请查看<a href="{{ url_for('uploaded_file', filename=sub.file_path) }}" target="_blank">原始扫描件</a>。</p>
+        {% endif %}
+      </div>
+      <div class="review-col">
+        <div class="col-title">OCR 结果（可手动修正）
+          {% if q.verdict %}
+          <span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">AI 判定：{{ q.verdict }}</span>
+          {% endif %}
+          {% if q.verdict or q.score or q.max_score %}
+          <span class="ai-hint">AI 建议 {{ q.score if q.score != '' else '—' }}/{{ '%g'|format(q.max_score|float) }}</span>
+          {% endif %}
+        </div>
+        <textarea name="ocr_{{ q.id }}" rows="7">{{ q.ocr_text }}</textarea>
+        <label>本题得分{% if q.max_score %}（满分 {{ '%g'|format(q.max_score|float) }}）{% endif %}<input name="score_{{ q.id }}" value="{{ q.score }}" placeholder="如 4"></label>
+        <label>本题评语 <textarea name="note_{{ q.id }}" rows="2">{{ q.note }}</textarea></label>
+      </div>
+      <div class="review-col">
+        <div class="col-title">标准答案（可修正）</div>
+        <textarea name="standard_{{ q.id }}" rows="7">{{ q.standard_answer }}</textarea>
+      </div>
+    </div>
+    {% endfor %}
+
+    {% set auto_total = '%g/%g'|format(summary.total|float, summary.max_total|float) if summary else '' %}
+    <div class="review-row total-row">
+      <div class="review-col">
+        <div class="col-title">总分</div>
+        <input name="total_score" value="{{ sub.score or auto_total }}" placeholder="{{ auto_total or '如 85/100' }}">
+      </div>
+      <div class="review-col wide">
+        <div class="col-title">总评（学生可见）</div>
+        <textarea name="overall" rows="4">{{ sub.feedback or (summary.evaluation if summary else '') }}</textarea>
+      </div>
+    </div>
+    <div class="save-bar">
+      <button type="submit">保存批改结果</button>
+      <span class="muted small">分数与评语已按 AI 建议预填，可直接修改。保存后学生登录即可看到每题判定、得分、评语与总评。</span>
+    </div>
+  </form>
+</div>
+{% endif %}
+{% endblock %}
