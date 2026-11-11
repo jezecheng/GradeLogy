@@ -1623,9 +1623,31 @@ def admin_export():
     return send_file(out.name, as_attachment=True, download_name=f"gradelogy_{ts}.zip")
 
 
+def _student_files(uid):
+    """学生可访问的文件白名单：自己的提交原件 + 自己提交下的题目裁剪图。
+
+    教师版答案、他人作业一律不在集合内，避免知道路径就能下载。
+    """
+    db = get_db()
+    paths = set()
+    for r in db.execute("SELECT file_path FROM submissions WHERE student_id=?", (uid,)):
+        if r["file_path"]:
+            paths.add(os.path.normpath(r["file_path"]).replace("\\", "/"))
+    for r in db.execute("SELECT q.image_path FROM questions q "
+                        "JOIN submissions s ON s.id=q.submission_id "
+                        "WHERE s.student_id=? AND q.image_path != ''", (uid,)):
+        paths.add(os.path.normpath(r["image_path"]).replace("\\", "/"))
+    return paths
+
+
 @app.route("/files/<path:filename>")
 @login_required
 def uploaded_file(filename):
+    if g.user["role"] == "student":
+        wanted = os.path.normpath(filename).replace("\\", "/")
+        if wanted not in _student_files(g.user["id"]):
+            log.warning("越权访问文件 student=%s path=%s", g.user["id"], wanted)
+            abort(403)
     return send_from_directory(UPLOAD_DIR, filename)
 
 
