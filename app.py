@@ -102,6 +102,8 @@ CREATE TABLE IF NOT EXISTS users(
   password_hash TEXT NOT NULL,
   display_name TEXT NOT NULL,
   role TEXT NOT NULL CHECK(role IN ('admin','teacher','student')),
+  real_name TEXT DEFAULT '',
+  student_no TEXT DEFAULT '',
   must_change_password INTEGER DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS courses(
@@ -288,6 +290,10 @@ def init_db():
         for r in con.execute("SELECT id, password_hash FROM users").fetchall():
             if any(check_password_hash(r[1], p) for p in DEFAULT_PASSWORDS):
                 con.execute("UPDATE users SET must_change_password=1 WHERE id=?", (r[0],))
+    # 轻量迁移：学生真实姓名与学籍号（与登录用户名分离）
+    for col in ("real_name", "student_no"):
+        if col not in ucols:
+            con.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT DEFAULT ''")
     if con.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
         con.execute("INSERT INTO users(username,password_hash,display_name,role,must_change_password) "
                     "VALUES(?,?,?,?,1)",
@@ -513,19 +519,25 @@ def admin_users_alias():
 def admin_user_create():
     username = request.form.get("username", "").strip()
     name = request.form.get("display_name", "").strip() or username
+    real_name = request.form.get("real_name", "").strip() or name
+    student_no = request.form.get("student_no", "").strip()
     role = request.form.get("role", "student")
     password = request.form.get("password", "") or "123456"
     if not username:
         flash("用户名不能为空")
     elif role not in ("teacher", "student", "admin"):
         flash("角色不合法")
+    elif student_no and not roster.STUDENT_NO_RE.match(student_no):
+        flash("学籍号不合法（1-32 位字母、数字或 _ . -）")
+    elif len(real_name) > 32:
+        flash("真实姓名最多 32 字")
     else:
         try:
             db = get_db()
-            db.execute("INSERT INTO users(username,password_hash,display_name,role,must_change_password) "
-                       "VALUES(?,?,?,?,?)",
+            db.execute("INSERT INTO users(username,password_hash,display_name,role,"
+                       "real_name,student_no,must_change_password) VALUES(?,?,?,?,?,?,?)",
                        (username, generate_password_hash(password), name, role,
-                        1 if password in DEFAULT_PASSWORDS else 0))
+                        real_name, student_no, 1 if password in DEFAULT_PASSWORDS else 0))
             db.commit()
             log.info("创建账号 operator=%s#%s user=%s role=%s",
                      g.user["username"], g.user["id"], username, role)
@@ -666,11 +678,11 @@ def course_detail(cid):
     db = get_db()
     course = own_course(cid)
     students = db.execute("""
-        SELECT u.id, u.username, u.display_name FROM enrollments e
+        SELECT u.id, u.username, u.display_name, u.real_name, u.student_no FROM enrollments e
         JOIN users u ON u.id=e.student_id WHERE e.course_id=? ORDER BY u.display_name""",
         (cid,)).fetchall()
     candidates = db.execute("""
-        SELECT u.id, u.username, u.display_name FROM users u
+        SELECT u.id, u.username, u.display_name, u.real_name, u.student_no FROM users u
         WHERE u.role='student' AND u.id NOT IN
               (SELECT student_id FROM enrollments WHERE course_id=?)
         ORDER BY u.display_name""", (cid,)).fetchall()
@@ -794,9 +806,10 @@ def _apply_student_plan(cid, plan):
             continue
         if action == "create":
             sid = db.execute(
-                "INSERT INTO users(username,password_hash,display_name,role,must_change_password) "
-                "VALUES(?,?,?,?,?)",
+                "INSERT INTO users(username,password_hash,display_name,role,"
+                "real_name,student_no,must_change_password) VALUES(?,?,?,?,?,?,?)",
                 (r["username"], generate_password_hash(r["password"]), r["name"], "student",
+                 r["real_name"], r["student_no"],
                  1 if r["password"] == roster.DEFAULT_PASSWORD else 0)).lastrowid
             counts["create"] += 1
         else:

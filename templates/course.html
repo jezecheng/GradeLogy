@@ -12,7 +12,7 @@
     <select name="student_id" required>
       <option value="">从学生账号中选择…</option>
       {% for s in candidates %}
-      <option value="{{ s.id }}">{{ s.display_name }}（{{ s.username }}）</option>
+      <option value="{{ s.id }}">{{ s.display_name }}（{{ s.username }}{% if s.student_no %} · {{ s.student_no }}{% endif %}）</option>
       {% endfor %}
     </select>
     <button type="submit">加入课程</button>
@@ -24,18 +24,20 @@
           enctype="multipart/form-data" class="stack-form">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
       <input type="file" name="file" accept=".csv,text/csv" required>
-      <p class="muted">每行「用户名,姓名[,初始密码]」，首行可以是表头（用户名/姓名/密码）。
+      <p class="muted">每行「用户名,姓名[,初始密码]」，首行可以是表头（用户名/姓名/真实姓名/学籍号/密码）。
         上传后先显示预览，确认后才写入；用户名已存在则直接加入课程，不存在则新建学生账号
-        （密码默认 123456，首次登录需修改）。Excel 请另存为「CSV UTF-8」。</p>
+        （密码默认 123456，首次登录需修改）。真实姓名与学籍号需用表头列提供。Excel 请另存为「CSV UTF-8」。</p>
       <button type="submit">预览导入</button>
     </form>
   </details>
   {% if students %}
   <table>
-    <tr><th>姓名</th><th>用户名</th><th></th></tr>
+    <tr><th>姓名</th><th>真实姓名</th><th>学籍号</th><th>用户名</th><th></th></tr>
     {% for s in students %}
     <tr>
       <td>{{ s.display_name }}</td>
+      <td>{{ s.real_name or '—' }}</td>
+      <td class="muted">{{ s.student_no or '—' }}</td>
       <td class="muted">{{ s.username }}</td>
       <td>
         <form method="post" action="{{ url_for('course_unenroll', cid=course.id, sid=s.id) }}"

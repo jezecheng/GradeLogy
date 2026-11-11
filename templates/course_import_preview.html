@@ -21,12 +21,13 @@
   <p class="muted">新建 {{ g.counts.create }} 人 · 加入 {{ g.counts.join }} 人 · 已在课程 {{ g.counts.skip }} 人
     {% if g.counts.error %}· 无法处理 {{ g.counts.error }} 人{% endif %}</p>
   <table>
-    <tr><th>行</th><th>用户名</th><th>姓名</th><th>动作</th><th>说明</th></tr>
+    <tr><th>行</th><th>用户名</th><th>姓名</th><th>学籍号</th><th>动作</th><th>说明</th></tr>
     {% for item in g.plan %}
     <tr>
       <td class="muted">{{ item.row.line }}</td>
       <td>{{ item.row.username }}</td>
       <td>{{ item.row.name }}</td>
+      <td class="muted">{{ item.row.student_no or '—' }}</td>
       <td>{{ {'create':'新建账号','join':'加入课程','skip':'已在课程','error':'无法处理'}[item.action] }}</td>
       <td class="muted">{{ item.detail }}</td>
     </tr>
