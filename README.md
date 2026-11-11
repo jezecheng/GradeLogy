@@ -21,7 +21,7 @@
 - **人工复核**：三栏同屏，可修改 OCR、判定、得分与评语；保存即向学生发布
 - **错题本**：按课程汇总，老师可按学生筛选，学生只看自己；支持「待复习 / 已掌握」与复习次数
 - **可编排流程**：Drawflow 拖拽设计器，作业可绑定自定义批改流程
-- **工程能力**：配置环境变量化、Docker 部署、日志轮转、数据整体导出与恢复、一致性检查、访问与审计日志
+- **工程能力**：配置环境变量化、Docker 部署、日志轮转、每日自动备份、数据整体导出与恢复、一致性检查、访问与审计日志
 
 ## 架构
 
@@ -144,6 +144,9 @@ docker build --build-arg BASE_IMAGE=docker.m.daocloud.io/library/python:3.12-sli
 | `HOST` / `PORT` | `0.0.0.0` / `5000` | 监听地址与端口 |
 | `MAX_UPLOAD_MB` | `20` | 单次上传上限 |
 | `MAX_RESTORE_MB` | `2048` | 从备份恢复时解压总量上限 |
+| `BACKUP_DIR` | `$DATA_DIR/backups` | 自动备份、手动备份与恢复前快照目录 |
+| `BACKUP_KEEP` | `7` | 保留最近几份备份，超出的自动清理 |
+| `AUTO_BACKUP` | `1` | 是否启用每日自动备份（`0` 关闭） |
 | `SECRET_KEY` | 自动生成并存入 `$DATA_DIR/.secret_key` | 生产环境建议显式设置 |
 | `AI_API_URL` / `AI_API_KEY` / `AI_MODEL` | 空 | 设置后优先于页面 AI 设置，容器部署不必把 Key 存库 |
 | `LOG_LEVEL` | `INFO` | 日志级别；设为 `WARNING` 可关闭访问日志 |
@@ -151,6 +154,8 @@ docker build --build-arg BASE_IMAGE=docker.m.daocloud.io/library/python:3.12-sli
 ## 数据备份与迁移
 
 管理员「系统维护」提供完整备份与恢复：导出 zip（数据库在线快照 + 全部附件），在新系统上传即可整体还原。恢复前自动备份当前数据，恢复后重新登录；旧版本备份会自动执行数据库迁移。
+
+系统还会每天自动生成一份同样的完整备份到 `$DATA_DIR/backups`，保留最近 `BACKUP_KEEP` 份；管理员也可在「系统维护」页随时「立即备份」并下载历史备份。
 
 同版本换目录也可直接停机拷贝整个数据目录（数据库与附件必须同源）。详细步骤、手动兜底与注意事项见 [管理员手册 · 备份与迁移](docs/admin.md#数据备份与迁移)。
 
@@ -160,6 +165,7 @@ docker build --build-arg BASE_IMAGE=docker.m.daocloud.io/library/python:3.12-sli
 - [ ] 混元视觉模型单页偶发漏题（可调 detect 提示词或多轮投票）
 - [ ] 批改结果导出 Excel
 - [x] 学生名单 CSV 批量导入
+- [x] 每日自动备份与一键下载
 - [x] 错题本与复习状态追踪
 - [x] 局域网访问、Docker 部署与配置解耦
 - [x] 系统数据整体导出、恢复、一致性检查与修复

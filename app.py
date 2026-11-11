@@ -11,12 +11,18 @@ import secrets
 import shutil
 import sqlite3
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
 import zipfile
 from datetime import datetime
 from functools import wraps
+
+try:
+    import fcntl  # 仅类 Unix 可用，用于保证自动备份只在一个进程里跑
+except ImportError:  # pragma: no cover
+    fcntl = None
 
 from flask import (Flask, abort, flash, g, redirect, render_template, request,
                    send_file, send_from_directory, session, url_for)
@@ -34,6 +40,8 @@ cfg.setup_logging()
 BASE_DIR = cfg.BASE_DIR
 UPLOAD_DIR = cfg.STORAGE_DIR
 DB_PATH = cfg.DB_PATH
+BACKUP_DIR = cfg.BACKUP_DIR
+BACKUP_RE = re.compile(r"gradelogy_\d{8}_\d{6}\.zip")
 ALLOWED_EXT = {"png", "jpg", "jpeg", "webp", "pdf"}
 IMG_EXT = {"png", "jpg", "jpeg", "webp"}
 
@@ -2008,8 +2016,19 @@ def _consistency_issues():
 def consistency_page():
     stats = {t: get_db().execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
              for t in ("users", "courses", "homeworks", "submissions", "questions")}
+    backups = []
+    if os.path.isdir(BACKUP_DIR):
+        for name in sorted(os.listdir(BACKUP_DIR), reverse=True):
+            path = os.path.join(BACKUP_DIR, name)
+            if BACKUP_RE.fullmatch(name):
+                backups.append({
+                    "name": name,
+                    "size": storage.human_size(os.path.getsize(path)),
+                    "mtime": datetime.fromtimestamp(os.path.getmtime(path))
+                    .strftime("%Y-%m-%d %H:%M")})
     return render_template("consistency.html", issues=_consistency_issues(), stats=stats,
-                           data_dir=cfg.DATA_DIR, db_path=DB_PATH)
+                           data_dir=cfg.DATA_DIR, db_path=DB_PATH, backups=backups,
+                           auto_backup=cfg.AUTO_BACKUP, backup_keep=cfg.BACKUP_KEEP)
 
 
 @app.route("/admin/consistency/fix", methods=["POST"])
@@ -2026,11 +2045,8 @@ def consistency_fix():
     return redirect(url_for("consistency_page"))
 
 
-@app.route("/admin/export")
-@role_required("admin")
-def admin_export():
-    """整体导出数据库快照 + 全部附件 + manifest，用于备份或迁移到新机器。"""
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+def _build_backup_zip(dest):
+    """把数据库在线快照 + 全部附件 + manifest 打包到 dest，返回 manifest。"""
     snap = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False)
     snap.close()
     src = sqlite3.connect(DB_PATH)
@@ -2042,18 +2058,18 @@ def admin_export():
         src.close()
         dst.close()
 
-    db = get_db()
-    manifest = {
-        "app": "GradeLogy", "version": cfg.APP_VERSION,
-        "exported_at": datetime.now().isoformat(timespec="seconds"),
-        "counts": {t: db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-                   for t in ("users", "courses", "homeworks", "submissions", "questions",
-                             "pipelines")},
-    }
-    out = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
-    out.close()
+    con = sqlite3.connect(DB_PATH)
     try:
-        with zipfile.ZipFile(out.name, "w", zipfile.ZIP_DEFLATED) as z:
+        counts = {t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                  for t in ("users", "courses", "homeworks", "submissions", "questions",
+                            "pipelines")}
+    finally:
+        con.close()
+    manifest = {"app": "GradeLogy", "version": cfg.APP_VERSION,
+                "exported_at": datetime.now().isoformat(timespec="seconds"),
+                "counts": counts}
+    try:
+        with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
             z.write(snap.name, "data.sqlite")
             for root, _, files in os.walk(UPLOAD_DIR):
                 for name in files:
@@ -2062,8 +2078,104 @@ def admin_export():
             z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
     finally:
         os.remove(snap.name)
-    log.info("导出系统数据：%s", ts)
-    return send_file(out.name, as_attachment=True, download_name=f"gradelogy_{ts}.zip")
+    return manifest
+
+
+def _prune_backups():
+    """只保留最近 BACKUP_KEEP 份自动/手动备份（不含恢复前的 pre_restore 快照）。"""
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    items = sorted((os.path.join(BACKUP_DIR, n) for n in os.listdir(BACKUP_DIR)
+                    if BACKUP_RE.fullmatch(n)), key=os.path.getmtime, reverse=True)
+    for path in items[cfg.BACKUP_KEEP:]:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return items[:cfg.BACKUP_KEEP]
+
+
+def _run_auto_backup():
+    """当天还没有备份就生成一份；命名为 gradelogy_YYYYMMDD_HHMMSS.zip。"""
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    today = datetime.now().strftime("%Y%m%d")
+    if any(n.startswith(f"gradelogy_{today}_") for n in os.listdir(BACKUP_DIR)):
+        return None
+    path = os.path.join(BACKUP_DIR, datetime.now().strftime("gradelogy_%Y%m%d_%H%M%S.zip"))
+    _build_backup_zip(path)
+    _prune_backups()
+    log.info("自动备份完成：%s", path)
+    return path
+
+
+_backup_lock = None
+_backup_started = False
+
+
+def _backup_loop():
+    while True:
+        try:
+            _run_auto_backup()
+        except Exception:
+            log.exception("自动备份失败")
+        time.sleep(1800)
+
+
+def start_auto_backup():
+    """启动每日自动备份线程；多进程部署时用文件锁保证只有一个进程执行。"""
+    global _backup_lock, _backup_started
+    if _backup_started or not cfg.AUTO_BACKUP:
+        return
+    _backup_started = True
+    try:
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        if fcntl is not None:
+            _backup_lock = open(os.path.join(BACKUP_DIR, ".auto.lock"), "w")
+            fcntl.flock(_backup_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log.info("自动备份未启动：另一个进程已在执行")
+        return
+    threading.Thread(target=_backup_loop, daemon=True, name="auto-backup").start()
+    log.info("自动备份已启用：每 30 分钟检查一次，保留最近 %s 份", cfg.BACKUP_KEEP)
+
+
+@app.route("/admin/export")
+@role_required("admin")
+def admin_export():
+    """整体导出数据库快照 + 全部附件 + manifest，用于备份或迁移到新机器。"""
+    out = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    out.close()
+    _build_backup_zip(out.name)
+    log.info("导出系统数据：%s", out.name)
+    return send_file(out.name, as_attachment=True,
+                     download_name=datetime.now().strftime("gradelogy_%Y%m%d_%H%M%S.zip"))
+
+
+@app.route("/admin/backup/now", methods=["POST"])
+@role_required("admin")
+def admin_backup_now():
+    """立即生成一份备份，存到数据目录的 backups/ 下。"""
+    path = os.path.join(BACKUP_DIR, datetime.now().strftime("gradelogy_%Y%m%d_%H%M%S.zip"))
+    try:
+        _build_backup_zip(path)
+    except Exception:
+        log.exception("手动备份失败")
+        flash("备份失败，请查看日志")
+        return redirect(url_for("consistency_page"))
+    _prune_backups()
+    log.info("手动备份完成：%s", path)
+    flash(f"已生成备份 {os.path.basename(path)}")
+    return redirect(url_for("consistency_page"))
+
+
+@app.route("/admin/backup/<name>")
+@role_required("admin")
+def admin_backup_download(name):
+    if not BACKUP_RE.fullmatch(name or ""):
+        abort(404)
+    path = os.path.join(BACKUP_DIR, name)
+    if not os.path.exists(path):
+        abort(404)
+    return send_file(path, as_attachment=True, download_name=name)
 
 
 @app.route("/admin/restore", methods=["POST"])
@@ -2222,6 +2334,7 @@ def _lan_ip():
 
 # 模块导入时即完成建表与迁移，gunicorn 直接加载 app:app 也能拿到完整 schema
 init_db()
+start_auto_backup()
 
 
 if __name__ == "__main__":

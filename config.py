@@ -42,6 +42,11 @@ AI_API_URL = _env("AI_API_URL", "")
 AI_API_KEY = _env("AI_API_KEY", "")
 AI_MODEL = _env("AI_MODEL", "")
 
+# 备份：恢复前快照与每日自动备份都放这里
+BACKUP_DIR = os.path.abspath(_env("BACKUP_DIR", os.path.join(DATA_DIR, "backups")))
+BACKUP_KEEP = int(_env("BACKUP_KEEP", "7"))
+AUTO_BACKUP = _env("AUTO_BACKUP", "1").lower() not in ("0", "false", "no", "off")
+
 # 单次批改的并发出图/出题线程数（API 限额低时可调小）
 AI_WORKERS = int(_env("AI_WORKERS", "4"))
 
@@ -51,7 +56,8 @@ ATTACH_ROOT = os.path.join(STORAGE_DIR, ATTACH_SUBDIR)
 
 def ensure_dirs():
     """确保所有数据目录存在；容器首次启动、只读镜像下都靠它兜底。"""
-    for path in (DATA_DIR, STORAGE_DIR, ATTACH_ROOT, LOG_DIR, os.path.dirname(DB_PATH)):
+    for path in (DATA_DIR, STORAGE_DIR, ATTACH_ROOT, LOG_DIR, BACKUP_DIR,
+                 os.path.dirname(DB_PATH)):
         os.makedirs(path, exist_ok=True)
 
 
