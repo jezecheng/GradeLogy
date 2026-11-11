@@ -25,7 +25,7 @@ from werkzeug.utils import secure_filename
 
 import config as cfg
 import workflow as wf
-from utilities import storage, wrongbook as wb
+from utilities import roster, storage, wrongbook as wb
 from utilities.prepare import prepare_answer_key
 
 cfg.ensure_dirs()
@@ -656,6 +656,64 @@ def course_enroll(cid):
         db = get_db()
         db.execute("INSERT OR IGNORE INTO enrollments(course_id,student_id) VALUES(?,?)", (cid, sid))
         db.commit()
+    return redirect(url_for("course_detail", cid=cid))
+
+
+@app.route("/course/<int:cid>/students/import", methods=["POST"])
+@role_required("teacher")
+def course_students_import(cid):
+    """按 CSV 批量导入学生：已有账号直接加入课程，新用户名自动建号。"""
+    own_course(cid)
+    f = request.files.get("file")
+    if not f or not f.filename:
+        flash("请选择 CSV 文件")
+        return redirect(url_for("course_detail", cid=cid))
+    if not f.filename.lower().endswith((".csv", ".txt")):
+        flash("只支持 .csv 文件（Excel 可另存为 CSV）")
+        return redirect(url_for("course_detail", cid=cid))
+    raw = f.read(1024 * 1024 + 1)
+    if len(raw) > 1024 * 1024:
+        flash("文件超过 1MB，请拆分后再导入")
+        return redirect(url_for("course_detail", cid=cid))
+    try:
+        rows, errors = roster.parse_csv(raw)
+    except ValueError as e:
+        flash(str(e))
+        return redirect(url_for("course_detail", cid=cid))
+
+    db = get_db()
+    created = joined = skipped = 0
+    for r in rows:
+        user = db.execute("SELECT id, role FROM users WHERE username=?",
+                          (r["username"],)).fetchone()
+        if user is None:
+            cur = db.execute(
+                "INSERT INTO users(username,password_hash,display_name,role,must_change_password) "
+                "VALUES(?,?,?,?,?)",
+                (r["username"], generate_password_hash(r["password"]), r["name"], "student",
+                 1 if r["password"] == roster.DEFAULT_PASSWORD else 0))
+            sid = cur.lastrowid
+            created += 1
+        elif user["role"] != "student":
+            errors.append(f"第 {r['line']} 行：{r['username']} 已存在且不是学生账号")
+            continue
+        else:
+            sid = user["id"]
+        cur = db.execute("INSERT OR IGNORE INTO enrollments(course_id,student_id) VALUES(?,?)",
+                         (cid, sid))
+        if cur.rowcount:
+            joined += 1
+        else:
+            skipped += 1
+    db.commit()
+    log.info("导入学生名单 course=%s operator=%s#%s 新建=%s 加入=%s 已在课程=%s 错误=%s",
+             cid, g.user["username"], g.user["id"], created, joined, skipped, len(errors))
+    msg = f"导入完成：新建 {created} 人（已自动加入），已有学生加入 {joined - created} 人，已在课程 {skipped} 人"
+    if errors:
+        msg += f"；{len(errors)} 行未处理：" + "；".join(errors[:5])
+        if len(errors) > 5:
+            msg += f" 等共 {len(errors)} 条"
+    flash(msg)
     return redirect(url_for("course_detail", cid=cid))
 
 

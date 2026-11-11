@@ -17,7 +17,19 @@
     </select>
     <button type="submit">加入课程</button>
   </form>
-  {% if not candidates %}<p class="muted">没有可添加的学生账号，请联系管理员创建。</p>{% endif %}
+  {% if not candidates %}<p class="muted">没有可添加的学生账号，可用下方 CSV 批量导入。</p>{% endif %}
+  <details class="muted">
+    <summary>批量导入学生名单（CSV）</summary>
+    <form method="post" action="{{ url_for('course_students_import', cid=course.id) }}"
+          enctype="multipart/form-data" class="stack-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <input type="file" name="file" accept=".csv,text/csv" required>
+      <p class="muted">每行「用户名,姓名[,初始密码]」，首行可以是表头（用户名/姓名/密码）。
+        用户名已存在则直接加入课程；不存在则新建学生账号（密码默认 123456，首次登录需修改）。
+        Excel 请另存为「CSV UTF-8」。</p>
+      <button type="submit">导入</button>
+    </form>
+  </details>
   {% if students %}
   <table>
     <tr><th>姓名</th><th>用户名</th><th></th></tr>
