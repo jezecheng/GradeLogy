@@ -18,6 +18,18 @@
 </div>
 
 <div class="card">
+  <h2>从备份恢复</h2>
+  <p class="muted small">上传此前由本系统导出的 zip。恢复会<strong>覆盖</strong>当前数据库与全部附件；
+    执行前系统会先把当前数据备份到数据目录下的 <code>backups/</code>。恢复完成后需要重新登录。</p>
+  <form method="post" action="{{ url_for('admin_restore') }}" enctype="multipart/form-data"
+        onsubmit="return confirm('恢复会覆盖当前数据库与全部附件，确定继续？')">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <input type="file" name="backup" accept=".zip" required>
+    <button type="submit" class="danger">上传并恢复</button>
+  </form>
+</div>
+
+<div class="card">
   <h2>一致性检查</h2>
   {% if issues %}
   <table class="card-table">

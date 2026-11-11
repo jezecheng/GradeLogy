@@ -14,6 +14,9 @@ data/
 # 学生上传件与批改附件（含隐私，不入库）
 uploads/
 
+# 恢复备份前的自动快照
+backups/
+
 # 截图等本地杂物
 .screenshots/
 .DS_Store

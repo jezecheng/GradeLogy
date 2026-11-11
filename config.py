@@ -28,6 +28,8 @@ LOG_DIR = os.path.abspath(_env("LOG_DIR", os.path.join(DATA_DIR, "logs")))
 HOST = _env("HOST", "0.0.0.0")
 PORT = int(_env("PORT", "5000"))
 MAX_UPLOAD_MB = int(_env("MAX_UPLOAD_MB", "20"))
+# 备份包解压后的总大小上限（MB），防止恶意 zip 撑爆磁盘
+MAX_RESTORE_MB = int(_env("MAX_RESTORE_MB", "2048"))
 LOG_LEVEL = _env("LOG_LEVEL", "INFO").upper()
 
 # 密钥：优先环境变量，其次读文件；都没有时由应用生成并写回文件

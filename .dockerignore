@@ -6,6 +6,7 @@ __pycache__
 data.sqlite
 data.sqlite-*
 uploads
+backups
 logs
 .secret_key
 server.log

@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import tempfile
 import time
@@ -63,7 +64,7 @@ def load_secret_key():
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = cfg.SECRET_KEY or load_secret_key()
-app.config["MAX_CONTENT_LENGTH"] = cfg.MAX_UPLOAD_MB * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = max(cfg.MAX_UPLOAD_MB, cfg.MAX_RESTORE_MB) * 1024 * 1024
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 log = logging.getLogger("gradelogy")
@@ -337,6 +338,17 @@ def load_user():
 
 
 @app.before_request
+def limit_body_size():
+    """按端点限制请求体大小：恢复备份走大上限，其余（学生上传等）仍用 MAX_UPLOAD_MB。
+
+    必须排在 CSRF 校验之前：CSRF 会解析表单，超大请求应在解析前就拒绝。
+    """
+    cap = cfg.MAX_RESTORE_MB if request.endpoint == "admin_restore" else cfg.MAX_UPLOAD_MB
+    if (request.content_length or 0) > cap * 1024 * 1024:
+        abort(413, description=f"上传内容超过 {cap}MB 限制。")
+
+
+@app.before_request
 def csrf_protect():
     """所有写操作必须带本次会话的 CSRF token（表单隐藏域 _csrf 或请求头 X-CSRF-Token）。"""
     if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
@@ -389,6 +401,12 @@ def role_required(*roles):
 def bad_request(e):
     msg = getattr(e, "description", "") or "请求无效。"
     return render_template("error.html", code=400, msg=msg), 400
+
+
+@app.errorhandler(413)
+def too_large(e):
+    msg = getattr(e, "description", "") or "上传内容过大。"
+    return render_template("error.html", code=413, msg=msg), 413
 
 
 @app.errorhandler(403)
@@ -1684,6 +1702,98 @@ def admin_export():
         os.remove(snap.name)
     log.info("导出系统数据：%s", ts)
     return send_file(out.name, as_attachment=True, download_name=f"gradelogy_{ts}.zip")
+
+
+@app.route("/admin/restore", methods=["POST"])
+@role_required("admin")
+def admin_restore():
+    """从导出的 zip 恢复：先校验包结构与路径安全，备份当前数据，再替换附件与数据库。"""
+    up = request.files.get("backup")
+    if not up or not up.filename:
+        flash("请选择此前导出的 zip 备份文件")
+        return redirect(url_for("consistency_page"))
+
+    tmpdir = tempfile.mkdtemp(prefix=".restore_", dir=cfg.DATA_DIR)
+    src = None
+    try:
+        zpath = os.path.join(tmpdir, "backup.zip")
+        up.save(zpath)
+        if not zipfile.is_zipfile(zpath):
+            flash("不是有效的 zip 备份包")
+            return redirect(url_for("consistency_page"))
+
+        extract_root = os.path.join(tmpdir, "data")
+        os.makedirs(extract_root)
+        limit = cfg.MAX_RESTORE_MB * 1024 * 1024
+        total = 0
+        with zipfile.ZipFile(zpath) as z:
+            members = z.infolist()
+            if len(members) > 50000:
+                flash("备份包文件数量异常，已拒绝导入")
+                return redirect(url_for("consistency_page"))
+            for info in members:
+                target = os.path.abspath(os.path.join(extract_root, info.filename))
+                if target != extract_root and not target.startswith(extract_root + os.sep):
+                    log.warning("备份包含越界路径：%s", info.filename)
+                    flash("备份包包含非法路径，已拒绝导入")
+                    return redirect(url_for("consistency_page"))
+                total += info.file_size
+                if total > limit:
+                    flash(f"备份包解压后超过 {cfg.MAX_RESTORE_MB}MB 上限，已拒绝导入")
+                    return redirect(url_for("consistency_page"))
+            z.extractall(extract_root)
+
+        src_db = os.path.join(extract_root, "data.sqlite")
+        if not os.path.isfile(src_db):
+            flash("备份包缺少 data.sqlite，不是本系统导出的备份")
+            return redirect(url_for("consistency_page"))
+        src = sqlite3.connect(f"file:{src_db}?mode=ro", uri=True)
+        tables = {r[0] for r in src.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {"users", "homeworks", "submissions"} <= tables:
+            flash("备份包里的数据库结构不符合本系统，已拒绝导入")
+            return redirect(url_for("consistency_page"))
+
+        # 破坏性操作前，先把当前数据完整备份一份，失败可人工回退
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        bdir = os.path.join(cfg.DATA_DIR, "backups")
+        os.makedirs(bdir, exist_ok=True)
+        cur = sqlite3.connect(DB_PATH, timeout=10)
+        bk = sqlite3.connect(os.path.join(bdir, f"pre_restore_{ts}.sqlite"))
+        try:
+            cur.backup(bk)
+            src.backup(cur)  # 用 backup API 覆盖，避免替换文件句柄影响正在处理的请求
+        finally:
+            bk.close()
+            cur.close()
+
+        # 附件整体替换：旧目录先移入备份，再把包内的 uploads 放回原位
+        if os.path.isdir(UPLOAD_DIR):
+            shutil.move(UPLOAD_DIR, os.path.join(bdir, f"uploads_{ts}"))
+        new_uploads = os.path.join(extract_root, "uploads")
+        if os.path.isdir(new_uploads):
+            shutil.move(new_uploads, UPLOAD_DIR)
+        cfg.ensure_dirs()
+
+        db = get_db()
+        n_users = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        n_subs = db.execute("SELECT COUNT(*) FROM submissions").fetchone()[0]
+        log.info("从备份恢复：%s 个账号、%s 份提交，旧数据备份于 %s", n_users, n_subs, bdir)
+        session.clear()
+        flash(f"恢复完成：{n_users} 个账号、{n_subs} 份提交。旧数据已备份到 {bdir}，请重新登录。")
+        return redirect(url_for("login"))
+    except sqlite3.DatabaseError:
+        log.exception("备份数据库不可用")
+        flash("备份包里的数据库文件损坏，无法恢复，当前数据未改动")
+        return redirect(url_for("consistency_page"))
+    except OSError:
+        log.exception("恢复失败（磁盘/权限）")
+        flash(f"恢复失败，当前数据已备份到 {os.path.join(cfg.DATA_DIR, 'backups')}，请检查磁盘与权限")
+        return redirect(url_for("consistency_page"))
+    finally:
+        if src is not None:
+            src.close()
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _student_files(uid):
