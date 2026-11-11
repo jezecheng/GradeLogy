@@ -30,15 +30,16 @@
       <span class="tag tag-{{ s.status }}">{{ s.status }}</span>
       {% if s.score %}<span class="score">{{ s.score }}</span>{% endif %}
     </div>
-    {% if sm %}
+    {% if sm and revealed %}
     <p class="small">AI 汇总：
       {% if sm.max_total %}总分 <span class="score">{{ '%g'|format(sm.total|float) }}/{{ '%g'|format(sm.max_total|float) }}</span> · {% endif %}
       <span class="muted">对 {{ sm.right|length }} 题 · 半对 {{ sm.partial|length }} 题 · 错 {{ sm.wrong|length }} 题{% if sm.unknown %} · 无法判定 {{ sm.unknown|length }} 题{% endif %}</span>
     </p>
     {% endif %}
     {% if s.feedback %}<pre class="feedback">{{ s.feedback }}</pre>
-    {% elif sm and sm.evaluation %}<pre class="feedback">{{ sm.evaluation }}</pre>
-    {% else %}<p class="muted small">等待老师批改…</p>{% endif %}
+    {% elif revealed and sm and sm.evaluation %}<pre class="feedback">{{ sm.evaluation }}</pre>
+    {% elif s.status == '已批改' %}<p class="muted small">老师已完成批改，暂无文字评语。</p>
+    {% else %}<p class="muted small">老师批改中，结果暂不公开。</p>{% endif %}
   </div>
   {% endfor %}
   {% if items %}

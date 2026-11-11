@@ -50,6 +50,9 @@ button.small { padding: 4px 10px; font-size: 13px; }
 button.danger { background: #e5484d; }
 button.danger:hover { background: #c93338; }
 .btn-link { font-size: 13px; }
+button.btn-link { background: none; border: none; padding: 0; cursor: pointer;
+  color: var(--link, #2f6fb5); text-decoration: underline; }
+button.btn-link.danger, .btn-link.danger { color: #c93338; }
 
 table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 14px; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eef0f3; vertical-align: top; }

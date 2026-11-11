@@ -103,8 +103,8 @@
       </div>
     </div>
     <div class="save-bar">
-      <button type="submit">保存批改结果</button>
-      <span class="muted small">分数与评语已按 AI 建议预填，可直接修改。保存后学生登录即可看到每题判定、得分、评语与总评。</span>
+      <button type="submit">保存并发布给学生</button>
+      <span class="muted small">分数与评语已按 AI 建议预填，可直接修改。{% if sub.status != '已批改' %}保存前学生看不到本次结果；{% endif %}保存后学生即可看到每题判定、得分、评语与总评。</span>
     </div>
   </form>
 </div>

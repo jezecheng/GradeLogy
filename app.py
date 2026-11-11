@@ -948,11 +948,16 @@ def student_homework_page(hid):
         return redirect(url_for("student_homework_page", hid=hid))
     subs = db.execute("SELECT * FROM submissions WHERE homework_id=? AND student_id=? "
                       "ORDER BY id DESC", (hid, g.user["id"])).fetchall()
-    items = db.execute("""
-        SELECT q.* FROM questions q JOIN submissions s ON s.id=q.submission_id
-        WHERE s.homework_id=? AND s.student_id=? AND q.score != ''
-        ORDER BY q.id""", (hid, g.user["id"])).fetchall()
-    return render_template("student_homework.html", hw=hw, subs=subs, items=items)
+    # 只有老师复核完成（status=已批改）才向学生公开逐题明细；AI 原始结果不直接透出。
+    # 明细按最新一次提交取，且不再依赖 score（默认定性批改时 score 为空）。
+    latest = subs[0] if subs else None
+    revealed = bool(latest) and latest["status"] == "已批改"
+    items = []
+    if revealed:
+        items = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
+                           (latest["id"],)).fetchall()
+    return render_template("student_homework.html", hw=hw, subs=subs, items=items,
+                           revealed=revealed)
 
 
 # ---------- 工具 ----------
@@ -1422,6 +1427,22 @@ def workflow_list():
     rows = get_db().execute("SELECT * FROM pipelines WHERE teacher_id=? ORDER BY id DESC",
                             (g.user["id"],)).fetchall()
     return render_template("workflow_list.html", pipelines=rows)
+
+
+@app.route("/workflow/<int:pid>/delete", methods=["POST"])
+@role_required("teacher")
+def workflow_delete(pid):
+    """删除流程；绑定了该流程的作业自动退回默认流程，避免批改时报流程不存在。"""
+    db = get_db()
+    row = db.execute("SELECT id FROM pipelines WHERE id=? AND teacher_id=?",
+                     (pid, g.user["id"])).fetchone()
+    if not row:
+        abort(404)
+    db.execute("UPDATE homeworks SET pipeline_id=0 WHERE pipeline_id=?", (pid,))
+    db.execute("DELETE FROM pipelines WHERE id=?", (pid,))
+    db.commit()
+    flash("流程已删除，原绑定该流程的作业已退回默认流程")
+    return redirect(url_for("workflow_list"))
 
 
 @app.route("/homework/<int:hid>/pipeline", methods=["POST"])
