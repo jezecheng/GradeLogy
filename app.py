@@ -608,6 +608,58 @@ def course_create():
     return redirect(url_for("courses"))
 
 
+@app.route("/courses/import", methods=["POST"])
+@role_required("teacher")
+def courses_import():
+    """批量建课：CSV 中每门课程一行学生，先预览再确认。"""
+    raw, error = _read_import_file()
+    if error:
+        flash(error)
+        return redirect(url_for("courses"))
+    try:
+        rows, errors = roster.parse_course_csv(raw)
+    except ValueError as e:
+        flash(str(e))
+        return redirect(url_for("courses"))
+    if not rows:
+        flash("没有可导入的数据：" + ("；".join(errors[:3]) if errors else "文件为空"))
+        return redirect(url_for("courses"))
+    groups = _course_groups(g.user["id"], rows)
+    total = {"course_new": sum(1 for g in groups if g["id"] is None),
+             "course_exists": sum(1 for g in groups if g["id"] is not None)}
+    for key in ("create", "join", "skip", "error"):
+        total[key] = sum(g["counts"][key] for g in groups)
+    token = _stash_import(raw)
+    return render_template("course_import_preview.html", groups=groups, errors=errors,
+                           total=total, token=token)
+
+
+@app.route("/courses/import/confirm", methods=["POST"])
+@role_required("teacher")
+def courses_import_confirm():
+    raw = _take_import(request.form.get("token", ""))
+    if raw is None:
+        flash("导入内容已过期，请重新上传")
+        return redirect(url_for("courses"))
+    try:
+        rows, errors = roster.parse_course_csv(raw)
+    except ValueError as e:
+        flash(str(e))
+        return redirect(url_for("courses"))
+    total = _apply_course_groups(g.user["id"], _course_groups(g.user["id"], rows))
+    log.info("批量建课 operator=%s#%s 新课程=%s 已有课程=%s 新建学生=%s 加入=%s 已在课程=%s",
+             g.user["username"], g.user["id"], total["course_new"], total["course_exists"],
+             total["create"], total["join"], total["skip"])
+    msg = (f"导入完成：新课程 {total['course_new']} 门、已有课程 {total['course_exists']} 门；"
+           f"新建学生 {total['create']} 人，加入 {total['join']} 人，已在课程 {total['skip']} 人")
+    if errors:
+        msg += f"；{len(errors)} 行未处理：" + "；".join(errors[:5])
+        if len(errors) > 5:
+            msg += f" 等共 {len(errors)} 条"
+    flash(msg)
+    return redirect(url_for("courses"))
+
+
 @app.route("/course/<int:cid>")
 @role_required("teacher", "admin")
 def course_detail(cid):
@@ -659,56 +711,196 @@ def course_enroll(cid):
     return redirect(url_for("course_detail", cid=cid))
 
 
+IMPORT_TMP_DIR = os.path.join(cfg.DATA_DIR, "tmp_imports")
+
+
+def _read_import_file():
+    """读取上传的 CSV（≤1MB），返回 (raw, error)。"""
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return None, "请选择 CSV 文件"
+    if not f.filename.lower().endswith((".csv", ".txt")):
+        return None, "只支持 .csv 文件（Excel 可另存为 CSV）"
+    raw = f.read(1024 * 1024 + 1)
+    if len(raw) > 1024 * 1024:
+        return None, "文件超过 1MB，请拆分后再导入"
+    return raw, ""
+
+
+def _stash_import(raw):
+    """暂存上传内容供预览确认，返回一次性 token；顺手清理 1 小时前的残留文件。"""
+    os.makedirs(IMPORT_TMP_DIR, exist_ok=True)
+    cutoff = time.time() - 3600
+    for name in os.listdir(IMPORT_TMP_DIR):
+        path = os.path.join(IMPORT_TMP_DIR, name)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except OSError:
+            pass
+    token = secrets.token_hex(8)
+    with open(os.path.join(IMPORT_TMP_DIR, f"{g.user['id']}_{token}.csv"), "wb") as f:
+        f.write(raw)
+    return token
+
+
+def _take_import(token):
+    """按 token 取回本人暂存的导入内容；token 仅允许十六进制，避免路径穿越。"""
+    if not re.fullmatch(r"[0-9a-f]{16}", token or ""):
+        abort(400)
+    path = os.path.join(IMPORT_TMP_DIR, f"{g.user['id']}_{token}.csv")
+    if not os.path.exists(path):
+        return None
+    with open(path, "rb") as f:
+        raw = f.read()
+    os.remove(path)
+    return raw
+
+
+def _student_plan(cid, rows):
+    """把解析结果映射成待执行动作：create / join / skip / error。cid 为空表示课程尚未创建。"""
+    db = get_db()
+    plan = []
+    for r in rows:
+        user = db.execute("SELECT id, role FROM users WHERE username=?",
+                          (r["username"],)).fetchone()
+        if user is None:
+            plan.append({"row": r, "action": "create", "detail": "新建学生账号并加入课程"})
+        elif user["role"] != "student":
+            plan.append({"row": r, "action": "error", "detail": "用户名已存在且不是学生账号"})
+        elif cid and db.execute("SELECT 1 FROM enrollments WHERE course_id=? AND student_id=?",
+                                (cid, user["id"])).fetchone():
+            plan.append({"row": r, "action": "skip", "detail": "已在课程中"})
+        else:
+            plan.append({"row": r, "action": "join", "detail": "已有学生账号，加入课程"})
+    return plan
+
+
+def _plan_counts(plan):
+    counts = {"create": 0, "join": 0, "skip": 0, "error": 0}
+    for item in plan:
+        counts[item["action"]] += 1
+    return counts
+
+
+def _apply_student_plan(cid, plan):
+    """执行 _student_plan 的结果；返回实际计数（并发下可能与预览略有差异）。"""
+    db = get_db()
+    counts = {"create": 0, "join": 0, "skip": 0, "error": 0}
+    for item in plan:
+        action, r = item["action"], item["row"]
+        if action == "error":
+            counts["error"] += 1
+            continue
+        if action == "create":
+            sid = db.execute(
+                "INSERT INTO users(username,password_hash,display_name,role,must_change_password) "
+                "VALUES(?,?,?,?,?)",
+                (r["username"], generate_password_hash(r["password"]), r["name"], "student",
+                 1 if r["password"] == roster.DEFAULT_PASSWORD else 0)).lastrowid
+            counts["create"] += 1
+        else:
+            found = db.execute("SELECT id FROM users WHERE username=?",
+                               (r["username"],)).fetchone()
+            if found is None:  # 预览与确认之间账号被删除
+                counts["error"] += 1
+                continue
+            sid = found["id"]
+        cur = db.execute("INSERT OR IGNORE INTO enrollments(course_id,student_id) VALUES(?,?)",
+                         (cid, sid))
+        if action == "create":
+            continue
+        counts["join" if cur.rowcount else "skip"] += 1
+    db.commit()
+    return counts
+
+
+def _course_groups(teacher_id, rows):
+    """按课程名分组（保持文件顺序），并为每组生成学生动作。"""
+    db = get_db()
+    groups, order = {}, []
+    for r in rows:
+        name = r["course"]
+        if name not in groups:
+            existing = db.execute("SELECT id FROM courses WHERE name=? AND teacher_id=?",
+                                  (name, teacher_id)).fetchone()
+            groups[name] = {"name": name, "id": existing["id"] if existing else None,
+                            "rows": []}
+            order.append(name)
+        groups[name]["rows"].append(r)
+    result = []
+    for name in order:
+        g = groups[name]
+        g["plan"] = _student_plan(g["id"], g["rows"])
+        g["counts"] = _plan_counts(g["plan"])
+        result.append(g)
+    return result
+
+
+def _apply_course_groups(teacher_id, groups):
+    """先建缺失的课程，再逐课执行学生动作。"""
+    db = get_db()
+    total = {"course_new": 0, "course_exists": 0,
+             "create": 0, "join": 0, "skip": 0, "error": 0}
+    for g in groups:
+        cid = g["id"]
+        if cid is None:
+            cid = db.execute("INSERT INTO courses(name,description,teacher_id) VALUES(?,?,?)",
+                             (g["name"], "", teacher_id)).lastrowid
+            total["course_new"] += 1
+            plan = _student_plan(None, g["rows"])
+        else:
+            total["course_exists"] += 1
+            plan = _student_plan(cid, g["rows"])
+        counts = _apply_student_plan(cid, plan)
+        for key in ("create", "join", "skip", "error"):
+            total[key] += counts[key]
+    return total
+
+
 @app.route("/course/<int:cid>/students/import", methods=["POST"])
 @role_required("teacher")
 def course_students_import(cid):
-    """按 CSV 批量导入学生：已有账号直接加入课程，新用户名自动建号。"""
+    """上传名单后先预览动作，确认前不写库。"""
     own_course(cid)
-    f = request.files.get("file")
-    if not f or not f.filename:
-        flash("请选择 CSV 文件")
-        return redirect(url_for("course_detail", cid=cid))
-    if not f.filename.lower().endswith((".csv", ".txt")):
-        flash("只支持 .csv 文件（Excel 可另存为 CSV）")
-        return redirect(url_for("course_detail", cid=cid))
-    raw = f.read(1024 * 1024 + 1)
-    if len(raw) > 1024 * 1024:
-        flash("文件超过 1MB，请拆分后再导入")
+    raw, error = _read_import_file()
+    if error:
+        flash(error)
         return redirect(url_for("course_detail", cid=cid))
     try:
         rows, errors = roster.parse_csv(raw)
     except ValueError as e:
         flash(str(e))
         return redirect(url_for("course_detail", cid=cid))
+    if not rows:
+        flash("没有可导入的数据：" + ("；".join(errors[:3]) if errors else "文件为空"))
+        return redirect(url_for("course_detail", cid=cid))
+    plan = _student_plan(cid, rows)
+    token = _stash_import(raw)
+    course = get_db().execute("SELECT * FROM courses WHERE id=?", (cid,)).fetchone()
+    return render_template("roster_preview.html", course=course, plan=plan,
+                           errors=errors, counts=_plan_counts(plan), token=token)
 
-    db = get_db()
-    created = joined = skipped = 0
-    for r in rows:
-        user = db.execute("SELECT id, role FROM users WHERE username=?",
-                          (r["username"],)).fetchone()
-        if user is None:
-            cur = db.execute(
-                "INSERT INTO users(username,password_hash,display_name,role,must_change_password) "
-                "VALUES(?,?,?,?,?)",
-                (r["username"], generate_password_hash(r["password"]), r["name"], "student",
-                 1 if r["password"] == roster.DEFAULT_PASSWORD else 0))
-            sid = cur.lastrowid
-            created += 1
-        elif user["role"] != "student":
-            errors.append(f"第 {r['line']} 行：{r['username']} 已存在且不是学生账号")
-            continue
-        else:
-            sid = user["id"]
-        cur = db.execute("INSERT OR IGNORE INTO enrollments(course_id,student_id) VALUES(?,?)",
-                         (cid, sid))
-        if cur.rowcount:
-            joined += 1
-        else:
-            skipped += 1
-    db.commit()
-    log.info("导入学生名单 course=%s operator=%s#%s 新建=%s 加入=%s 已在课程=%s 错误=%s",
-             cid, g.user["username"], g.user["id"], created, joined, skipped, len(errors))
-    msg = f"导入完成：新建 {created} 人（已自动加入），已有学生加入 {joined - created} 人，已在课程 {skipped} 人"
+
+@app.route("/course/<int:cid>/students/import/confirm", methods=["POST"])
+@role_required("teacher")
+def course_students_import_confirm(cid):
+    own_course(cid)
+    raw = _take_import(request.form.get("token", ""))
+    if raw is None:
+        flash("导入内容已过期，请重新上传")
+        return redirect(url_for("course_detail", cid=cid))
+    try:
+        rows, errors = roster.parse_csv(raw)
+    except ValueError as e:
+        flash(str(e))
+        return redirect(url_for("course_detail", cid=cid))
+    counts = _apply_student_plan(cid, _student_plan(cid, rows))
+    log.info("导入学生名单 course=%s operator=%s#%s 新建=%s 加入=%s 已在课程=%s 无法处理=%s",
+             cid, g.user["username"], g.user["id"], counts["create"], counts["join"],
+             counts["skip"], counts["error"])
+    msg = (f"导入完成：新建 {counts['create']} 人，已有学生加入 {counts['join']} 人，"
+           f"已在课程 {counts['skip']} 人")
     if errors:
         msg += f"；{len(errors)} 行未处理：" + "；".join(errors[:5])
         if len(errors) > 5:

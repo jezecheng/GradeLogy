@@ -25,9 +25,9 @@
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
       <input type="file" name="file" accept=".csv,text/csv" required>
       <p class="muted">每行「用户名,姓名[,初始密码]」，首行可以是表头（用户名/姓名/密码）。
-        用户名已存在则直接加入课程；不存在则新建学生账号（密码默认 123456，首次登录需修改）。
-        Excel 请另存为「CSV UTF-8」。</p>
-      <button type="submit">导入</button>
+        上传后先显示预览，确认后才写入；用户名已存在则直接加入课程，不存在则新建学生账号
+        （密码默认 123456，首次登录需修改）。Excel 请另存为「CSV UTF-8」。</p>
+      <button type="submit">预览导入</button>
     </form>
   </details>
   {% if students %}
