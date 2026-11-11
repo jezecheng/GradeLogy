@@ -45,6 +45,8 @@ except ImportError:
     pass
 
 ROLE_LABEL = {"admin": "管理员", "teacher": "老师", "student": "学生"}
+# 系统初始密码：使用这些密码的账号会被要求登录后立即修改
+DEFAULT_PASSWORDS = ("admin123", "123456")
 
 def load_secret_key():
     """密钥持久化，避免每次重启把所有人都登出（容器里通过 SECRET_KEY 环境变量注入）。"""
@@ -99,6 +101,7 @@ CREATE TABLE IF NOT EXISTS users(
   password_hash TEXT NOT NULL,
   display_name TEXT NOT NULL,
   role TEXT NOT NULL CHECK(role IN ('admin','teacher','student')),
+  must_change_password INTEGER DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS courses(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -294,8 +297,16 @@ def init_db():
     hqcols = {r[1] for r in con.execute("PRAGMA table_info(homework_questions)")}
     if "stem" not in hqcols:
         con.execute("ALTER TABLE homework_questions ADD COLUMN stem TEXT DEFAULT ''")
+    # 轻量迁移：仍在使用初始密码的账号，登录后强制先改密码
+    ucols = {r[1] for r in con.execute("PRAGMA table_info(users)")}
+    if "must_change_password" not in ucols:
+        con.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0")
+        for r in con.execute("SELECT id, password_hash FROM users").fetchall():
+            if any(check_password_hash(r[1], p) for p in DEFAULT_PASSWORDS):
+                con.execute("UPDATE users SET must_change_password=1 WHERE id=?", (r[0],))
     if con.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
-        con.execute("INSERT INTO users(username,password_hash,display_name,role) VALUES(?,?,?,?)",
+        con.execute("INSERT INTO users(username,password_hash,display_name,role,must_change_password) "
+                    "VALUES(?,?,?,?,1)",
                     ("admin", generate_password_hash("admin123"), "系统管理员", "admin"))
     con.commit()
     con.close()
@@ -339,6 +350,17 @@ def csrf_protect():
                     request.method, request.path, request.remote_addr)
         abort(400, description="页面已过期或请求来源不可信，请刷新页面后重试。")
     return None
+
+
+@app.before_request
+def require_password_change():
+    """仍在使用初始密码的账号，先改密码才能访问其他页面。"""
+    if not g.user or not g.user["must_change_password"]:
+        return None
+    if request.endpoint in {"change_password", "logout", "static", "login", "healthz"}:
+        return None
+    flash("当前账号仍在使用初始密码，请先设置新密码。")
+    return redirect(url_for("change_password"))
 
 
 def login_required(f):
@@ -414,10 +436,11 @@ def change_password():
             flash("新密码至少 6 位")
         else:
             db = get_db()
-            db.execute("UPDATE users SET password_hash=? WHERE id=?",
+            db.execute("UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?",
                        (generate_password_hash(new), g.user["id"]))
             db.commit()
             flash("密码已更新")
+            return redirect(url_for("index"))
     return render_template("password.html")
 
 
@@ -470,8 +493,10 @@ def admin_user_create():
     else:
         try:
             db = get_db()
-            db.execute("INSERT INTO users(username,password_hash,display_name,role) VALUES(?,?,?,?)",
-                       (username, generate_password_hash(password), name, role))
+            db.execute("INSERT INTO users(username,password_hash,display_name,role,must_change_password) "
+                       "VALUES(?,?,?,?,?)",
+                       (username, generate_password_hash(password), name, role,
+                        1 if password in DEFAULT_PASSWORDS else 0))
             db.commit()
             flash(f"已创建{ROLE_LABEL[role]}账号 {username}，初始密码 {password}")
         except sqlite3.IntegrityError:
@@ -484,7 +509,8 @@ def admin_user_create():
 def admin_user_reset(uid):
     password = request.form.get("password", "").strip() or "123456"
     db = get_db()
-    db.execute("UPDATE users SET password_hash=? WHERE id=?", (generate_password_hash(password), uid))
+    db.execute("UPDATE users SET password_hash=?, must_change_password=? WHERE id=?",
+               (generate_password_hash(password), 1 if password in DEFAULT_PASSWORDS else 0, uid))
     db.commit()
     flash(f"密码已重置为 {password}")
     return redirect(url_for("admin_users"))
