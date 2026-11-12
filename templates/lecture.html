@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% block title %}{{ hw.title }}{% endblock %}
 {% block content %}
+{% set cands = hw.scope_candidates|fromjson or [] %}
+{% set chosen = hw.scope_selected|fromjson or [] %}
 <p><a href="{{ url_for('course_detail', cid=course.id) }}">← 返回 {{ course.name }}</a></p>
 <h1>{{ hw.title }}</h1>
 <p class="muted">讲次{% if hw.deadline %} · 截止 {{ hw.deadline.replace('T',' ') }}{% endif %}{% if hw.description %} · {{ hw.description }}{% endif %}</p>
@@ -43,6 +45,45 @@
 </div>
 
 <div class="card">
+  <div class="card-head">
+    <h2>作业范围</h2>
+    <form method="post" action="{{ url_for('lecture_scope_analyze', hid=hw.id) }}" class="scope-analyze-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <button type="submit" class="small">{{ '重新分析标准答案' if cands else '分析标准答案生成题目列表' }}</button>
+    </form>
+  </div>
+  <p class="muted small">从教师版标准答案识别题目清单，勾选本讲实际布置的题目，批阅时只处理勾选的题目；
+    全部不勾选表示批改全部题目。分析约需 20~60 秒。</p>
+  <p class="muted small scope-hint" hidden>正在分析标准答案，请勿重复点击…</p>
+
+  {% if cands %}
+  <form method="post" action="{{ url_for('lecture_scope_save', hid=hw.id) }}" id="scope-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <table>
+      <tr><th style="width:60px">选中</th><th>题号</th><th>满分</th><th>说明</th></tr>
+      {% for q in cands %}
+      <tr>
+        <td><input type="checkbox" name="no" value="{{ q.key or q.no }}" style="width:auto"
+                   {% if not chosen or (q.key or q.no) in chosen %}checked{% endif %}></td>
+        <td>{{ q.no }}</td>
+        <td>{% if q.max %}{{ '%g'|format(q.max|float) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td class="muted">{{ q.hint or '—' }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    <div class="save-bar">
+      <button type="submit">保存作业范围</button>
+      <button type="button" class="small ghost" data-scope-all="1">全选</button>
+      <button type="button" class="small ghost" data-scope-all="0">全不选</button>
+      <span class="muted small">当前已选 <b id="scope-count">{{ cands|length if not chosen else chosen|length }}</b> 题</span>
+    </div>
+  </form>
+  {% else %}
+  <p class="muted">还没有题目清单。先点右上角按钮，让 AI 读一遍标准答案。</p>
+  {% endif %}
+</div>
+
+<div class="card">
   <h2>讲次信息</h2>
   <form method="post" action="{{ url_for('lecture_edit', hid=hw.id) }}" class="stack-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
@@ -63,11 +104,26 @@
       <strong>{{ s.display_name }}</strong>
       <span class="muted">{{ s.username }} · {{ s.created_at }}</span>
       <span class="tag tag-{{ s.status }}">{{ s.status }}</span>
+      {% if s.n_questions %}
+        <span class="review-state review-done" title="AI 已完成批阅">✓ AI 已批阅</span>
+        {% if s.n_reviewed >= s.n_questions %}
+        <span class="review-state review-done" title="所有题目均已审核">✓ 审核完成</span>
+        {% else %}
+        <span class="review-state review-pending"
+              title="还有 {{ s.n_questions - s.n_reviewed }} 道题未审核">⚠ 待审核 {{ s.n_reviewed }}/{{ s.n_questions }}</span>
+        {% endif %}
+      {% endif %}
       {% if s.score %}<span class="score">{{ s.score }}</span>{% endif %}
       <a class="btn-link" href="{{ url_for('uploaded_file', filename=s.file_path) }}"
          data-pdf-toggle data-pdf-src="{{ url_for('uploaded_file', filename=s.file_path) }}"
          data-pdf-title="{{ s.display_name }} · 扫描件">查看扫描件</a>
       <a class="btn-link" href="{{ url_for('submission_review', sid=s.id) }}">逐题核对</a>
+      <a class="btn-link" href="{{ url_for('submission_report', sid=s.id) }}">批改报告</a>
+      {% if s.report_published %}
+        <span class="reviewed-badge">已发布给学生</span>
+      {% elif s.report_md %}
+        <span class="pending-badge">报告草稿</span>
+      {% endif %}
       <form method="post" action="{{ url_for('submission_grade', sid=s.id) }}" class="grade-form">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
         <button class="small">{{ '重新批阅' if s.status == '待批改' or s.feedback else 'AI 批阅' }}</button>
@@ -95,6 +151,36 @@
       }
       var hint = form.closest('.sub-card').querySelector('.grade-hint');
       if (hint) hint.hidden = false;
+    });
+  });
+})();
+// 作业范围：分析标准答案时长约几十秒，提交后给出提示并禁用按钮
+(function () {
+  var analyze = document.querySelector('.scope-analyze-form');
+  if (analyze) {
+    analyze.addEventListener('submit', function () {
+      var btn = analyze.querySelector('button');
+      btn.disabled = true;
+      btn.textContent = '分析中…';
+      var hint = document.querySelector('.scope-hint');
+      if (hint) hint.hidden = false;
+    });
+  }
+  var form = document.getElementById('scope-form');
+  if (!form) return;
+  var boxes = form.querySelectorAll('input[name="no"]');
+  var counter = document.getElementById('scope-count');
+  function refresh() {
+    var n = 0;
+    boxes.forEach(function (b) { if (b.checked) n += 1; });
+    if (counter) counter.textContent = n;
+  }
+  boxes.forEach(function (b) { b.addEventListener('change', refresh); });
+  form.querySelectorAll('[data-scope-all]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var on = btn.dataset.scopeAll === '1';
+      boxes.forEach(function (b) { b.checked = on; });
+      refresh();
     });
   });
 })();

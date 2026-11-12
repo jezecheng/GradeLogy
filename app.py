@@ -31,7 +31,7 @@ from werkzeug.utils import secure_filename
 
 import config as cfg
 from utilities import roster, storage
-from utilities.pdfgrade import grade_pdf_submission
+from utilities.pdfgrade import ai_report_comment, analyze_answer_pdf, grade_pdf_submission
 
 cfg.ensure_dirs()
 cfg.setup_logging()
@@ -131,6 +131,8 @@ CREATE TABLE IF NOT EXISTS lectures(
   deadline TEXT DEFAULT '',
   answer_pdf TEXT DEFAULT '',
   student_pdf TEXT DEFAULT '',
+  scope_candidates TEXT DEFAULT '',
+  scope_selected TEXT DEFAULT '',
   created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS exams(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,6 +159,9 @@ CREATE TABLE IF NOT EXISTS submissions(
   feedback TEXT DEFAULT '',
   grader TEXT DEFAULT '',
   ai_summary TEXT DEFAULT '',
+  report_md TEXT DEFAULT '',
+  report_detail TEXT DEFAULT '',
+  report_published INTEGER DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS questions(
@@ -236,10 +241,21 @@ def init_db():
     scols = {r[1] for r in con.execute("PRAGMA table_info(submissions)")}
     if "ai_summary" not in scols:
         con.execute("ALTER TABLE submissions ADD COLUMN ai_summary TEXT DEFAULT ''")
+    # 轻量迁移：批改报告（Markdown）与发布状态
+    if "report_md" not in scols:
+        con.execute("ALTER TABLE submissions ADD COLUMN report_md TEXT DEFAULT ''")
+    if "report_detail" not in scols:
+        con.execute("ALTER TABLE submissions ADD COLUMN report_detail TEXT DEFAULT ''")
+    if "report_published" not in scols:
+        con.execute("ALTER TABLE submissions ADD COLUMN report_published INTEGER DEFAULT 0")
     # 轻量迁移：讲次新增「学生版」讲义 PDF，与「教师版」标准答案并存
     lcols = {r[1] for r in con.execute("PRAGMA table_info(lectures)")}
     if "student_pdf" not in lcols:
         con.execute("ALTER TABLE lectures ADD COLUMN student_pdf TEXT DEFAULT ''")
+    # 轻量迁移：作业范围（AI 识别的题目清单 + 老师勾选的批阅范围）
+    for col in ("scope_candidates", "scope_selected"):
+        if col not in lcols:
+            con.execute(f"ALTER TABLE lectures ADD COLUMN {col} TEXT DEFAULT ''")
     # 轻量迁移：仍在使用初始密码的账号，登录后强制先改密码
     ucols = {r[1] for r in con.execute("PRAGMA table_info(users)")}
     if "must_change_password" not in ucols:
@@ -931,7 +947,10 @@ def lecture_detail(hid):
         abort(404)
     course = own_course(hw["course_id"])
     subs = db.execute("""
-        SELECT s.*, u.display_name, u.username FROM submissions s
+        SELECT s.*, u.display_name, u.username,
+          (SELECT COUNT(*) FROM questions q WHERE q.submission_id=s.id) AS n_questions,
+          (SELECT COUNT(*) FROM questions q WHERE q.submission_id=s.id AND q.reviewed=1) AS n_reviewed
+        FROM submissions s
         JOIN users u ON u.id=s.student_id
         WHERE s.lecture_id=? ORDER BY s.created_at DESC""", (hid,)).fetchall()
     return render_template("lecture.html", hw=hw, course=course, subs=subs)
@@ -983,6 +1002,60 @@ def lecture_student_pdf(hid):
         db.execute("UPDATE lectures SET student_pdf=? WHERE id=?", (save_upload(f), hid))
         db.commit()
         flash("学生版讲义已更新，学生端可下载")
+    return redirect(url_for("lecture_detail", hid=hid))
+
+
+@app.route("/lecture/<int:hid>/scope/analyze", methods=["POST"])
+@role_required("teacher")
+def lecture_scope_analyze(hid):
+    """用 AI 读教师版标准答案，生成可勾选的题目清单。"""
+    db = get_db()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
+    if not hw:
+        abort(404)
+    own_course(hw["course_id"])
+    if not hw["answer_pdf"]:
+        flash("请先上传教师版标准答案 PDF，再分析题目清单。")
+        return redirect(url_for("lecture_detail", hid=hid))
+
+    teacher_id = g.user["id"]
+    if get_setting(teacher_id, "ai_demo") == "1":
+        flash("演示模式不会调用 AI，无法分析题目清单；请到「AI 设置」关闭演示模式。")
+        return redirect(url_for("lecture_detail", hid=hid))
+    api_url = get_setting(teacher_id, "ai_api_url").rstrip("/")
+    api_key = get_setting(teacher_id, "ai_api_key")
+    model = get_setting(teacher_id, "ai_model")
+    if not api_url or not api_key or not model:
+        flash("尚未配置 AI 接口，无法分析标准答案。")
+        return redirect(url_for("lecture_detail", hid=hid))
+
+    log.info("分析作业范围 lecture=%s answer=%s", hid, hw["answer_pdf"])
+    questions, err = analyze_answer_pdf(
+        os.path.join(UPLOAD_DIR, hw["answer_pdf"]), api_url, api_key, model)
+    if err:
+        flash(err)
+        return redirect(url_for("lecture_detail", hid=hid))
+    db.execute("UPDATE lectures SET scope_candidates=? WHERE id=?",
+               (json.dumps(questions, ensure_ascii=False), hid))
+    db.commit()
+    flash(f"已识别 {len(questions)} 道题，请勾选本讲需要批阅的题目。")
+    return redirect(url_for("lecture_detail", hid=hid))
+
+
+@app.route("/lecture/<int:hid>/scope/save", methods=["POST"])
+@role_required("teacher")
+def lecture_scope_save(hid):
+    """保存勾选的作业范围；全部不勾选表示批改全部题目。"""
+    db = get_db()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
+    if not hw:
+        abort(404)
+    own_course(hw["course_id"])
+    keys = [k.strip() for k in request.form.getlist("no") if k.strip()]
+    db.execute("UPDATE lectures SET scope_selected=? WHERE id=?",
+               (json.dumps(keys, ensure_ascii=False) if keys else "", hid))
+    db.commit()
+    flash(f"已保存作业范围：{len(keys)} 道题" if keys else "已清除作业范围：批改全部题目")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
@@ -1178,7 +1251,8 @@ def submission_grade(sid):
     log.info("开始批阅 submission=%s lecture=%s file=%s answer=%s",
              sid, hw["id"], sub["file_path"], hw["answer_pdf"])
     try:
-        gen = run_grading(g.user["id"], sub["file_path"], hw["answer_pdf"])
+        gen = run_grading(g.user["id"], sub["file_path"], hw["answer_pdf"],
+                          scope=_scope_instruction(hw))
     finally:
         with _GRADING_LOCK:
             _GRADING.discard(sid)
@@ -1204,6 +1278,10 @@ def submission_grade(sid):
                (json.dumps(summary, ensure_ascii=False) if summary else "", sid))
     db.commit()
     count = len(gen["questions"])
+    try:
+        generate_report(db, sid, g.user["id"])
+    except Exception:  # 报告生成失败不影响批阅结果本身
+        log.exception("生成批改报告失败 submission=%s", sid)
     if gen.get("demo"):
         msg = f"演示模式：未调用 AI，已生成 {count} 道题，请逐题修正内容"
     else:
@@ -1256,6 +1334,10 @@ def submission_review_save(sid):
                 request.form.get("overall", "").strip(),
                 f"{g.user['display_name']} 逐题批改", sid))
     db.commit()
+    try:
+        generate_report(db, sid, g.user["id"], reuse=True)
+    except Exception:  # 报告刷新失败不影响批改保存
+        log.exception("刷新批改报告失败 submission=%s", sid)
     flash("批改已保存，学生可以查看")
     return redirect(url_for("submission_review", sid=sid))
 
@@ -1494,7 +1576,7 @@ def _build_summary(questions, weak_points, evaluation, errors):
     }
 
 
-def run_grading(teacher_id, file_name, answer_pdf=""):
+def run_grading(teacher_id, file_name, answer_pdf="", scope=""):
     """批阅入口：学生作业与标准答案整份交给支持 PDF 的模型，一次返回逐题结果。"""
     if get_setting(teacher_id, "ai_demo") == "1":
         questions = demo_questions()
@@ -1509,14 +1591,264 @@ def run_grading(teacher_id, file_name, answer_pdf=""):
         return {"questions": [], "summary": {}, "errors": [],
                 "error": "尚未配置 AI 接口。可以先勾选「演示模式」体验完整流程，或到「AI 设置」填写接口地址、密钥与模型。"}
 
+    extra = get_setting(teacher_id, "ai_prompt").strip()
+    if scope:
+        extra = (extra + "\n" if extra else "") + scope
     gen = grade_pdf_submission(
         os.path.join(UPLOAD_DIR, file_name),
         os.path.join(UPLOAD_DIR, answer_pdf) if answer_pdf else "",
         api_url, api_key, model,
-        extra=get_setting(teacher_id, "ai_prompt").strip())
+        extra=extra)
     gen["summary"] = _build_summary(gen["questions"], gen.get("weak_points") or [],
                                     gen.get("evaluation", ""), gen.get("errors") or [])
     return gen
+
+
+def _scope_instruction(hw):
+    """把老师勾选的作业范围翻译成给模型的约束；未设置范围时返回空串（批改全部题目）。"""
+    try:
+        keys = json.loads(hw["scope_selected"] or "[]")
+        cands = json.loads(hw["scope_candidates"] or "[]")
+    except (TypeError, ValueError):
+        return ""
+    by_key = {str(c.get("key")): c for c in cands if isinstance(c, dict)}
+    picked = [by_key[str(k)] for k in keys if str(k) in by_key]
+    if not picked:
+        return ""
+    counts = {}
+    for c in picked:
+        counts[c.get("no")] = counts.get(c.get("no"), 0) + 1
+    labels = []
+    for c in picked:
+        no = str(c.get("no", "")).strip()
+        # 同一题号在答案里出现多次时，加简要说明以便模型区分
+        labels.append(f"{no}（{c.get('hint')}）" if counts[no] > 1 and c.get("hint") else no)
+    return ("本讲次作业范围只包含以下题目：「" + "、".join(labels) + "」。"
+            "请只批阅这些题目（题目含小问时，该题的全部小问都要批阅），"
+            "范围之外的题目一律不要出现在输出里；"
+            "范围内某题学生没作答时，仍按未作答处理。")
+
+
+# ---------- 批改报告（Markdown） ----------
+# 判定图标统一用彩色 emoji：⚠ 必须带变体选择符 U+FE0F，否则浏览器会渲染成灰白线框三角
+VERDICT_ICON = {"对": "✅", "半对": "⚠️", "错": "❌", "无法判定": "❔"}
+
+
+def _md_cell(value):
+    """表格单元格里的竖线与换行会破坏 Markdown 表格，统一收敛。"""
+    return str(value or "").replace("|", "｜").replace("\n", " ").strip()
+
+
+def build_report_md(student_name, lecture_title, date_label, questions, summary, detail):
+    """生成学生的 Markdown 批改报告：逐题明细 + 失分归因 + 评价。"""
+    qs = [dict(q) for q in questions]
+    n_total = len(qs)
+    right = [q for q in qs if (q.get("verdict") or "") == "对"]
+    partial = [q for q in qs if (q.get("verdict") or "") == "半对"]
+    wrong = [q for q in qs if (q.get("verdict") or "") == "错"]
+    unknown = [q for q in qs if (q.get("verdict") or "") == "无法判定"]
+    skipped = [q for q in qs if "未作答" in (q.get("ai_comment") or "")]
+
+    out = [f"# {student_name} · {date_label}作业《{lecture_title}》批改结果", "",
+           f"## 一、逐题明细（{n_total} 题）", "",
+           "| # | 题目 | 判定 | 批改说明 |", "| ---: | --- | :---: | --- |"]
+    for i, q in enumerate(qs, 1):
+        icon = VERDICT_ICON.get(q.get("verdict") or "", q.get("verdict") or "—")
+        out.append(f"| {i} | {_md_cell(q.get('no'))} | {icon} | {_md_cell(q.get('ai_comment'))} |")
+
+    def _nos(items, limit=6):
+        names = [str(q.get("no")) for q in items]
+        text = "、".join(f"第 {n} 题" for n in names[:limit])
+        return text + ("等" if len(names) > limit else "")
+
+    stat = [f"统计：{VERDICT_ICON['对']} {len(right)}"]
+    stat.append(f"{VERDICT_ICON['错']} {len(wrong)}" + (f"（{_nos(wrong)}）" if wrong else ""))
+    stat.append(f"{VERDICT_ICON['半对']} {len(partial)}" + (f"（{_nos(partial)}）" if partial else ""))
+    if unknown:
+        stat.append(f"{VERDICT_ICON['无法判定']} {len(unknown)}（{_nos(unknown)}）")
+    stat.append(f"未作答 {len(skipped)}")
+    out += ["", " | ".join(stat), ""]
+
+    weak = (summary or {}).get("weak_points") or []
+    out += ["## 二、失分点归因", ""]
+    if weak:
+        out += ["| 题 | 类型 | 症结 |", "| --- | --- | --- |"]
+        for w in weak:
+            out.append(f"| {_md_cell(w.get('no'))} | {_md_cell(w.get('type'))} | "
+                       f"{_md_cell(w.get('detail'))} |")
+    else:
+        out.append("本次没有失分点。" if not (wrong or partial) else "AI 未给出失分归类，请参考逐题说明。")
+
+    out += ["", "## 三、评价", ""]
+    good = (detail or {}).get("good") or (summary or {}).get("evaluation", "")
+    if good:
+        out += [good, ""]
+    improve = (detail or {}).get("improve") or []
+    if improve:
+        out += ["需要改的几处：", ""]
+        out += [f"{i}. {item}" for i, item in enumerate(improve, 1)]
+        out.append("")
+    nxt = (detail or {}).get("next") or ""
+    if nxt:
+        out += [f"**下一步建议：** {nxt}", ""]
+    return "\n".join(out).strip() + "\n"
+
+
+def render_markdown(md):
+    """把报告用的极简 Markdown（标题/表格/列表/粗体）渲染成 HTML，避免引入额外依赖。"""
+    esc = lambda s: (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+    def inline(text):
+        return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", esc(text))
+
+    lines = (md or "").splitlines()
+    html, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip():
+            i += 1
+            continue
+        if line.startswith("#"):
+            level = len(line) - len(line.lstrip("#"))
+            html.append(f"<h{min(level, 4)}>{inline(line[level:].strip())}</h{min(level, 4)}>")
+            i += 1
+            continue
+        if line.startswith("|") and i + 1 < len(lines) and re.match(r"^\|[\s:|-]+\|$", lines[i + 1]):
+            rows = []
+            i += 2
+            while i < len(lines) and lines[i].startswith("|"):
+                rows.append([c.strip() for c in lines[i].strip().strip("|").split("|")])
+                i += 1
+            html.append("<table class='report-table'>")
+            for r, cells in enumerate(rows):
+                tag = "th" if r == 0 else "td"
+                html.append("<tr>" + "".join(f"<{tag}>{inline(c)}</{tag}>" for c in cells) + "</tr>")
+            html.append("</table>")
+            continue
+        if re.match(r"^\d+\.\s", line):
+            items = []
+            while i < len(lines) and re.match(r"^\d+\.\s", lines[i]):
+                items.append(re.sub(r"^\d+\.\s", "", lines[i]))
+                i += 1
+            html.append("<ol>" + "".join(f"<li>{inline(x)}</li>" for x in items) + "</ol>")
+            continue
+        if line.startswith("- "):
+            items = []
+            while i < len(lines) and lines[i].startswith("- "):
+                items.append(lines[i][2:])
+                i += 1
+            html.append("<ul>" + "".join(f"<li>{inline(x)}</li>" for x in items) + "</ul>")
+            continue
+        html.append(f"<p>{inline(line)}</p>")
+        i += 1
+    return "\n".join(html)
+
+
+def generate_report(db, sub_id, teacher_id, reuse=False):
+    """按当前逐题结果生成/刷新一份 Markdown 批改报告，返回报告文本。
+
+    reuse=True 时沿用上次由 AI 生成的评价段落，只重算表格与统计（保存批改时不额外调模型）。
+    """
+    sub = db.execute("""
+        SELECT s.*, u.display_name, l.title AS lecture_title
+        FROM submissions s JOIN users u ON u.id=s.student_id
+        JOIN lectures l ON l.id=s.lecture_id WHERE s.id=?""", (sub_id,)).fetchone()
+    if not sub:
+        return ""
+    questions = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
+                           (sub_id,)).fetchall()
+    summary = _json_or_none(sub["ai_summary"]) or {}
+    detail = _json_or_none(sub["report_detail"]) or {} if reuse else {}
+    if not detail and questions and get_setting(teacher_id, "ai_demo") != "1":
+        api_url = get_setting(teacher_id, "ai_api_url").rstrip("/")
+        api_key = get_setting(teacher_id, "ai_api_key")
+        model = get_setting(teacher_id, "ai_model")
+        if api_url and api_key and model:
+            detail = ai_report_comment(questions, summary.get("weak_points") or [],
+                                       summary.get("evaluation", ""), api_url, api_key, model)
+    try:
+        stamp = datetime.strptime(str(sub["created_at"])[:10], "%Y-%m-%d")
+        date_label = f"{stamp.month}月{stamp.day}日"
+    except (TypeError, ValueError):
+        date_label = ""
+    md = build_report_md(sub["display_name"], sub["lecture_title"], date_label,
+                         questions, summary, detail)
+    db.execute("UPDATE submissions SET report_md=?, report_detail=? WHERE id=?",
+               (md, json.dumps(detail, ensure_ascii=False) if detail else "", sub_id))
+    db.commit()
+    return md
+
+
+def own_submission(sid):
+    """取一份提交并校验归属，返回 (sub, lecture, course)。"""
+    db = get_db()
+    sub = db.execute("SELECT * FROM submissions WHERE id=?", (sid,)).fetchone()
+    if not sub:
+        abort(404)
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (sub["lecture_id"],)).fetchone()
+    return sub, hw, own_course(hw["course_id"])
+
+
+@app.route("/submission/<int:sid>/report")
+@role_required("teacher")
+def submission_report(sid):
+    sub, hw, course = own_submission(sid)
+    db = get_db()
+    md = sub["report_md"]
+    stu = db.execute("SELECT display_name FROM users WHERE id=?", (sub["student_id"],)).fetchone()
+    return render_template("report.html", sub=sub, hw=hw, course=course, md=md,
+                           body=render_markdown(md), student_name=stu["display_name"],
+                           is_teacher=True)
+
+
+@app.route("/submission/<int:sid>/report/build", methods=["POST"])
+@role_required("teacher")
+def submission_report_build(sid):
+    sub, hw, _ = own_submission(sid)
+    generate_report(get_db(), sid, g.user["id"])
+    flash("批改报告已生成，确认无误后发布给学生。")
+    return redirect(url_for("submission_report", sid=sid))
+
+
+@app.route("/submission/<int:sid>/report/publish", methods=["POST"])
+@role_required("teacher")
+def submission_report_publish(sid):
+    sub, hw, _ = own_submission(sid)
+    db = get_db()
+    if not sub["report_md"]:
+        generate_report(db, sid, g.user["id"])
+    publish = 0 if sub["report_published"] else 1
+    db.execute("UPDATE submissions SET report_published=? WHERE id=?", (publish, sid))
+    db.commit()
+    flash("报告已发布，学生可在「我的学习」里查看。" if publish else "报告已撤回，学生不再可见。")
+    return redirect(url_for("submission_report", sid=sid))
+
+
+@app.route("/submission/<int:sid>/report/download")
+@role_required("teacher")
+def submission_report_download(sid):
+    sub, hw, _ = own_submission(sid)
+    if not sub["report_md"]:
+        abort(404)
+    name = f"{hw['title']}_批改报告.md".replace("/", "_")
+    import io as _io
+    return send_file(_io.BytesIO(sub["report_md"].encode("utf-8")),
+                     mimetype="text/markdown", as_attachment=True, download_name=name)
+
+
+@app.route("/student/submission/<int:sid>/report")
+@role_required("student")
+def student_report(sid):
+    db = get_db()
+    sub = db.execute("SELECT * FROM submissions WHERE id=? AND student_id=?",
+                     (sid, g.user["id"])).fetchone()
+    if not sub or not sub["report_published"] or not sub["report_md"]:
+        abort(404)
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (sub["lecture_id"],)).fetchone()
+    course = db.execute("SELECT * FROM courses WHERE id=?", (hw["course_id"],)).fetchone()
+    return render_template("report.html", sub=sub, hw=hw, course=course, md=sub["report_md"],
+                           body=render_markdown(sub["report_md"]),
+                           student_name=g.user["display_name"], is_teacher=False)
 
 
 def _consistency_issues():

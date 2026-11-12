@@ -26,7 +26,9 @@ PDF_GRADE_PROMPT = (
     "1. 学生作业里的实际书写是唯一评分依据，严禁把标准答案当成学生的作答。\n"
     "2. 看不清就写〔不清〕；无法分辨时必须判「无法判定」，严禁猜测或编造学生写了什么。\n"
     "3. 化学方程式/离子方程式必须查配平、条件、状态符号、可逆号；数值题查有效数字与单位。\n"
-    "4. 题号用学生作业里标注的题号；一题多问在 comment 说明哪一问失分；未作答判「错」并注明未作答。\n"
+    "4. 题号用学生作业里标注的题号；一题有多个小问（如 9.1、9.2、9(1)、9(2)）时合并为一条，"
+    "comment 里写清哪一问失分（如「9.1 正确，9.2 漏写单位」）；"
+    "未作答判「错」并注明未作答。\n"
     "5. 作业没有标注分值就不要编造分数：score 与 max_score 都输出 0，只给定性判定。\n"
     "6. comment 不超过 60 个汉字，standard_answer 不超过 60 个汉字。\n"
     "7. 学生作业中缺失或与标准答案对不上的题，不要凭空补题。")
@@ -40,6 +42,16 @@ GRADE_RETRIES = 1       # 批阅不重试：失败让老师手动重试，避免
 VERDICTS = ("对", "半对", "错", "无法判定")
 _MIME = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
          ".jpeg": "image/jpeg", ".webp": "image/webp"}
+
+SCOPE_PROMPT = (
+    "你是化学竞赛阅卷助理。附件是教师版标准答案的整页扫描图。\n"
+    "请只输出 JSON，不要输出解释或代码块标记：\n"
+    '{"questions":[{"no":"题号","max":5,"hint":"这题考查什么（不超过 20 字）"}]}\n'
+    "规则：\n"
+    "1. 按标准答案上标注的题号顺序列出全部题目，题号保持原文写法。\n"
+    "2. max 填该题满分；没有标注就填 0，不要估算。\n"
+    "3. 带小问的大题按大题合并成一条，不要把 (1)(2) 拆成多题。\n"
+    "4. 看不清的题号不要编造。")
 
 
 def _as_num(value, default=0.0):
@@ -147,6 +159,41 @@ def _normalize(raw):
     return questions
 
 
+def analyze_answer_pdf(answer_path, api_url, api_key, model, max_tokens=16384):
+    """从教师版标准答案里识别题目清单，返回 (questions, error)。
+
+    每项为 {no, max, hint}，供老师在讲次页勾选本讲作业范围。
+    """
+    parts, err = _file_parts(answer_path, "标准答案")
+    if err:
+        return None, err
+    content = [{"type": "text", "text": SCOPE_PROMPT},
+               {"type": "text", "text": f"教师版标准答案，共 {len(parts)} 页："}]
+    content += parts
+    reply, finish, err = llm.chat(api_url, api_key, model, content,
+                                  max_tokens=max_tokens, timeout=180, retries=1)
+    if err:
+        return None, f"AI 分析失败：{err}"
+
+    data = llm.extract_json(reply)
+    raw = data.get("questions") if isinstance(data, dict) else None
+    out = []
+    for q in raw or []:
+        if not isinstance(q, dict):
+            continue
+        no = str(q.get("no", "")).strip()
+        if not no:
+            continue
+        out.append({"key": f"q{len(out)}", "no": no,
+                    "max": _as_num(q.get("max"), 0.0),
+                    "hint": str(q.get("hint", "")).strip()})
+    if not out:
+        if finish == "length":
+            return None, "AI 输出被截断（题目数太多），请重试；多次失败可直接跳过作业范围，默认批改全部题目。"
+        return None, "AI 没有识别出题目清单，请重试，或直接跳过作业范围（默认批改全部题目）。"
+    return out, ""
+
+
 def grade_pdf_submission(student_path, answer_path, api_url, api_key, model,
                          extra="", max_tokens=32768):
     """批阅一份作业，返回 {questions, weak_points, evaluation, total_score, errors, error}。
@@ -202,3 +249,49 @@ def grade_pdf_submission(student_path, answer_path, api_url, api_key, model,
         "errors": [],
         "error": "",
     }
+
+
+REPORT_PROMPT = (
+    "你是化学竞赛阅卷老师。下面给出某位学生一次作业的逐题判定、失分点与总评。\n"
+    "请为学生写一段批改评语，只输出 JSON，不要解释或代码块标记：\n"
+    '{"good":"做得好的地方（80~160 字，要具体点出哪几题做得好）",'
+    '"improve":["需要改的第 1 处","第 2 处","第 3 处"],'
+    '"next":"下一步建议（60~120 字）"}\n'
+    "要求：只依据给定的判定，不要编造学生没写的内容；语气客观、以鼓励为主；"
+    "improve 最多 3 条，按严重程度排序；没有失分点就给空数组。"
+)
+
+
+def ai_report_comment(questions, weak_points, evaluation, api_url, api_key, model,
+                      max_tokens=2048):
+    """根据逐题结果生成报告里的「评价」部分；失败返回 {}，不影响报告其余内容。"""
+    def _field(q, *names):
+        for name in names:
+            if hasattr(q, "get"):
+                value = q.get(name)
+            else:
+                value = q[name] if name in q.keys() else None
+            if value is not None:
+                return value
+        return ""
+
+    brief = [{"no": _field(q, "no"), "verdict": _field(q, "verdict"),
+              "comment": _field(q, "ai_comment", "comment"), "note": _field(q, "note")}
+             for q in (questions or [])]
+    payload = json.dumps({"questions": brief, "weak_points": weak_points or [],
+                          "evaluation": evaluation or ""}, ensure_ascii=False)
+    content = [{"type": "text", "text": REPORT_PROMPT + "\n\n数据：\n" + payload}]
+    reply, finish, err = llm.chat(api_url, api_key, model, content,
+                                  max_tokens=max_tokens, timeout=120, retries=1)
+    if err:
+        return {}
+    data = llm.extract_json(reply)
+    if not isinstance(data, dict):
+        return {}
+    improve = data.get("improve")
+    if isinstance(improve, str):
+        improve = [improve]
+    improve = [str(x).strip() for x in (improve or []) if str(x).strip()][:3]
+    return {"good": str(data.get("good", "")).strip(),
+            "improve": improve,
+            "next": str(data.get("next", "")).strip()}

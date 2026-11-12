@@ -33,6 +33,7 @@
       <span class="muted">{{ s.created_at }}</span>
       <span class="tag tag-{{ s.status }}">{{ s.status }}</span>
       {% if s.score %}<span class="score">{{ s.score }}</span>{% endif %}
+      {% if s.report_published %}<a class="btn-link" href="{{ url_for('student_report', sid=s.id) }}">查看批改报告</a>{% endif %}
     </div>
     {% if sm and revealed %}
     <p class="small">AI 汇总：

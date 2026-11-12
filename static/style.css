@@ -16,7 +16,7 @@ td .role-badge { background: #eef2ff; color: #1456f0; }
 td .role-badge.role-admin { background: #fdecec; color: #c93338; }
 td .role-badge.role-student { background: #e6f6ec; color: #18794e; }
 
-.container { max-width: 1000px; margin: 24px auto; padding: 0 16px; }
+.container { max-width: 1240px; margin: 24px auto; padding: 0 24px; }
 h1 { font-size: 24px; margin-bottom: 12px; }
 h2 { font-size: 17px; margin-bottom: 10px; }
 .muted { color: #8a8f99; font-size: 14px; }
@@ -89,6 +89,12 @@ details summary { cursor: pointer; color: #1456f0; }
 .tag-批改中 { background: #fff4e0; color: #b25e09; }
 .tag-已批改 { background: #e6f6ec; color: #18794e; }
 
+/* 讲次页每份提交的批阅/审核状态 */
+.review-state { display: inline-block; padding: 2px 10px; border-radius: 999px;
+                font-size: 12px; white-space: nowrap; }
+.review-done { background: #e6f6ec; color: #18794e; }
+.review-pending { background: #fff4e0; color: #b25e09; }
+
 .flash { background: #e6f6ec; color: #18794e; padding: 10px 14px;
          border-radius: 6px; margin-bottom: 14px; }
 
@@ -119,6 +125,17 @@ details summary { cursor: pointer; color: #1456f0; }
 .reviewed-badge { background: #e6f6ec; color: #18794e; border-radius: 999px;
                   padding: 1px 8px; font-size: 12px; font-weight: 500; }
 .reviewed-badge[hidden] { display: none; }
+.pending-badge { background: #fff4e0; color: #b25e09; border-radius: 999px;
+                 padding: 1px 8px; font-size: 12px; font-weight: 500; }
+
+/* 批改报告（Markdown 渲染结果） */
+.report-body h1 { font-size: 22px; margin: 4px 0 16px; }
+.report-body h2 { font-size: 17px; margin: 20px 0 8px; }
+.report-body p { margin: 6px 0; }
+.report-body ol, .report-body ul { margin: 6px 0 6px 22px; font-size: 14px; }
+.report-body li { margin-bottom: 4px; }
+.report-body table.report-table { margin: 8px 0 12px; }
+.report-body table.report-table th, .report-body table.report-table td { font-size: 14px; }
 .q-score-hint { margin-left: auto; font-size: 13px; color: #8a8f99; font-weight: 400; }
 .field-row { display: flex; gap: 12px; align-items: flex-start; }
 .field-row > label { flex: 1; }

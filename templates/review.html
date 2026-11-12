@@ -3,6 +3,12 @@
 {% block content %}
 {% set summary = sub.ai_summary|fromjson %}
 {% set verdict_cls = {'对': 'right', '半对': 'partial', '错': 'wrong', '无法判定': 'unknown'} %}
+{% set n_total = questions|length %}
+{% set n_right = questions|selectattr('verdict', 'equalto', '对')|list|length %}
+{% set n_partial = questions|selectattr('verdict', 'equalto', '半对')|list|length %}
+{% set n_wrong = questions|selectattr('verdict', 'equalto', '错')|list|length %}
+{% set n_unknown = questions|selectattr('verdict', 'equalto', '无法判定')|list|length %}
+{% set auto_total = (n_right|string) ~ '/' ~ (n_total|string) if n_total else '' %}
 {% set pdf_url = url_for('uploaded_file', filename=sub.file_path) %}
 <p><a href="{{ url_for('lecture_detail', hid=hw.id) }}">← 返回 {{ hw.title }}</a></p>
 <h1>逐题批改：{{ sub.display_name }}</h1>
@@ -65,7 +71,7 @@
     {% for q in questions %}
     <details class="review-item" {% if not q.reviewed %}open{% endif %}>
       <summary>
-        <span class="q-no">第 {{ q.no }} 题</span>
+        <span class="q-no">{{ ('第 ' ~ q.no ~ ' 题') if q.no[:1].isdigit() else q.no }}</span>
         {% if q.verdict %}
         <span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">AI 判定：{{ q.verdict }}</span>
         {% endif %}
@@ -111,11 +117,13 @@
     </details>
     {% endfor %}
 
-    {% set auto_total = '%g/%g'|format(summary.total|float, summary.max_total|float) if summary and summary.max_total else '' %}
     <div class="review-row total-row">
       <div class="review-col">
-        <div class="col-title">总分</div>
-        <input name="total_score" value="{{ sub.score or auto_total }}" placeholder="{{ auto_total or '如 85/100' }}">
+        <div class="col-title">总分（默认按小问统计）</div>
+        <input name="total_score" value="{{ sub.score or auto_total }}" placeholder="{{ auto_total or '如 18/25' }}">
+        <p class="muted small" style="margin-top:6px">
+          共 {{ n_total }} 个小问：正确 {{ n_right }} · 半对 {{ n_partial }} · 错 {{ n_wrong }}{% if n_unknown %} · 无法判定 {{ n_unknown }}{% endif %}
+        </p>
       </div>
       <div class="review-col wide">
         <div class="col-title">总评（学生可见）</div>

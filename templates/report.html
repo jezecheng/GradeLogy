@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}批改报告{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="card-head">
+    <h1>批改报告</h1>
+    {% if is_teacher %}
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <form method="post" action="{{ url_for('submission_report_build', sid=sub.id) }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <button class="small ghost">{{ '生成批改报告' if not md else '重新生成' }}</button>
+      </form>
+      {% if md %}
+      <form method="post" action="{{ url_for('submission_report_publish', sid=sub.id) }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <button class="small {{ 'danger' if sub.report_published else '' }}">
+          {{ '撤回发布' if sub.report_published else '发布给学生' }}</button>
+      </form>
+      <a class="btn-link" href="{{ url_for('submission_report_download', sid=sub.id) }}">下载 .md</a>
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+
+  <p class="muted small">
+    {{ student_name }} · {{ hw.title }}
+    {% if sub.report_published %}<span class="reviewed-badge">已发布</span>
+    {% elif is_teacher and md %}<span class="pending-badge">草稿（学生不可见）</span>{% endif %}
+    {% if is_teacher %}
+      · <a href="{{ url_for('submission_review', sid=sub.id) }}">返回逐题核对</a>
+      · <a href="{{ url_for('lecture_detail', hid=hw.id) }}">返回讲次</a>
+    {% endif %}
+  </p>
+
+  {% if md %}
+  <div class="report-body">{{ body|safe }}</div>
+  {% else %}
+  <p class="muted" style="margin-top:16px">
+    还没有生成报告。完成逐题核对并保存后，点右上角「生成批改报告」。
+  </p>
+  {% endif %}
+</div>
+{% endblock %}
