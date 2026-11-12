@@ -1039,7 +1039,44 @@ def lecture_detail(hid):
         FROM submissions s
         JOIN users u ON u.id=s.student_id
         WHERE s.lecture_id=? ORDER BY s.created_at DESC""", (hid,)).fetchall()
-    return render_template("lecture.html", hw=hw, course=course, subs=subs)
+    students = db.execute("""
+        SELECT u.id, u.display_name, u.username FROM enrollments e
+        JOIN users u ON u.id=e.student_id
+        WHERE e.course_id=? ORDER BY u.display_name""", (course["id"],)).fetchall()
+    return render_template("lecture.html", hw=hw, course=course, subs=subs, students=students)
+
+
+@app.route("/lecture/<oid:hid>/upload-for", methods=["POST"])
+@role_required("teacher")
+def lecture_upload_for(hid):
+    """老师代学生上传：把扫描件记到指定学生的提交里，后续照样走 AI 批阅。"""
+    db = get_db()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
+    if not hw:
+        abort(404)
+    course = own_course(hw["course_id"])
+    student_id = request.form.get("student_id", type=int)
+    enrolled = db.execute("SELECT 1 FROM enrollments WHERE course_id=? AND student_id=?",
+                          (course["id"], student_id)).fetchone()
+    if not student_id or not enrolled:
+        flash("请选择本课程的学生")
+        return redirect(url_for("lecture_detail", hid=hid))
+    f = request.files.get("file")
+    if not (f and f.filename and allowed_file(f.filename)):
+        flash("请上传 png / jpg / webp / pdf 文件")
+        return redirect(url_for("lecture_detail", hid=hid))
+    try:
+        name = save_upload(f)
+    except ValueError as e:
+        flash(str(e))
+        return redirect(url_for("lecture_detail", hid=hid))
+    db.execute("INSERT INTO submissions(lecture_id,student_id,file_path) VALUES(?,?,?)",
+               (hid, student_id, name))
+    db.commit()
+    student = db.execute("SELECT display_name FROM users WHERE id=?", (student_id,)).fetchone()
+    log.info("老师代传作业 lecture=%s student=%s operator=%s", hid, student_id, g.user["username"])
+    flash(f"已替 {student['display_name']} 上传作业，可点「AI 批阅」开始批改")
+    return redirect(url_for("lecture_detail", hid=hid))
 
 
 

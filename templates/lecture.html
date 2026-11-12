@@ -137,7 +137,33 @@
 </details>
 
 <div class="card">
-  <h2>提交与批阅（{{ subs|length }} 份）</h2>
+  <div class="card-head">
+    <h2>提交与批阅（{{ subs|length }} 份）</h2>
+    <button type="button" class="small" data-dialog-open="upload-for-dialog">代学生上传</button>
+  </div>
+  <dialog id="upload-for-dialog" class="modal">
+    <h2>代学生上传作业</h2>
+    <p class="muted small">适用于学生把纸质作业交给老师的情况；上传后同样可以走 AI 批阅与报告。</p>
+    <form method="post" action="{{ url_for('lecture_upload_for', hid=hw.id) }}"
+          enctype="multipart/form-data" class="stack-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <label>选择学生
+        <select name="student_id" required>
+          <option value="">请选择</option>
+          {% for st in students %}
+          <option value="{{ st.id }}">{{ st.display_name }}（{{ st.username }}）</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>选择文件（png / jpg / webp / pdf）
+        <input type="file" name="file" accept=".png,.jpg,.jpeg,.webp,.pdf" required>
+      </label>
+      <div class="modal-actions">
+        <button type="button" class="ghost" data-dialog-close>取消</button>
+        <button type="submit">确认上传</button>
+      </div>
+    </form>
+  </dialog>
   {% if subs %}
   {% for s in subs %}
   <div class="sub-card">
