@@ -44,9 +44,16 @@
     需要在「AI 设置」里选择支持图片输入的多模态模型。</p>
 </div>
 
-<div class="card">
-  <div class="card-head">
+<details class="card scope-card">
+  <summary class="card-head">
     <h2>作业范围</h2>
+    <span class="muted small scope-summary">
+      {% if chosen %}已选 {{ chosen|length }} 题
+      {% elif cands %}未选择，批改全部题目
+      {% else %}未生成题目清单{% endif %}
+    </span>
+  </summary>
+  <div class="scope-actions">
     <form method="post" action="{{ url_for('lecture_scope_analyze', hid=hw.id) }}" class="scope-analyze-form">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
       <button type="submit" class="small">{{ '重新分析标准答案' if cands else '分析标准答案生成题目列表' }}</button>
@@ -79,9 +86,9 @@
     </div>
   </form>
   {% else %}
-  <p class="muted">还没有题目清单。先点右上角按钮，让 AI 读一遍标准答案。</p>
+  <p class="muted">还没有题目清单。先点上方按钮，让 AI 读一遍标准答案。</p>
   {% endif %}
-</div>
+</details>
 
 <div class="card">
   <h2>讲次信息</h2>

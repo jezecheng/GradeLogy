@@ -34,6 +34,20 @@
 
   {% if md %}
   <div class="report-body">{{ body|safe }}</div>
+
+  {% if is_teacher %}
+  <details class="report-editor">
+    <summary>编辑报告内容（Markdown）</summary>
+    <form method="post" action="{{ url_for('submission_report_save', sid=sub.id) }}">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <textarea name="report_md" rows="26" class="mono">{{ md }}</textarea>
+      <div class="save-bar">
+        <button class="small">保存修改</button>
+        <span class="muted small">保存后本页立即按新内容渲染{% if sub.report_published %}，学生端同步更新{% endif %}。</span>
+      </div>
+    </form>
+  </details>
+  {% endif %}
   {% else %}
   <p class="muted" style="margin-top:16px">
     还没有生成报告。完成逐题核对并保存后，点右上角「生成批改报告」。

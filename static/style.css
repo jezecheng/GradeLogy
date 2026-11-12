@@ -31,6 +31,17 @@ h2 { font-size: 17px; margin-bottom: 10px; }
 .login-card h1 { font-size: 22px; margin-bottom: 6px; }
 .score-input { width: 96px; }
 
+/* 讲次页：作业范围卡片可折叠，默认收起 */
+details.scope-card { padding: 16px 20px; }
+details.scope-card > summary.card-head { list-style: none; cursor: pointer; margin-bottom: 0; }
+details.scope-card > summary::-webkit-details-marker { display: none; }
+details.scope-card > summary::before { content: "▸"; color: #8a8f99; font-size: 12px;
+                                       transition: transform .15s; }
+details.scope-card[open] > summary::before { transform: rotate(90deg); }
+details.scope-card[open] > summary.card-head { margin-bottom: 12px; }
+.scope-summary { margin-left: auto; }
+.scope-actions { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+
 /* 卡片标题行：标题与右侧操作按钮 */
 .card-head { display: flex; align-items: center; justify-content: space-between;
              gap: 12px; margin-bottom: 12px; }
@@ -125,6 +136,17 @@ details summary { cursor: pointer; color: #1456f0; }
 .reviewed-badge { background: #e6f6ec; color: #18794e; border-radius: 999px;
                   padding: 1px 8px; font-size: 12px; font-weight: 500; }
 .reviewed-badge[hidden] { display: none; }
+.reviewed-badge.is-pending { background: #fff4e0; color: #b25e09; }
+
+/* 总评区下方的「生成新的总评」 */
+.overall-actions { display: flex; align-items: center; gap: 10px; margin-top: 6px; flex-wrap: wrap; }
+.overall-actions button[disabled] { opacity: .5; cursor: not-allowed; }
+
+/* 报告页：编辑 Markdown 源文 */
+.report-editor { margin-top: 18px; border-top: 1px solid #eef0f3; padding-top: 12px; }
+.report-editor > summary { color: #1456f0; cursor: pointer; font-size: 14px; }
+.report-editor textarea.mono { margin-top: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                               font-size: 13px; line-height: 1.55; }
 .pending-badge { background: #fff4e0; color: #b25e09; border-radius: 999px;
                  padding: 1px 8px; font-size: 12px; font-weight: 500; }
 

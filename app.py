@@ -1338,6 +1338,9 @@ def submission_review_save(sid):
         generate_report(db, sid, g.user["id"], reuse=True)
     except Exception:  # 报告刷新失败不影响批改保存
         log.exception("刷新批改报告失败 submission=%s", sid)
+    if (request.form.get("then") or "") == "report":
+        flash("批改已保存，报告已按最新结果刷新，可继续修改后发布。")
+        return redirect(url_for("submission_report", sid=sid))
     flash("批改已保存，学生可以查看")
     return redirect(url_for("submission_review", sid=sid))
 
@@ -1520,10 +1523,10 @@ def student_lecture_page(hid):
         return redirect(url_for("student_lecture_page", hid=hid))
     subs = db.execute("SELECT * FROM submissions WHERE lecture_id=? AND student_id=? "
                       "ORDER BY id DESC", (hid, g.user["id"])).fetchall()
-    # 只有老师复核完成（status=已批改）才向学生公开逐题明细；AI 原始结果不直接透出。
+    # 老师复核完成（status=已批改）或已发布批改报告后，向学生公开逐题明细。
     # 明细按最新一次提交取，且不再依赖 score（默认定性批改时 score 为空）。
     latest = subs[0] if subs else None
-    revealed = bool(latest) and latest["status"] == "已批改"
+    revealed = bool(latest) and (latest["status"] == "已批改" or latest["report_published"])
     items = []
     if revealed:
         items = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
@@ -1694,6 +1697,23 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
     return "\n".join(out).strip() + "\n"
 
 
+def _overall_text(detail, fallback=""):
+    """把 AI 返回的三段式评价拼成纯文本总评，供逐题核对页的文本框直接编辑。"""
+    if not detail:
+        return fallback or ""
+    parts = []
+    good = (detail.get("good") or "").strip()
+    if good:
+        parts.append(good)
+    improve = [str(x).strip() for x in (detail.get("improve") or []) if str(x).strip()]
+    if improve:
+        parts.append("需要改的几处：\n" + "\n".join(f"{i}. {x}" for i, x in enumerate(improve, 1)))
+    nxt = (detail.get("next") or "").strip()
+    if nxt:
+        parts.append("下一步建议：" + nxt)
+    return "\n\n".join(parts) or (fallback or "")
+
+
 def render_markdown(md):
     """把报告用的极简 Markdown（标题/表格/列表/粗体）渲染成 HTML，避免引入额外依赖。"""
     esc = lambda s: (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
@@ -1821,6 +1841,48 @@ def submission_report_publish(sid):
     db.execute("UPDATE submissions SET report_published=? WHERE id=?", (publish, sid))
     db.commit()
     flash("报告已发布，学生可在「我的学习」里查看。" if publish else "报告已撤回，学生不再可见。")
+    return redirect(url_for("submission_report", sid=sid))
+
+
+@app.route("/submission/<int:sid>/report/comment", methods=["POST"])
+@role_required("teacher")
+def submission_report_comment(sid):
+    """全部题目复核完成后，用 AI 重写一份总评，回填到逐题核对页的文本框继续人工修改。"""
+    db = get_db()
+    sub, hw, _ = own_submission(sid)
+    questions = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
+                           (sid,)).fetchall()
+    if not questions:
+        return {"ok": False, "error": "还没有批阅结果，无法生成总评"}, 400
+    pending = [q for q in questions if not q["reviewed"]]
+    if pending:
+        return {"ok": False, "error": f"还有 {len(pending)} 道题未复核，全部复核后才能生成总评"}, 400
+    api_url = get_setting(g.user["id"], "ai_api_url").rstrip("/")
+    api_key = get_setting(g.user["id"], "ai_api_key")
+    model = get_setting(g.user["id"], "ai_model")
+    if not (api_url and api_key and model):
+        return {"ok": False, "error": "尚未配置 AI 接口，无法生成总评"}, 400
+    summary = _json_or_none(sub["ai_summary"]) or {}
+    detail = ai_report_comment(questions, summary.get("weak_points") or [],
+                               summary.get("evaluation", ""), api_url, api_key, model)
+    if not detail:
+        return {"ok": False, "error": "AI 生成总评失败，请稍后重试"}, 502
+    db.execute("UPDATE submissions SET report_detail=? WHERE id=?",
+               (json.dumps(detail, ensure_ascii=False), sid))
+    db.commit()
+    return {"ok": True, "text": _overall_text(detail, summary.get("evaluation", ""))}
+
+
+@app.route("/submission/<int:sid>/report/save", methods=["POST"])
+@role_required("teacher")
+def submission_report_save(sid):
+    """保存老师在报告页对 Markdown 的手工修改。"""
+    sub, hw, _ = own_submission(sid)
+    md = (request.form.get("report_md") or "").strip()
+    db = get_db()
+    db.execute("UPDATE submissions SET report_md=? WHERE id=?", (md, sid))
+    db.commit()
+    flash("报告修改已保存" + ("，学生端同步可见。" if sub["report_published"] else "。"))
     return redirect(url_for("submission_report", sid=sid))
 
 

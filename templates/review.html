@@ -9,12 +9,17 @@
 {% set n_wrong = questions|selectattr('verdict', 'equalto', '错')|list|length %}
 {% set n_unknown = questions|selectattr('verdict', 'equalto', '无法判定')|list|length %}
 {% set auto_total = (n_right|string) ~ '/' ~ (n_total|string) if n_total else '' %}
+{% set n_reviewed = questions|selectattr('reviewed')|list|length %}
+{% set all_reviewed = n_total > 0 and n_reviewed == n_total %}
 {% set pdf_url = url_for('uploaded_file', filename=sub.file_path) %}
 <p><a href="{{ url_for('lecture_detail', hid=hw.id) }}">← 返回 {{ hw.title }}</a></p>
 <h1>逐题批改：{{ sub.display_name }}</h1>
 <p class="muted">
   {{ sub.username }} · {{ hw.title }} · 提交于 {{ sub.created_at }}
   · <a href="{{ pdf_url }}" target="_blank" data-pdf-toggle>查看原始扫描件</a>
+  {% if n_total %}
+  · 已复核 <strong id="reviewed-count">{{ n_reviewed }}</strong>/{{ n_total }} 题
+  {% endif %}
 </p>
 
 {% if summary and summary.errors %}
@@ -69,13 +74,14 @@
   <form method="post" action="{{ url_for('submission_review_save', sid=sub.id) }}">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     {% for q in questions %}
-    <details class="review-item" {% if not q.reviewed %}open{% endif %}>
+    <details class="review-item">
       <summary>
         <span class="q-no">{{ ('第 ' ~ q.no ~ ' 题') if q.no[:1].isdigit() else q.no }}</span>
         {% if q.verdict %}
         <span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">AI 判定：{{ q.verdict }}</span>
         {% endif %}
-        <span class="reviewed-badge" {% if not q.reviewed %}hidden{% endif %}>✓ 已审核</span>
+        <span class="reviewed-badge{% if not q.reviewed %} is-pending{% endif %}"
+              data-reviewed="{{ 1 if q.reviewed else 0 }}">{{ '✓ 已复核' if q.reviewed else '待复核' }}</span>
         {% if q.score != '' %}
         <span class="q-score-hint">{{ q.score }}{% if q.max_score %}/{{ '%g'|format(q.max_score|float) }}{% endif %} 分</span>
         {% endif %}
@@ -127,11 +133,19 @@
       </div>
       <div class="review-col wide">
         <div class="col-title">总评（学生可见）</div>
-        <textarea name="overall" rows="4">{{ sub.feedback or (summary.evaluation if summary else '') }}</textarea>
+        <textarea name="overall" id="overall" rows="4">{{ sub.feedback or (summary.evaluation if summary else '') }}</textarea>
+        <div class="overall-actions">
+          <button type="button" id="gen-overall" class="small ghost"
+                  {% if not all_reviewed %}disabled{% endif %}>生成新的总评</button>
+          <span class="muted small" id="gen-overall-hint">
+            {% if not all_reviewed %}还有 {{ n_total - n_reviewed }} 题未复核，全部复核后才能生成总评{% else %}已全部复核，可用 AI 重写总评（生成后仍可继续修改）{% endif %}
+          </span>
+        </div>
       </div>
     </div>
     <div class="save-bar">
       <button type="submit">保存并发布给学生</button>
+      <button type="submit" name="then" value="report" class="ghost">生成批阅报告</button>
       <span class="muted small">分数与评语已按 AI 建议预填，可直接修改。{% if sub.status != '已批改' %}保存前学生看不到本次结果；{% endif %}保存后学生即可看到每题判定、得分、评语与总评。</span>
     </div>
   </form>
@@ -168,9 +182,26 @@
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape') toggle(false); });
 })();
 
-// 单题「已审核」：点击即保存，折叠时标题栏保留状态
+// 单题「已复核」：点击即保存，折叠时标题栏显示复核状态
 (function () {
   var csrf = '{{ csrf_token() }}';
+  var total = {{ n_total }};
+  var countEl = document.getElementById('reviewed-count');
+  var genBtn = document.getElementById('gen-overall');
+  var genHint = document.getElementById('gen-overall-hint');
+
+  function syncProgress() {
+    var done = document.querySelectorAll('.reviewed-badge[data-reviewed="1"]').length;
+    if (countEl) countEl.textContent = done;
+    var all = total > 0 && done === total;
+    if (genBtn) genBtn.disabled = !all;
+    if (genHint) {
+      genHint.textContent = all
+        ? '已全部复核，可用 AI 重写总评（生成后仍可继续修改）'
+        : '还有 ' + (total - done) + ' 题未复核，全部复核后才能生成总评';
+    }
+  }
+
   document.querySelectorAll('.reviewed-toggle').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var next = btn.dataset.reviewed === '1' ? 0 : 1;
@@ -184,10 +215,15 @@
         return r.json();
       }).then(function (d) {
         btn.dataset.reviewed = d.reviewed;
-        btn.textContent = d.reviewed ? '已审核 ✓' : '标记已审核';
+        btn.textContent = d.reviewed ? '已复核 ✓' : '标记已复核';
         btn.classList.toggle('reviewed-on', !!d.reviewed);
         var badge = btn.closest('details').querySelector('.reviewed-badge');
-        if (badge) badge.hidden = !d.reviewed;
+        if (badge) {
+          badge.dataset.reviewed = d.reviewed ? '1' : '0';
+          badge.textContent = d.reviewed ? '✓ 已复核' : '待复核';
+          badge.classList.toggle('is-pending', !d.reviewed);
+        }
+        syncProgress();
       }).catch(function () {
         alert('标记失败，请检查网络后重试');
       }).then(function () {
@@ -195,6 +231,30 @@
       });
     });
   });
+
+  // 全部复核完成后，用 AI 生成一份新总评回填文本框，教师可继续修改
+  if (genBtn) {
+    genBtn.addEventListener('click', function () {
+      genBtn.disabled = true;
+      var old = genBtn.textContent;
+      genBtn.textContent = '生成中…';
+      fetch('{{ url_for("submission_report_comment", sid=sub.id) }}', {
+        method: 'POST', headers: { 'X-CSRF-Token': csrf }
+      }).then(function (r) { return r.json().then(function (d) { return [r.ok, d]; }); })
+        .then(function (res) {
+          var ok = res[0], data = res[1];
+          if (!ok || !data.ok) throw new Error(data.error || '生成失败');
+          document.getElementById('overall').value = data.text;
+          genHint.textContent = '已生成新的总评，可继续修改后保存';
+        }).catch(function (e) {
+          alert(e.message || '生成总评失败，请稍后重试');
+        }).then(function () {
+          genBtn.textContent = old;
+          syncProgress();
+        });
+    });
+  }
+  syncProgress();
 })();
 </script>
 {% endblock %}
