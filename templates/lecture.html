@@ -8,7 +8,35 @@
 <p class="muted">讲次{% if hw.deadline %} · 截止 {{ hw.deadline.replace('T',' ') }}{% endif %}{% if hw.description %} · {{ hw.description }}{% endif %}</p>
 
 <div class="card">
-  <h2>学生版讲义</h2>
+  <div class="card-head">
+    <h2>讲次信息</h2>
+    <button type="button" class="small" data-dialog-open="lecture-edit-dialog">编辑</button>
+  </div>
+  <p><span class="muted">标题</span>　{{ hw.title }}</p>
+  <p><span class="muted">说明</span>　{{ hw.description or '—' }}</p>
+  <p><span class="muted">截止时间</span>　{{ hw.deadline.replace('T', ' ') if hw.deadline else '不限' }}</p>
+  <dialog id="lecture-edit-dialog" class="modal">
+    <h2>编辑讲次信息</h2>
+    <form method="post" action="{{ url_for('lecture_edit', hid=hw.id) }}" class="stack-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <label>讲次名称 <input name="title" value="{{ hw.title }}" required></label>
+      <label>说明 <textarea name="description" rows="3">{{ hw.description or '' }}</textarea></label>
+      <label>截止时间 <input type="datetime-local" name="deadline" value="{{ hw.deadline or '' }}"></label>
+      <p class="muted small">清空截止时间再保存，即取消截止限制。</p>
+      <div class="modal-actions">
+        <button type="button" class="ghost" data-dialog-close>取消</button>
+        <button type="submit">保存修改</button>
+      </div>
+    </form>
+  </dialog>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>学生版讲义</h2>
+    <button type="button" class="small" data-dialog-open="student-pdf-dialog">
+      {{ '更换学生版 PDF' if hw.student_pdf else '上传学生版 PDF' }}</button>
+  </div>
   {% if hw.student_pdf %}
     <p><a href="{{ url_for('uploaded_file', filename=hw.student_pdf) }}"
           data-pdf-toggle data-pdf-src="{{ url_for('uploaded_file', filename=hw.student_pdf) }}"
@@ -17,16 +45,27 @@
   {% else %}
     <p class="muted">尚未上传学生版讲义。学生端不会显示下载入口。</p>
   {% endif %}
-  <form method="post" action="{{ url_for('lecture_student_pdf', hid=hw.id) }}"
-        enctype="multipart/form-data" class="inline-form">
-    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <input type="file" name="student_pdf" accept=".pdf" required>
-    <button type="submit">{{ '更换' if hw.student_pdf else '上传' }}学生版 PDF</button>
-  </form>
+  <dialog id="student-pdf-dialog" class="modal">
+    <h2>{{ '更换学生版讲义' if hw.student_pdf else '上传学生版讲义' }}</h2>
+    <p class="muted small">选一份 PDF 作为发给学生的原卷，学生可在讲次页下载。</p>
+    <form method="post" action="{{ url_for('lecture_student_pdf', hid=hw.id) }}"
+          enctype="multipart/form-data" class="stack-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <label>选择 PDF 文件 <input type="file" name="student_pdf" accept=".pdf" required></label>
+      <div class="modal-actions">
+        <button type="button" class="ghost" data-dialog-close>取消</button>
+        <button type="submit">确认上传</button>
+      </div>
+    </form>
+  </dialog>
 </div>
 
 <div class="card">
-  <h2>标准答案（教师版）</h2>
+  <div class="card-head">
+    <h2>标准答案（教师版）</h2>
+    <button type="button" class="small" data-dialog-open="answer-pdf-dialog">
+      {{ '更换答案 PDF' if hw.answer_pdf else '上传答案 PDF' }}</button>
+  </div>
   {% if hw.answer_pdf %}
     <p><a href="{{ url_for('uploaded_file', filename=hw.answer_pdf) }}"
           data-pdf-toggle data-pdf-src="{{ url_for('uploaded_file', filename=hw.answer_pdf) }}"
@@ -34,14 +73,21 @@
   {% else %}
     <p class="muted">尚未上传答案。AI 批阅需要把学生作业和这份标准答案一起发送给模型。</p>
   {% endif %}
-  <form method="post" action="{{ url_for('lecture_answer', hid=hw.id) }}"
-        enctype="multipart/form-data" class="inline-form">
-    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <input type="file" name="answer_pdf" accept=".pdf" required>
-    <button type="submit">{{ '更换' if hw.answer_pdf else '上传' }}答案 PDF</button>
-  </form>
   <p class="muted small">批阅时会把「学生作业 + 标准答案」两份文件逐页渲染成图片一起交给 AI 对照；
     需要在「AI 设置」里选择支持图片输入的多模态模型。</p>
+  <dialog id="answer-pdf-dialog" class="modal">
+    <h2>{{ '更换标准答案' if hw.answer_pdf else '上传标准答案' }}</h2>
+    <p class="muted small">答案只用于 AI 批阅对照与作业范围分析，学生端不可见。</p>
+    <form method="post" action="{{ url_for('lecture_answer', hid=hw.id) }}"
+          enctype="multipart/form-data" class="stack-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <label>选择 PDF 文件 <input type="file" name="answer_pdf" accept=".pdf" required></label>
+      <div class="modal-actions">
+        <button type="button" class="ghost" data-dialog-close>取消</button>
+        <button type="submit">确认上传</button>
+      </div>
+    </form>
+  </dialog>
 </div>
 
 <details class="card scope-card">
@@ -91,18 +137,6 @@
 </details>
 
 <div class="card">
-  <h2>讲次信息</h2>
-  <form method="post" action="{{ url_for('lecture_edit', hid=hw.id) }}" class="stack-form">
-    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <label>讲次名称 <input name="title" value="{{ hw.title }}" required></label>
-    <label>说明 <textarea name="description" rows="2">{{ hw.description or '' }}</textarea></label>
-    <label>截止时间 <input type="datetime-local" name="deadline" value="{{ hw.deadline or '' }}"></label>
-    <button type="submit">保存修改</button>
-  </form>
-  <p class="muted small">清空截止时间再保存，即取消截止限制。</p>
-</div>
-
-<div class="card">
   <h2>提交与批阅（{{ subs|length }} 份）</h2>
   {% if subs %}
   {% for s in subs %}
@@ -147,6 +181,29 @@
 </div>
 {% include "_pdf_panel.html" %}
 <script>
+// 上传 PDF：文件选择放在弹窗里，点「上传/更换」才打开
+(function () {
+  document.querySelectorAll('[data-dialog-open]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var dlg = document.getElementById(btn.dataset.dialogOpen);
+      if (!dlg) return;
+      dlg.showModal();
+    });
+  });
+  document.querySelectorAll('dialog.modal').forEach(function (dlg) {
+    dlg.querySelectorAll('[data-dialog-close]').forEach(function (btn) {
+      btn.addEventListener('click', function () { dlg.close(); });
+    });
+    dlg.addEventListener('click', function (e) { if (e.target === dlg) dlg.close(); });
+    var form = dlg.querySelector('form');
+    if (form && form.enctype === 'multipart/form-data') {
+      form.addEventListener('submit', function () {
+        var btn = form.querySelector('button[type="submit"]');
+        if (btn && !btn.disabled) { btn.disabled = true; btn.textContent = '上传中…'; }
+      });
+    }
+  });
+})();
 // 批阅是同步长任务：提交后禁用按钮并提示进度，避免重复点击重复调用 AI
 (function () {
   document.querySelectorAll('form.grade-form').forEach(function (form) {
