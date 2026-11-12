@@ -31,6 +31,21 @@ h2 { font-size: 17px; margin-bottom: 10px; }
 .login-card h1 { font-size: 22px; margin-bottom: 6px; }
 .score-input { width: 96px; }
 
+/* 卡片标题行：标题与右侧操作按钮 */
+.card-head { display: flex; align-items: center; justify-content: space-between;
+             gap: 12px; margin-bottom: 12px; }
+.card-head h2 { margin-bottom: 0; }
+
+/* 弹窗（原生 dialog） */
+dialog.modal { border: none; border-radius: 12px; padding: 22px 22px 18px;
+               width: min(560px, 92vw); max-height: 88vh; overflow: auto;
+               box-shadow: 0 24px 64px rgba(16, 24, 40, .28); }
+dialog.modal::backdrop { background: rgba(15, 23, 42, .45); }
+dialog.modal h2 { margin-bottom: 4px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 6px; }
+button.ghost { background: #fff; color: #4a5260; border: 1px solid #d0d5dd; }
+button.ghost:hover { background: #f4f6f8; }
+
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
 .course-card h3 { margin-bottom: 6px; }
 
@@ -87,6 +102,32 @@ details summary { cursor: pointer; color: #1456f0; }
              border-radius: 8px; padding: 14px; margin-top: 12px; }
 .save-bar { display: flex; gap: 12px; align-items: center; margin-top: 16px; }
 .qa-item { border-bottom: 1px dashed #eef0f3; padding: 6px 0; font-size: 14px; }
+
+/* 逐题折叠：标题栏显示题号、AI 判定、审核状态与得分 */
+.review-item { border-bottom: 1px solid #eef0f3; }
+.review-item > summary { list-style: none; cursor: pointer; padding: 12px 2px;
+                         display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+                         font-weight: 600; }
+.review-item > summary::-webkit-details-marker { display: none; }
+.review-item > summary::before { content: "▸"; color: #8a8f99; font-size: 12px;
+                                 transition: transform .15s; }
+.review-item[open] > summary::before { transform: rotate(90deg); }
+.review-item > summary:hover { background: #fafbfc; }
+.review-item[open] > summary { border-bottom: 1px dashed #eef0f3; }
+.review-item .q-no { font-size: 15px; }
+.review-item .verdict { font-weight: 500; }
+.reviewed-badge { background: #e6f6ec; color: #18794e; border-radius: 999px;
+                  padding: 1px 8px; font-size: 12px; font-weight: 500; }
+.reviewed-badge[hidden] { display: none; }
+.q-score-hint { margin-left: auto; font-size: 13px; color: #8a8f99; font-weight: 400; }
+.field-row { display: flex; gap: 12px; align-items: flex-start; }
+.field-row > label { flex: 1; }
+.field-row .ai-hint { align-self: center; white-space: nowrap; }
+.review-actions { display: flex; justify-content: flex-end; padding: 6px 0 14px; }
+.review-item .review-row { border-bottom: none; padding: 12px 0 6px; }
+.reviewed-toggle.reviewed-on { background: #e6f6ec; color: #18794e;
+                               border: 1px solid #b7e2c6; }
+.reviewed-toggle.reviewed-on:hover { background: #d8f0e2; }
 
 /* AI 逐题判定与汇总 */
 .verdict { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px;

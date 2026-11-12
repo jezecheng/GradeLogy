@@ -68,24 +68,14 @@
          data-pdf-toggle data-pdf-src="{{ url_for('uploaded_file', filename=s.file_path) }}"
          data-pdf-title="{{ s.display_name }} · 扫描件">查看扫描件</a>
       <a class="btn-link" href="{{ url_for('submission_review', sid=s.id) }}">逐题核对</a>
-      <form method="post" action="{{ url_for('submission_grade', sid=s.id) }}">
+      <form method="post" action="{{ url_for('submission_grade', sid=s.id) }}" class="grade-form">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
         <button class="small">{{ '重新批阅' if s.status == '待批改' or s.feedback else 'AI 批阅' }}</button>
       </form>
     </div>
+    <p class="muted small grade-hint" hidden>正在把作业与标准答案交给 AI，约 1~3 分钟，请勿刷新或重复点击。</p>
     {% if s.grader %}<p class="muted small">批改来源：{{ s.grader }} · 更新于 {{ s.updated_at }}</p>{% endif %}
     {% if s.feedback %}<pre class="feedback">{{ s.feedback }}</pre>{% endif %}
-    <details {% if not s.feedback %}open{% endif %}>
-      <summary class="small">手动更正批改</summary>
-      <form method="post" action="{{ url_for('submission_correct', sid=s.id) }}" class="stack-form correct-form">
-        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-        <label>得分 <input name="score" value="{{ s.score }}" placeholder="如：85 或 85/100"></label>
-        <label>评语 / 批改意见
-          <textarea name="feedback" rows="5" placeholder="填写批改意见，学生登录后可见">{{ s.feedback }}</textarea>
-        </label>
-        <button type="submit">保存更正</button>
-      </form>
-    </details>
   </div>
   {% endfor %}
   {% else %}
@@ -93,4 +83,20 @@
   {% endif %}
 </div>
 {% include "_pdf_panel.html" %}
+<script>
+// 批阅是同步长任务：提交后禁用按钮并提示进度，避免重复点击重复调用 AI
+(function () {
+  document.querySelectorAll('form.grade-form').forEach(function (form) {
+    form.addEventListener('submit', function () {
+      var btn = form.querySelector('button');
+      if (btn && !btn.disabled) {
+        btn.disabled = true;
+        btn.textContent = '批阅中…';
+      }
+      var hint = form.closest('.sub-card').querySelector('.grade-hint');
+      if (hint) hint.hidden = false;
+    });
+  });
+})();
+</script>
 {% endblock %}

@@ -63,34 +63,52 @@
   <form method="post" action="{{ url_for('submission_review_save', sid=sub.id) }}">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     {% for q in questions %}
-    <div class="review-row">
-      <div class="review-col">
-        <div class="col-title">第 {{ q.no }} 题 · 学生作答（OCR，可修正）
-          {% if q.verdict %}
-          <span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">AI 判定：{{ q.verdict }}</span>
-          {% endif %}
-          {% if q.verdict and q.max_score %}
-          <span class="ai-hint">AI 建议 {{ q.score if q.score != '' else '—' }}/{{ '%g'|format(q.max_score|float) }}</span>
-          {% endif %}
+    <details class="review-item" {% if not q.reviewed %}open{% endif %}>
+      <summary>
+        <span class="q-no">第 {{ q.no }} 题</span>
+        {% if q.verdict %}
+        <span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">AI 判定：{{ q.verdict }}</span>
+        {% endif %}
+        <span class="reviewed-badge" {% if not q.reviewed %}hidden{% endif %}>✓ 已审核</span>
+        {% if q.score != '' %}
+        <span class="q-score-hint">{{ q.score }}{% if q.max_score %}/{{ '%g'|format(q.max_score|float) }}{% endif %} 分</span>
+        {% endif %}
+      </summary>
+      <div class="review-row">
+        <div class="review-col">
+          <div class="col-title">学生作答（OCR，可修正）</div>
+          <textarea name="ocr_{{ q.id }}" rows="7">{{ q.ocr_text }}</textarea>
+          <div class="field-row">
+            <label>本题判定
+              <select name="verdict_{{ q.id }}" class="small">
+                <option value="" {% if not q.verdict %}selected{% endif %}>（未判定）</option>
+                {% for v in ['对', '半对', '错', '无法判定'] %}
+                <option value="{{ v }}" {% if q.verdict == v %}selected{% endif %}>{{ v }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>本题得分{% if q.max_score %}（满分 {{ '%g'|format(q.max_score|float) }}）{% endif %}
+              <input name="score_{{ q.id }}" value="{{ q.score }}" placeholder="如 4">
+            </label>
+            {% if q.verdict and q.max_score %}
+            <span class="ai-hint">AI 建议 {{ q.score if q.score != '' else '—' }}/{{ '%g'|format(q.max_score|float) }}</span>
+            {% endif %}
+          </div>
+          <label>本题评语 <textarea name="note_{{ q.id }}" rows="2">{{ q.note }}</textarea></label>
         </div>
-        <textarea name="ocr_{{ q.id }}" rows="7">{{ q.ocr_text }}</textarea>
-        <label>本题判定
-          <select name="verdict_{{ q.id }}" class="small">
-            <option value="" {% if not q.verdict %}selected{% endif %}>（未判定）</option>
-            {% for v in ['对', '半对', '错', '无法判定'] %}
-            <option value="{{ v }}" {% if q.verdict == v %}selected{% endif %}>{{ v }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <label>本题得分{% if q.max_score %}（满分 {{ '%g'|format(q.max_score|float) }}）{% endif %}<input name="score_{{ q.id }}" value="{{ q.score }}" placeholder="如 4"></label>
-        <label>本题评语 <textarea name="note_{{ q.id }}" rows="2">{{ q.note }}</textarea></label>
+        <div class="review-col">
+          <div class="col-title">标准答案（可修正）</div>
+          <textarea name="standard_{{ q.id }}" rows="7">{{ q.standard_answer }}</textarea>
+          <p class="muted small">如需核对原卷，点上方「查看原始扫描件」。</p>
+        </div>
       </div>
-      <div class="review-col">
-        <div class="col-title">标准答案（可修正）</div>
-        <textarea name="standard_{{ q.id }}" rows="7">{{ q.standard_answer }}</textarea>
-        <p class="muted small">如需核对原卷，点右上角「查看原始扫描件」。</p>
+      <div class="review-actions">
+        <button type="button" class="small reviewed-toggle{% if q.reviewed %} reviewed-on{% endif %}"
+                data-qid="{{ q.id }}" data-reviewed="{{ 1 if q.reviewed else 0 }}">
+          {% if q.reviewed %}已审核 ✓{% else %}标记已审核{% endif %}
+        </button>
       </div>
-    </div>
+    </details>
     {% endfor %}
 
     {% set auto_total = '%g/%g'|format(summary.total|float, summary.max_total|float) if summary and summary.max_total else '' %}
@@ -140,6 +158,35 @@
   });
   document.getElementById('pdf-close').addEventListener('click', function () { toggle(false); });
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape') toggle(false); });
+})();
+
+// 单题「已审核」：点击即保存，折叠时标题栏保留状态
+(function () {
+  var csrf = '{{ csrf_token() }}';
+  document.querySelectorAll('.reviewed-toggle').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var next = btn.dataset.reviewed === '1' ? 0 : 1;
+      btn.disabled = true;
+      fetch('/question/' + btn.dataset.qid + '/reviewed', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+        body: JSON.stringify({ reviewed: next })
+      }).then(function (r) {
+        if (!r.ok) throw new Error(r.status);
+        return r.json();
+      }).then(function (d) {
+        btn.dataset.reviewed = d.reviewed;
+        btn.textContent = d.reviewed ? '已审核 ✓' : '标记已审核';
+        btn.classList.toggle('reviewed-on', !!d.reviewed);
+        var badge = btn.closest('details').querySelector('.reviewed-badge');
+        if (badge) badge.hidden = !d.reviewed;
+      }).catch(function () {
+        alert('标记失败，请检查网络后重试');
+      }).then(function () {
+        btn.disabled = false;
+      });
+    });
+  });
 })();
 </script>
 {% endblock %}

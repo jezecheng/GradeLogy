@@ -172,6 +172,7 @@ CREATE TABLE IF NOT EXISTS questions(
   max_score REAL DEFAULT 0,
   verdict TEXT DEFAULT '',
   ai_comment TEXT DEFAULT '',
+  reviewed INTEGER DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS lesson_plans(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -228,7 +229,8 @@ def init_db():
     # 轻量迁移：接入逐题 AI 批改后新增的字段
     for col, ddl in (("max_score", "REAL DEFAULT 0"),
                      ("verdict", "TEXT DEFAULT ''"),
-                     ("ai_comment", "TEXT DEFAULT ''")):
+                     ("ai_comment", "TEXT DEFAULT ''"),
+                     ("reviewed", "INTEGER DEFAULT 0")):
         if col not in qcols:
             con.execute(f"ALTER TABLE questions ADD COLUMN {col} {ddl}")
     scols = {r[1] for r in con.execute("PRAGMA table_info(submissions)")}
@@ -1148,6 +1150,11 @@ def exam_delete(eid):
 
 
 # ---------- 批改：学生作业与标准答案一起交给 AI，老师逐题核对 ----------
+# 同一份作业同时只允许一个批阅任务，避免重复点击重复消耗模型调用
+_GRADING = set()
+_GRADING_LOCK = threading.Lock()
+
+
 @app.route("/submission/<int:sid>/grade", methods=["POST"])
 @role_required("teacher")
 def submission_grade(sid):
@@ -1162,9 +1169,19 @@ def submission_grade(sid):
         flash("请先上传教师版标准答案 PDF，再开始批阅。")
         return redirect(url_for("lecture_detail", hid=hw["id"]))
 
+    with _GRADING_LOCK:
+        if sid in _GRADING:
+            flash("这份作业正在批阅中，请等待本次完成后再操作。")
+            return redirect(url_for("lecture_detail", hid=hw["id"]))
+        _GRADING.add(sid)
+
     log.info("开始批阅 submission=%s lecture=%s file=%s answer=%s",
              sid, hw["id"], sub["file_path"], hw["answer_pdf"])
-    gen = run_grading(g.user["id"], sub["file_path"], hw["answer_pdf"])
+    try:
+        gen = run_grading(g.user["id"], sub["file_path"], hw["answer_pdf"])
+    finally:
+        with _GRADING_LOCK:
+            _GRADING.discard(sid)
     if gen["error"]:
         log.warning("批阅失败 submission=%s 原因=%s", sid, gen["error"])
         flash(gen["error"])
@@ -1243,24 +1260,23 @@ def submission_review_save(sid):
     return redirect(url_for("submission_review", sid=sid))
 
 
-@app.route("/submission/<int:sid>/correct", methods=["POST"])
+@app.route("/question/<int:qid>/reviewed", methods=["POST"])
 @role_required("teacher")
-def submission_correct(sid):
-    """快速手动更正总分与总评。"""
+def question_reviewed(qid):
+    """单题的「已审核」标记，随点随存，供折起的题目显示审核进度。"""
     db = get_db()
-    sub = db.execute("SELECT * FROM submissions WHERE id=?", (sid,)).fetchone()
-    if not sub:
+    q = db.execute("""
+        SELECT q.id, s.lecture_id FROM questions q
+        JOIN submissions s ON s.id=q.submission_id WHERE q.id=?""", (qid,)).fetchone()
+    if not q:
         abort(404)
-    hw = db.execute("SELECT * FROM lectures WHERE id=?", (sub["lecture_id"],)).fetchone()
+    hw = db.execute("SELECT course_id FROM lectures WHERE id=?",
+                    (q["lecture_id"],)).fetchone()
     own_course(hw["course_id"])
-    db.execute("UPDATE submissions SET score=?, feedback=?, status='已批改', grader=?, "
-               "updated_at=CURRENT_TIMESTAMP WHERE id=?",
-               (request.form.get("score", "").strip(),
-                request.form.get("feedback", "").strip(),
-                f"{g.user['display_name']} 手动更正", sid))
+    reviewed = 1 if (request.get_json(silent=True) or {}).get("reviewed") else 0
+    db.execute("UPDATE questions SET reviewed=? WHERE id=?", (reviewed, qid))
     db.commit()
-    flash("批改结果已更新")
-    return redirect(url_for("lecture_detail", hid=sub["lecture_id"]))
+    return {"ok": True, "reviewed": reviewed}
 
 
 # ---------- 教案 ----------

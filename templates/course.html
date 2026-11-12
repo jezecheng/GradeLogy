@@ -54,17 +54,37 @@
 </div>
 
 <div class="card">
-  <h2>讲次（{{ lectures|length }}）</h2>
-  <form method="post" action="{{ url_for('lecture_create', cid=course.id) }}"
-        enctype="multipart/form-data" class="stack-form">
-    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <input name="title" placeholder="讲次名称，如：水溶液中的反应" required>
-    <textarea name="description" rows="2" placeholder="讲次说明（可选）"></textarea>
-    <label>截止时间 <input type="datetime-local" name="deadline"></label>
-    <label>学生版讲义 PDF（可选，学生可在讲次页下载）<input type="file" name="student_pdf" accept=".pdf"></label>
-    <label>教师版标准答案 PDF（可选，AI 批阅时会作参考）<input type="file" name="answer_pdf" accept=".pdf"></label>
-    <button type="submit">新建讲次</button>
-  </form>
+  <div class="card-head">
+    <h2>讲次（{{ lectures|length }}）</h2>
+    <button type="button" class="small" data-dialog-open="lecture-dialog">＋ 新建讲次</button>
+  </div>
+
+  <dialog id="lecture-dialog" class="modal">
+    <form method="post" action="{{ url_for('lecture_create', cid=course.id) }}"
+          enctype="multipart/form-data" class="stack-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <h2>新建讲次</h2>
+      <label>讲次名称
+        <input name="title" placeholder="如：水溶液中的反应" required autofocus>
+      </label>
+      <label>讲次说明（可选）
+        <textarea name="description" rows="2" placeholder="这一讲的范围、重点等"></textarea>
+      </label>
+      <label>截止时间（可选）
+        <input type="datetime-local" name="deadline">
+      </label>
+      <label>学生版讲义 PDF（可选，学生可在讲次页下载）
+        <input type="file" name="student_pdf" accept=".pdf">
+      </label>
+      <label>教师版标准答案 PDF（可选，AI 批阅时会作参考）
+        <input type="file" name="answer_pdf" accept=".pdf">
+      </label>
+      <div class="modal-actions">
+        <button type="button" class="ghost" data-dialog-close>取消</button>
+        <button type="submit">创建讲次</button>
+      </div>
+    </form>
+  </dialog>
   {% if lectures %}
   <table>
     <tr><th>讲次</th><th>截止时间</th><th>提交进度</th><th>讲义/答案</th><th></th></tr>
@@ -96,16 +116,34 @@
 </div>
 
 <div class="card">
-  <h2>考试（{{ exams|length }}）</h2>
+  <div class="card-head">
+    <h2>考试（{{ exams|length }}）</h2>
+    <button type="button" class="small" data-dialog-open="exam-dialog">＋ 新建考试</button>
+  </div>
   <p class="muted small">考试只记录分数与评语，不上传试卷、不做 AI 批阅。</p>
-  <form method="post" action="{{ url_for('exam_create', cid=course.id) }}" class="stack-form">
-    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <input name="title" placeholder="考试名称，如：期中考试" required>
-    <input name="exam_date" type="date" title="考试日期">
-    <input name="full_score" type="number" step="0.5" min="0" value="100" placeholder="满分">
-    <textarea name="description" rows="2" placeholder="说明（可选）"></textarea>
-    <button type="submit">新建考试</button>
-  </form>
+
+  <dialog id="exam-dialog" class="modal">
+    <form method="post" action="{{ url_for('exam_create', cid=course.id) }}" class="stack-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <h2>新建考试</h2>
+      <label>考试名称
+        <input name="title" placeholder="如：期中考试" required autofocus>
+      </label>
+      <label>考试日期（可选）
+        <input name="exam_date" type="date">
+      </label>
+      <label>满分
+        <input name="full_score" type="number" step="0.5" min="0" value="100">
+      </label>
+      <label>说明（可选）
+        <textarea name="description" rows="2" placeholder="范围、形式等"></textarea>
+      </label>
+      <div class="modal-actions">
+        <button type="button" class="ghost" data-dialog-close>取消</button>
+        <button type="submit">创建考试</button>
+      </div>
+    </form>
+  </dialog>
   {% if exams %}
   <table>
     <tr><th>考试</th><th>日期</th><th>满分</th><th>已录分数</th><th></th></tr>
@@ -128,31 +166,25 @@
   {% endif %}
 </div>
 
-<div class="card">
-  <h2>教案（{{ plans|length }}）</h2>
-  <form method="post" action="{{ url_for('plan_create', cid=course.id) }}" class="inline-form">
-    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <input name="title" placeholder="教案标题，如：氧化还原反应 教学设计" required>
-    <button type="submit">新建教案</button>
-  </form>
-  {% if plans %}
-  <table>
-    <tr><th>标题</th><th>最近更新</th><th></th></tr>
-    {% for p in plans %}
-    <tr>
-      <td><a href="{{ url_for('plan_edit', pid=p.id) }}">{{ p.title }}</a></td>
-      <td class="muted">{{ p.updated_at }}</td>
-      <td>
-        <form method="post" action="{{ url_for('plan_delete', pid=p.id) }}"
-              onsubmit="return confirm('删除该教案？')">
-          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-          <button class="danger small">删除</button>
-        </form>
-      </td>
-    </tr>
-    {% endfor %}
-  </table>
-  {% endif %}
-</div>
 {% include "_pdf_panel.html" %}
+<script>
+(function () {
+  document.querySelectorAll('[data-dialog-open]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var dlg = document.getElementById(btn.dataset.dialogOpen);
+      if (!dlg) return;
+      dlg.showModal();
+      var first = dlg.querySelector('input:not([type=hidden]), textarea');
+      if (first) first.focus();
+    });
+  });
+  document.querySelectorAll('dialog.modal').forEach(function (dlg) {
+    dlg.querySelectorAll('[data-dialog-close]').forEach(function (btn) {
+      btn.addEventListener('click', function () { dlg.close(); });
+    });
+    // 点击遮罩区域关闭：命中 dialog 本身而非其内部表单
+    dlg.addEventListener('click', function (e) { if (e.target === dlg) dlg.close(); });
+  });
+})();
+</script>
 {% endblock %}
