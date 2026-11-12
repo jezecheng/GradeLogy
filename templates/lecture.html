@@ -8,7 +8,9 @@
 <div class="card">
   <h2>学生版讲义</h2>
   {% if hw.student_pdf %}
-    <p><a href="{{ url_for('uploaded_file', filename=hw.student_pdf) }}" target="_blank">查看当前学生版 PDF</a>
+    <p><a href="{{ url_for('uploaded_file', filename=hw.student_pdf) }}"
+          data-pdf-toggle data-pdf-src="{{ url_for('uploaded_file', filename=hw.student_pdf) }}"
+          data-pdf-title="学生版讲义">查看当前学生版 PDF</a>
       <span class="muted small">学生可在自己的讲次页下载。</span></p>
   {% else %}
     <p class="muted">尚未上传学生版讲义。学生端不会显示下载入口。</p>
@@ -24,7 +26,9 @@
 <div class="card">
   <h2>标准答案（教师版）</h2>
   {% if hw.answer_pdf %}
-    <p><a href="{{ url_for('uploaded_file', filename=hw.answer_pdf) }}">查看当前答案 PDF</a></p>
+    <p><a href="{{ url_for('uploaded_file', filename=hw.answer_pdf) }}"
+          data-pdf-toggle data-pdf-src="{{ url_for('uploaded_file', filename=hw.answer_pdf) }}"
+          data-pdf-title="标准答案（教师版）">查看当前答案 PDF</a></p>
   {% else %}
     <p class="muted">尚未上传答案。AI 批阅需要把学生作业和这份标准答案一起发送给模型。</p>
   {% endif %}
@@ -60,7 +64,9 @@
       <span class="muted">{{ s.username }} · {{ s.created_at }}</span>
       <span class="tag tag-{{ s.status }}">{{ s.status }}</span>
       {% if s.score %}<span class="score">{{ s.score }}</span>{% endif %}
-      <a class="btn-link" href="{{ url_for('uploaded_file', filename=s.file_path) }}" target="_blank">查看扫描件</a>
+      <a class="btn-link" href="{{ url_for('uploaded_file', filename=s.file_path) }}"
+         data-pdf-toggle data-pdf-src="{{ url_for('uploaded_file', filename=s.file_path) }}"
+         data-pdf-title="{{ s.display_name }} · 扫描件">查看扫描件</a>
       <a class="btn-link" href="{{ url_for('submission_review', sid=s.id) }}">逐题核对</a>
       <form method="post" action="{{ url_for('submission_grade', sid=s.id) }}">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
@@ -86,4 +92,5 @@
   <p class="muted">还没有学生提交。</p>
   {% endif %}
 </div>
+{% include "_pdf_panel.html" %}
 {% endblock %}

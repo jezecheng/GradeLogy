@@ -74,9 +74,13 @@
       <td class="muted">{{ (h.deadline or '').replace('T',' ') or '—' }}</td>
       <td>{{ h.n_subs }} / {{ h.n_students }}</td>
       <td class="small">
-        {% if h.student_pdf %}<a href="{{ url_for('uploaded_file', filename=h.student_pdf) }}">学生版</a>{% else %}<span class="muted">学生版—</span>{% endif %}
+        {% if h.student_pdf %}<a href="{{ url_for('uploaded_file', filename=h.student_pdf) }}"
+            data-pdf-toggle data-pdf-src="{{ url_for('uploaded_file', filename=h.student_pdf) }}"
+            data-pdf-title="{{ h.title }} · 学生版讲义">学生版</a>{% else %}<span class="muted">学生版—</span>{% endif %}
         ·
-        {% if h.answer_pdf %}<a href="{{ url_for('uploaded_file', filename=h.answer_pdf) }}">教师版</a>{% else %}<span class="muted">教师版—</span>{% endif %}
+        {% if h.answer_pdf %}<a href="{{ url_for('uploaded_file', filename=h.answer_pdf) }}"
+            data-pdf-toggle data-pdf-src="{{ url_for('uploaded_file', filename=h.answer_pdf) }}"
+            data-pdf-title="{{ h.title }} · 教师版答案">教师版</a>{% else %}<span class="muted">教师版—</span>{% endif %}
       </td>
       <td>
         <form method="post" action="{{ url_for('lecture_delete', hid=h.id) }}"
@@ -150,4 +154,5 @@
   </table>
   {% endif %}
 </div>
+{% include "_pdf_panel.html" %}
 {% endblock %}

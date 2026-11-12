@@ -1,0 +1,39 @@
+{# 通用 PDF 旁侧预览面板：页面里任何 <a data-pdf-src="..." data-pdf-title="..."> 点击后在此 iframe 打开 #}
+<aside id="pdf-panel" class="pdf-panel" hidden>
+  <div class="pdf-panel-bar">
+    <strong id="pdf-panel-title">PDF 预览</strong>
+    <span class="pdf-panel-actions">
+      <a id="pdf-panel-external" href="#" target="_blank">新标签打开</a>
+      <button type="button" id="pdf-close" class="small">关闭 Esc</button>
+    </span>
+  </div>
+  <iframe title="PDF 预览"></iframe>
+</aside>
+
+<script>
+(function () {
+  var panel = document.getElementById('pdf-panel');
+  if (!panel) return;
+  var frame = panel.querySelector('iframe');
+  var title = document.getElementById('pdf-panel-title');
+  var external = document.getElementById('pdf-panel-external');
+  function toggle(show, src, label) {
+    var open = show === undefined ? panel.hidden : show;
+    if (open && src && frame.getAttribute('src') !== src) {
+      frame.src = src;
+      external.href = src;
+      if (label) title.textContent = label;
+    }
+    panel.hidden = !open;
+    document.body.classList.toggle('pdf-open', open);
+  }
+  document.querySelectorAll('[data-pdf-toggle]').forEach(function (a) {
+    a.addEventListener('click', function (e) {
+      e.preventDefault();
+      toggle(true, a.dataset.pdfSrc || a.getAttribute('href'), a.dataset.pdfTitle);
+    });
+  });
+  document.getElementById('pdf-close').addEventListener('click', function () { toggle(false); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') toggle(false); });
+})();
+</script>
