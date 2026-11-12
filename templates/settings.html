@@ -21,10 +21,10 @@
 
 <div class="card narrow">
   <h2>真实接口</h2>
-  <p class="muted small">需要支持 PDF 输入的多模态模型：批阅时会把学生作业与标准答案两份 PDF 一起发送。填 OpenAI 兼容的基地址：</p>
-  <p class="muted small">纯文本模型无法读取扫描件；若模型不支持 PDF 文件输入，请改用支持 PDF 的视觉模型。</p>
+  <p class="muted small">需要支持图片输入的多模态模型：批阅时会把学生作业与标准答案的每一页渲染成图片一起发送，不做切题。</p>
+  <p class="muted small">纯文本模型无法读取扫描件；模型输出上限建议 ≥32k，否则长作业容易被截断。</p>
   <table class="small">
-    <tr><th>服务</th><th>基地址</th><th>模型示例（需支持 PDF）</th></tr>
+    <tr><th>服务</th><th>基地址</th><th>模型示例（需支持图片）</th></tr>
     <tr><td>智谱（有免费模型）</td><td>https://open.bigmodel.cn/api/paas/v4</td><td>glm-4.6v-flash</td></tr>
     <tr><td>腾讯混元</td><td>https://api.hunyuan.cloud.tencent.com/v1</td><td>hunyuan-vision</td></tr>
     <tr><td>阿里百炼（有免费额度）</td><td>https://dashscope.aliyuncs.com/compatible-mode/v1</td><td>qwen-vl-max</td></tr>

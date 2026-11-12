@@ -13,7 +13,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# 只补时区数据；PDF 由模型直接读取，无需本地渲染库
+# 只补时区数据；pypdfium2 与 pillow 用 manylinux wheel，无需额外系统库
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tzdata \
     && rm -rf /var/lib/apt/lists/*
@@ -34,5 +34,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/healthz').status==200 else 1)"
 
 # 单进程多线程：SQLite 写入不跨进程，长批改也不会被 worker 超时杀掉
-CMD ["gunicorn", "-w", "1", "--threads", "8", "--timeout", "1800", \
+# 批阅单次上限 300 秒，worker 超时留一倍余量即可
+CMD ["gunicorn", "-w", "1", "--threads", "8", "--timeout", "600", \
      "-b", "0.0.0.0:5000", "--access-logfile", "-", "app:app"]

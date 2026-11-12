@@ -1258,14 +1258,15 @@ def run_grading(teacher_id, file_name, answer_pdf=""):
 
     api_url = get_setting(teacher_id, "ai_api_url").rstrip("/")
     api_key = get_setting(teacher_id, "ai_api_key")
-    if not api_url or not api_key:
+    model = get_setting(teacher_id, "ai_model")
+    if not api_url or not api_key or not model:
         return {"questions": [], "summary": {}, "errors": [],
-                "error": "尚未配置 AI 接口。可以先勾选「演示模式」体验完整流程，或到「AI 设置」填写接口地址与密钥。"}
+                "error": "尚未配置 AI 接口。可以先勾选「演示模式」体验完整流程，或到「AI 设置」填写接口地址、密钥与模型。"}
 
     gen = grade_pdf_submission(
         os.path.join(UPLOAD_DIR, file_name),
         os.path.join(UPLOAD_DIR, answer_pdf) if answer_pdf else "",
-        api_url, api_key, get_setting(teacher_id, "ai_model") or "gpt-4o",
+        api_url, api_key, model,
         extra=get_setting(teacher_id, "ai_prompt").strip())
     gen["summary"] = _build_summary(gen["questions"], gen.get("weak_points") or [],
                                     gen.get("evaluation", ""), gen.get("errors") or [])

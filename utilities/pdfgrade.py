@@ -1,17 +1,22 @@
 # -*- coding: utf-8 -*-
-"""整份作业批阅：学生作业 + 教师版标准答案一起交给支持 PDF 的模型。
+"""整份作业批阅：学生作业 + 教师版标准答案一起交给多模态模型。
 
-不再切题、不再裁剪图片，也不依赖 PDF 文字层；模型直接读取整份 PDF，
-逐题输出判定、OCR、标准答案与评语。
+不切题、不裁剪题目，也不依赖 PDF 文字层。由于所用 OpenAI 兼容网关不支持
+PDF 的 file content part（实测返回 400），这里把 PDF 整页渲染成图片，
+按 image_url 发送；模型看到的就是完整原卷，逐题输出判定、OCR、标准答案与评语。
 """
 import base64
+import io
 import json
 import os
+
+import pypdfium2 as pdfium
 
 from . import llm
 
 PDF_GRADE_PROMPT = (
-    "你是化学竞赛阅卷老师。附件依次是：① 学生作业（PDF 或扫描图片）；② 教师版标准答案（PDF）。\n"
+    "你是化学竞赛阅卷老师。附件依次是：① 学生作业（按页顺序给出的整页扫描图）；"
+    "② 教师版标准答案（同样按页顺序给出）。\n"
     "请逐题对照批阅，只输出 JSON，不要输出解释或代码块标记：\n"
     '{"questions":[{"no":"题号","ocr":"学生实际作答内容","standard_answer":"标准答案要点",'
     '"verdict":"对|半对|错|无法判定","score":0,"max_score":0,"comment":"给分/扣分说明"}],'
@@ -27,6 +32,11 @@ PDF_GRADE_PROMPT = (
     "7. 学生作业中缺失或与标准答案对不上的题，不要凭空补题。")
 
 MAX_FILE_MB = 20
+MAX_PAGES = 40          # 单份文件页数上限，避免一次请求图片过多
+RENDER_SCALE = 2.0      # 约 144dpi，兼顾手写字辨识度与图片体积
+JPEG_QUALITY = 80
+GRADE_TIMEOUT = 300     # 单次批阅超时；实测 90~110 秒，留足余量但不至于卡太久
+GRADE_RETRIES = 1       # 批阅不重试：失败让老师手动重试，避免一个请求占住线程十几分钟
 VERDICTS = ("对", "半对", "错", "无法判定")
 _MIME = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
          ".jpeg": "image/jpeg", ".webp": "image/webp"}
@@ -39,25 +49,44 @@ def _as_num(value, default=0.0):
         return default
 
 
-def _file_part(path, label):
-    """把 PDF/图片读成 OpenAI 兼容的 content part；失败返回 (None, 错误)。"""
+def _image_part(mime, data):
+    b64 = base64.b64encode(data).decode()
+    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+
+
+def _render_pdf_pages(path, label):
+    """把 PDF 整页渲染为 JPEG 图片 part 列表（不做任何切题/裁剪）。"""
+    parts = []
+    doc = pdfium.PdfDocument(path)
+    try:
+        if len(doc) > MAX_PAGES:
+            return None, f"{label}共 {len(doc)} 页，超过 {MAX_PAGES} 页上限，请拆分后再批阅"
+        for page in doc:
+            bitmap = page.render(scale=RENDER_SCALE)
+            img = bitmap.to_pil().convert("RGB")
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=JPEG_QUALITY)
+            parts.append(_image_part("image/jpeg", buf.getvalue()))
+            bitmap.close()
+    finally:
+        doc.close()
+    return parts, ""
+
+
+def _file_parts(path, label):
+    """把 PDF/图片读成 OpenAI 兼容的 content part 列表；失败返回 (None, 错误)。"""
     if not path or not os.path.exists(path):
         return None, f"{label}文件不存在：{os.path.basename(path or '')}"
-    size = os.path.getsize(path)
-    if size > MAX_FILE_MB * 1024 * 1024:
+    if os.path.getsize(path) > MAX_FILE_MB * 1024 * 1024:
         return None, f"{label}超过 {MAX_FILE_MB}MB，请压缩后再上传"
     ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf":
+        return _render_pdf_pages(path, label)
     mime = _MIME.get(ext)
     if not mime:
         return None, f"{label}格式不支持：{ext or '未知'}"
     with open(path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode()
-    if ext == ".pdf":
-        return {"type": "file",
-                "file": {"filename": os.path.basename(path),
-                         "file_data": f"data:application/pdf;base64,{b64}"}}, ""
-    return {"type": "image_url",
-            "image_url": {"url": f"data:{mime};base64,{b64}"}}, ""
+        return [_image_part(mime, f.read())], ""
 
 
 def _salvage_questions(text):
@@ -119,31 +148,34 @@ def _normalize(raw):
 
 
 def grade_pdf_submission(student_path, answer_path, api_url, api_key, model,
-                         extra="", max_tokens=16000):
+                         extra="", max_tokens=32768):
     """批阅一份作业，返回 {questions, weak_points, evaluation, total_score, errors, error}。
 
-    student_path / answer_path 为本地绝对路径。模型必须是支持 PDF 输入的多模态模型；
-    接口按 OpenAI 兼容的 chat/completions 协议传 file content part。
+    student_path / answer_path 为本地绝对路径。模型必须是支持图片输入的多模态模型；
+    接口按 OpenAI 兼容的 chat/completions 协议传 image_url content part。
     """
     if not answer_path:
         return {"questions": [], "weak_points": [], "evaluation": "", "total_score": "",
                 "errors": [], "error": "请先上传教师版标准答案 PDF，再开始批阅。"}
-    student_part, err = _file_part(student_path, "学生作业")
+    student_parts, err = _file_parts(student_path, "学生作业")
     if err:
         return {"questions": [], "weak_points": [], "evaluation": "", "total_score": "",
                 "errors": [], "error": err}
-    answer_part, err = _file_part(answer_path, "标准答案")
+    answer_parts, err = _file_parts(answer_path, "标准答案")
     if err:
         return {"questions": [], "weak_points": [], "evaluation": "", "total_score": "",
                 "errors": [], "error": err}
 
     prompt = PDF_GRADE_PROMPT + (f"\n补充要求：{extra}" if extra else "")
     content = [{"type": "text", "text": prompt},
-               {"type": "text", "text": "① 学生作业："}, student_part,
-               {"type": "text", "text": "② 教师版标准答案："}, answer_part]
+               {"type": "text", "text": f"① 学生作业，共 {len(student_parts)} 页："}]
+    content += student_parts
+    content.append({"type": "text", "text": f"② 教师版标准答案，共 {len(answer_parts)} 页："})
+    content += answer_parts
 
     reply, finish, err = llm.chat(api_url, api_key, model, content,
-                                  max_tokens=max_tokens, timeout=600)
+                                  max_tokens=max_tokens, timeout=GRADE_TIMEOUT,
+                                  retries=GRADE_RETRIES)
     if err:
         return {"questions": [], "weak_points": [], "evaluation": "", "total_score": "",
                 "errors": [], "error": f"AI 批阅失败：{err}"}
