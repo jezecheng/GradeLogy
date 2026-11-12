@@ -30,6 +30,8 @@ MAX_UPLOAD_MB = int(_env("MAX_UPLOAD_MB", "20"))
 # 备份包解压后的总大小上限（MB），防止恶意 zip 撑爆磁盘
 MAX_RESTORE_MB = int(_env("MAX_RESTORE_MB", "2048"))
 LOG_LEVEL = _env("LOG_LEVEL", "INFO").upper()
+# HTTPS 部署时设为 1：会话 Cookie 只通过加密连接传输（本地 http 访问时保持 0）
+COOKIE_SECURE = _env("COOKIE_SECURE", "0").lower() in ("1", "true", "yes", "on")
 
 # 密钥：优先环境变量，其次读文件；都没有时由应用生成并写回文件
 SECRET_KEY = _env("SECRET_KEY", "")

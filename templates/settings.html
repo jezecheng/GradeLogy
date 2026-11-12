@@ -21,6 +21,10 @@
 
 <div class="card narrow">
   <h2>真实接口</h2>
+  {% if env_keys %}
+  <p class="muted small">以下项已由环境变量注入，页面上的值只读、保存也不会写入数据库：
+    {{ env_keys|join('、') }}。要改用页面配置，请先移除对应的环境变量。</p>
+  {% endif %}
   <p class="muted small">需要支持图片输入的多模态模型：批阅时会把学生作业与标准答案的每一页渲染成图片一起发送，不做切题。</p>
   <p class="muted small">纯文本模型无法读取扫描件；模型输出上限建议 ≥32k，否则长作业容易被截断。</p>
   <table class="small">

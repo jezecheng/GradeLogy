@@ -16,7 +16,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
 
 try:
@@ -26,6 +26,8 @@ except ImportError:  # pragma: no cover
 
 from flask import (Flask, abort, flash, g, redirect, render_template, request,
                    send_file, send_from_directory, session, url_for)
+from itsdangerous import BadSignature, URLSafeSerializer
+from werkzeug.routing import BaseConverter, ValidationError
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
@@ -60,18 +62,59 @@ def load_secret_key():
     path = cfg.SECRET_KEY_FILE
     if os.path.exists(path):
         with open(path) as f:
-            return f.read().strip()
+            key = f.read().strip()
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return key
     key = secrets.token_hex(32)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         f.write(key)
+    try:
+        os.chmod(path, 0o600)  # 密钥只允许当前用户读写
+    except OSError:
+        pass
     return key
 
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = cfg.SECRET_KEY or load_secret_key()
 app.config["MAX_CONTENT_LENGTH"] = max(cfg.MAX_UPLOAD_MB, cfg.MAX_RESTORE_MB) * 1024 * 1024
+# Cookie 加固：禁止 JS 读取；SameSite 阻断跨站携带；HTTPS 部署时用 COOKIE_SECURE=1 打开 Secure
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = cfg.COOKIE_SECURE
+# 会话空闲 8 小时过期：每次请求自动续期，长时间不操作需重新登录
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=8)
+app.config["SESSION_REFRESH_EACH_REQUEST"] = True
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+class SignedIdConverter(BaseConverter):
+    """把内部自增 ID 签名为不可读的 URL 片段，路由内仍拿到 int。
+
+    只做「不暴露可枚举 ID + 防篡改」，鉴权仍由各路由的归属校验负责；
+    伪造或过期的 URL 直接 404。
+    """
+
+    def __init__(self, url_map):
+        super().__init__(url_map)
+        self.regex = r"[A-Za-z0-9_\-\.]+"
+
+    def to_python(self, value):
+        try:
+            return int(_id_signer.loads(value))
+        except BadSignature:
+            raise ValidationError()
+
+    def to_url(self, value):
+        return _id_signer.dumps(int(value))
+
+
+_id_signer = URLSafeSerializer(app.config["SECRET_KEY"], salt="gradelogy-url-id")
+app.url_map.converters["oid"] = SignedIdConverter
 
 log = logging.getLogger("gradelogy")
 
@@ -273,9 +316,23 @@ def init_db():
                     ("admin", generate_password_hash("admin123"), "系统管理员", "admin"))
     con.commit()
     con.close()
+    try:
+        os.chmod(DB_PATH, 0o600)  # 数据库含账号哈希与 API Key，仅当前用户可读写
+    except OSError:
+        pass
+
+
+# 环境变量优先于数据库：容器部署时把 Key 放在环境里，库里就不必留明文
+ENV_AI_SETTINGS = {
+    "ai_api_url": cfg.AI_API_URL,
+    "ai_api_key": cfg.AI_API_KEY,
+    "ai_model": cfg.AI_MODEL,
+}
 
 
 def get_setting(teacher_id, key, default=""):
+    if key in ENV_AI_SETTINGS and ENV_AI_SETTINGS[key]:
+        return ENV_AI_SETTINGS[key]
     row = get_db().execute("SELECT value FROM settings WHERE teacher_id=? AND key=?",
                            (teacher_id, key)).fetchone()
     return row["value"] if row else default
@@ -308,6 +365,23 @@ def _access_log(resp):
     # 批改是长任务，单独看；其余接口超过 3 秒视为慢请求
     if cost_ms >= 3000 and request.endpoint != "submission_grade":
         log.warning("慢请求 %s %s %.0fms", request.method, request.path, cost_ms)
+    return resp
+
+
+@app.after_request
+def security_headers(resp):
+    """统一补安全响应头：防 MIME 嗅探、防被第三方站点 iframe 嵌套、限制外链与内联资源来源。"""
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    resp.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline'; frame-src 'self'; object-src 'none'; "
+        "base-uri 'self'; form-action 'self'; frame-ancestors 'self'")
+    if request.is_secure:
+        resp.headers.setdefault("Strict-Transport-Security",
+                                "max-age=31536000; includeSubDomains")
     return resp
 
 
@@ -404,6 +478,11 @@ def not_found(_):
     return render_template("error.html", code=404, msg="页面或资源不存在。"), 404
 
 
+def _safe_next(target):
+    """只接受站内绝对路径，挡掉 //evil.com 这类协议相对跳转。"""
+    return target if target and target.startswith("/") and not target.startswith("//") else ""
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if g.user:
@@ -415,10 +494,11 @@ def login():
         if user and check_password_hash(user["password_hash"], password):
             session.clear()
             session["uid"] = user["id"]
+            session.permanent = True  # 启用 8 小时空闲过期
             log.info("登录成功 user=%s role=%s ip=%s",
                      username, user["role"], request.remote_addr or "-")
-            nxt = request.args.get("next")
-            return redirect(nxt if nxt and nxt.startswith("/") else url_for("index"))
+            nxt = _safe_next(request.args.get("next"))
+            return redirect(nxt or url_for("index"))
         log.warning("登录失败 user=%s ip=%s", username or "-", request.remote_addr or "-")
         flash("用户名或密码错误")
     return render_template("login.html")
@@ -649,7 +729,7 @@ def courses_import_confirm():
     return redirect(url_for("courses"))
 
 
-@app.route("/course/<int:cid>")
+@app.route("/course/<oid:cid>")
 @role_required("teacher", "admin")
 def course_detail(cid):
     db = get_db()
@@ -679,7 +759,7 @@ def course_detail(cid):
                            plans=plans)
 
 
-@app.route("/course/<int:cid>/delete", methods=["POST"])
+@app.route("/course/<oid:cid>/delete", methods=["POST"])
 @role_required("teacher")
 def course_delete(cid):
     own_course(cid)
@@ -696,7 +776,7 @@ def course_delete(cid):
     return redirect(url_for("courses"))
 
 
-@app.route("/course/<int:cid>/enroll", methods=["POST"])
+@app.route("/course/<oid:cid>/enroll", methods=["POST"])
 @role_required("teacher")
 def course_enroll(cid):
     own_course(cid)
@@ -856,7 +936,7 @@ def _apply_course_groups(teacher_id, groups):
     return total
 
 
-@app.route("/course/<int:cid>/students/import", methods=["POST"])
+@app.route("/course/<oid:cid>/students/import", methods=["POST"])
 @role_required("teacher")
 def course_students_import(cid):
     """上传名单后先预览动作，确认前不写库。"""
@@ -880,7 +960,7 @@ def course_students_import(cid):
                            errors=errors, counts=_plan_counts(plan), token=token)
 
 
-@app.route("/course/<int:cid>/students/import/confirm", methods=["POST"])
+@app.route("/course/<oid:cid>/students/import/confirm", methods=["POST"])
 @role_required("teacher")
 def course_students_import_confirm(cid):
     own_course(cid)
@@ -907,7 +987,7 @@ def course_students_import_confirm(cid):
     return redirect(url_for("course_detail", cid=cid))
 
 
-@app.route("/course/<int:cid>/unenroll/<int:sid>", methods=["POST"])
+@app.route("/course/<oid:cid>/unenroll/<oid:sid>", methods=["POST"])
 @role_required("teacher")
 def course_unenroll(cid, sid):
     own_course(cid)
@@ -918,7 +998,7 @@ def course_unenroll(cid, sid):
 
 
 # ---------- 老师：讲次 ----------
-@app.route("/course/<int:cid>/lecture/create", methods=["POST"])
+@app.route("/course/<oid:cid>/lecture/create", methods=["POST"])
 @role_required("teacher")
 def lecture_create(cid):
     own_course(cid)
@@ -929,16 +1009,22 @@ def lecture_create(cid):
         f = request.files.get(field)
         return save_upload(f) if f and f.filename and allowed_file(f.filename) else ""
 
+    try:
+        answer_pdf, student_pdf = take("answer_pdf"), take("student_pdf")
+    except ValueError as e:
+        flash(str(e))
+        return redirect(url_for("course_detail", cid=cid))
+
     db = get_db()
     db.execute("INSERT INTO lectures(course_id,title,description,deadline,answer_pdf,student_pdf) "
                "VALUES(?,?,?,?,?,?)",
                (cid, title, request.form.get("description", "").strip(),
-                request.form.get("deadline", ""), take("answer_pdf"), take("student_pdf")))
+                request.form.get("deadline", ""), answer_pdf, student_pdf))
     db.commit()
     return redirect(url_for("course_detail", cid=cid))
 
 
-@app.route("/lecture/<int:hid>")
+@app.route("/lecture/<oid:hid>")
 @role_required("teacher")
 def lecture_detail(hid):
     db = get_db()
@@ -957,7 +1043,7 @@ def lecture_detail(hid):
 
 
 
-@app.route("/lecture/<int:hid>/edit", methods=["POST"])
+@app.route("/lecture/<oid:hid>/edit", methods=["POST"])
 @role_required("teacher")
 def lecture_edit(hid):
     db = get_db()
@@ -974,7 +1060,7 @@ def lecture_edit(hid):
     return redirect(url_for("lecture_detail", hid=hid))
 
 
-@app.route("/lecture/<int:hid>/answer", methods=["POST"])
+@app.route("/lecture/<oid:hid>/answer", methods=["POST"])
 @role_required("teacher")
 def lecture_answer(hid):
     db = get_db()
@@ -984,12 +1070,17 @@ def lecture_answer(hid):
     own_course(hw["course_id"])
     f = request.files.get("answer_pdf")
     if f and f.filename and allowed_file(f.filename):
-        db.execute("UPDATE lectures SET answer_pdf=? WHERE id=?", (save_upload(f), hid))
+        try:
+            name = save_upload(f)
+        except ValueError as e:
+            flash(str(e))
+            return redirect(url_for("lecture_detail", hid=hid))
+        db.execute("UPDATE lectures SET answer_pdf=? WHERE id=?", (name, hid))
         db.commit()
     return redirect(url_for("lecture_detail", hid=hid))
 
 
-@app.route("/lecture/<int:hid>/student-pdf", methods=["POST"])
+@app.route("/lecture/<oid:hid>/student-pdf", methods=["POST"])
 @role_required("teacher")
 def lecture_student_pdf(hid):
     db = get_db()
@@ -999,13 +1090,18 @@ def lecture_student_pdf(hid):
     own_course(hw["course_id"])
     f = request.files.get("student_pdf")
     if f and f.filename and allowed_file(f.filename):
-        db.execute("UPDATE lectures SET student_pdf=? WHERE id=?", (save_upload(f), hid))
+        try:
+            name = save_upload(f)
+        except ValueError as e:
+            flash(str(e))
+            return redirect(url_for("lecture_detail", hid=hid))
+        db.execute("UPDATE lectures SET student_pdf=? WHERE id=?", (name, hid))
         db.commit()
         flash("学生版讲义已更新，学生端可下载")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
-@app.route("/lecture/<int:hid>/scope/analyze", methods=["POST"])
+@app.route("/lecture/<oid:hid>/scope/analyze", methods=["POST"])
 @role_required("teacher")
 def lecture_scope_analyze(hid):
     """用 AI 读教师版标准答案，生成可勾选的题目清单。"""
@@ -1042,7 +1138,7 @@ def lecture_scope_analyze(hid):
     return redirect(url_for("lecture_detail", hid=hid))
 
 
-@app.route("/lecture/<int:hid>/scope/save", methods=["POST"])
+@app.route("/lecture/<oid:hid>/scope/save", methods=["POST"])
 @role_required("teacher")
 def lecture_scope_save(hid):
     """保存勾选的作业范围；全部不勾选表示批改全部题目。"""
@@ -1059,7 +1155,7 @@ def lecture_scope_save(hid):
     return redirect(url_for("lecture_detail", hid=hid))
 
 
-@app.route("/lecture/<int:hid>/delete", methods=["POST"])
+@app.route("/lecture/<oid:hid>/delete", methods=["POST"])
 @role_required("teacher")
 def lecture_delete(hid):
     db = get_db()
@@ -1085,7 +1181,7 @@ def own_student(cid, sid):
     return row
 
 
-@app.route("/course/<int:cid>/student/<int:sid>")
+@app.route("/course/<oid:cid>/student/<oid:sid>")
 @role_required("teacher")
 def student_detail(cid, sid):
     db = get_db()
@@ -1110,7 +1206,7 @@ def student_detail(cid, sid):
                            lectures=lectures, exams=exams)
 
 
-@app.route("/course/<int:cid>/student/<int:sid>/update", methods=["POST"])
+@app.route("/course/<oid:cid>/student/<oid:sid>/update", methods=["POST"])
 @role_required("teacher")
 def student_update(cid, sid):
     own_student(cid, sid)
@@ -1127,7 +1223,7 @@ def student_update(cid, sid):
     return redirect(url_for("student_detail", cid=cid, sid=sid))
 
 
-@app.route("/course/<int:cid>/student/<int:sid>/reset", methods=["POST"])
+@app.route("/course/<oid:cid>/student/<oid:sid>/reset", methods=["POST"])
 @role_required("teacher")
 def student_reset_password(cid, sid):
     own_student(cid, sid)
@@ -1151,7 +1247,7 @@ def own_exam(eid):
     return exam
 
 
-@app.route("/course/<int:cid>/exam/create", methods=["POST"])
+@app.route("/course/<oid:cid>/exam/create", methods=["POST"])
 @role_required("teacher")
 def exam_create(cid):
     own_course(cid)
@@ -1228,7 +1324,7 @@ _GRADING = set()
 _GRADING_LOCK = threading.Lock()
 
 
-@app.route("/submission/<int:sid>/grade", methods=["POST"])
+@app.route("/submission/<oid:sid>/grade", methods=["POST"])
 @role_required("teacher")
 def submission_grade(sid):
     """把学生作业和教师版标准答案一起交给支持 PDF 的 AI，逐题批阅。"""
@@ -1290,7 +1386,7 @@ def submission_grade(sid):
     return redirect(url_for("submission_review", sid=sid))
 
 
-@app.route("/submission/<int:sid>/review")
+@app.route("/submission/<oid:sid>/review")
 @role_required("teacher")
 def submission_review(sid):
     db = get_db()
@@ -1306,7 +1402,7 @@ def submission_review(sid):
     return render_template("review.html", sub=sub, hw=hw, course=course, questions=questions)
 
 
-@app.route("/submission/<int:sid>/review/save", methods=["POST"])
+@app.route("/submission/<oid:sid>/review/save", methods=["POST"])
 @role_required("teacher")
 def submission_review_save(sid):
     """保存逐题的 OCR 文本、得分、评语，以及总评。"""
@@ -1365,7 +1461,7 @@ def question_reviewed(qid):
 
 
 # ---------- 教案 ----------
-@app.route("/course/<int:cid>/plan/create", methods=["POST"])
+@app.route("/course/<oid:cid>/plan/create", methods=["POST"])
 @role_required("teacher")
 def plan_create(cid):
     own_course(cid)
@@ -1416,6 +1512,8 @@ def settings_page():
             save_setting(g.user["id"], "ai_demo", "1" if request.form.get("ai_demo") else "")
         else:
             for k in ("ai_api_url", "ai_api_key", "ai_model", "ai_prompt"):
+                if ENV_AI_SETTINGS.get(k):
+                    continue  # 已由环境变量注入，页面设置不覆盖，也不写库
                 value = request.form.get(k, "").strip()
                 if k == "ai_api_key" and not value:
                     continue  # Key 留空表示不修改，避免误清空
@@ -1426,7 +1524,7 @@ def settings_page():
         return redirect(url_for("settings_page"))
     cfg = {k: get_setting(g.user["id"], k)
            for k in ("ai_api_url", "ai_api_key", "ai_model", "ai_prompt", "ai_demo")}
-    return render_template("settings.html", cfg=cfg)
+    return render_template("settings.html", cfg=cfg, env_keys=[k for k, v in ENV_AI_SETTINGS.items() if v])
 
 
 @app.route("/settings/test", methods=["POST"])
@@ -1506,7 +1604,7 @@ def student_home():
     return render_template("student_home.html", lectures=lectures, exams=exams)
 
 
-@app.route("/student/lecture/<int:hid>", methods=["GET", "POST"])
+@app.route("/student/lecture/<oid:hid>", methods=["GET", "POST"])
 @role_required("student")
 def student_lecture_page(hid):
     hw = student_lecture(hid)
@@ -1516,8 +1614,13 @@ def student_lecture_page(hid):
         if not (f and f.filename and allowed_file(f.filename)):
             flash("请上传 png / jpg / webp / pdf 文件")
         else:
+            try:
+                name = save_upload(f)
+            except ValueError as e:
+                flash(str(e))
+                return redirect(url_for("student_lecture_page", hid=hid))
             db.execute("INSERT INTO submissions(lecture_id,student_id,file_path) VALUES(?,?,?)",
-                       (hid, g.user["id"], save_upload(f)))
+                       (hid, g.user["id"], name))
             db.commit()
             flash("提交成功，等待老师批改")
         return redirect(url_for("student_lecture_page", hid=hid))
@@ -1540,9 +1643,26 @@ def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXT
 
 
+# 文件头魔数：只靠扩展名过滤，改名的 HTML/脚本也能传进来，这里按内容再判一次
+MAGIC_HEADS = {
+    "pdf": (b"%PDF",),
+    "png": (b"\x89PNG\r\n\x1a\n",),
+    "jpg": (b"\xff\xd8\xff",),
+    "jpeg": (b"\xff\xd8\xff",),
+    "webp": (b"RIFF",),  # 需再检查 8~12 字节是否为 WEBP
+}
+
+
 def save_upload(file_storage):
     orig = secure_filename(file_storage.filename or "upload")
     ext = orig.rsplit(".", 1)[1].lower() if "." in orig else "bin"
+    if ext not in MAGIC_HEADS:
+        raise ValueError("只支持 png / jpg / webp / pdf 文件")
+    head = file_storage.stream.read(16)
+    file_storage.stream.seek(0)
+    if not any(head.startswith(sig) for sig in MAGIC_HEADS[ext]) or \
+            (ext == "webp" and head[8:12] != b"WEBP"):
+        raise ValueError("文件内容与扩展名不符，请重新导出后再上传")
     fname = f"{datetime.now():%Y%m%d%H%M%S}_{secrets.token_hex(3)}_{orig or 'file.' + ext}"
     file_storage.save(os.path.join(UPLOAD_DIR, fname))
     return fname
@@ -1809,7 +1929,7 @@ def own_submission(sid):
     return sub, hw, own_course(hw["course_id"])
 
 
-@app.route("/submission/<int:sid>/report")
+@app.route("/submission/<oid:sid>/report")
 @role_required("teacher")
 def submission_report(sid):
     sub, hw, course = own_submission(sid)
@@ -1821,7 +1941,7 @@ def submission_report(sid):
                            is_teacher=True)
 
 
-@app.route("/submission/<int:sid>/report/build", methods=["POST"])
+@app.route("/submission/<oid:sid>/report/build", methods=["POST"])
 @role_required("teacher")
 def submission_report_build(sid):
     sub, hw, _ = own_submission(sid)
@@ -1830,7 +1950,7 @@ def submission_report_build(sid):
     return redirect(url_for("submission_report", sid=sid))
 
 
-@app.route("/submission/<int:sid>/report/publish", methods=["POST"])
+@app.route("/submission/<oid:sid>/report/publish", methods=["POST"])
 @role_required("teacher")
 def submission_report_publish(sid):
     sub, hw, _ = own_submission(sid)
@@ -1844,7 +1964,7 @@ def submission_report_publish(sid):
     return redirect(url_for("submission_report", sid=sid))
 
 
-@app.route("/submission/<int:sid>/report/comment", methods=["POST"])
+@app.route("/submission/<oid:sid>/report/comment", methods=["POST"])
 @role_required("teacher")
 def submission_report_comment(sid):
     """全部题目复核完成后，用 AI 重写一份总评，回填到逐题核对页的文本框继续人工修改。"""
@@ -1873,7 +1993,7 @@ def submission_report_comment(sid):
     return {"ok": True, "text": _overall_text(detail, summary.get("evaluation", ""))}
 
 
-@app.route("/submission/<int:sid>/report/save", methods=["POST"])
+@app.route("/submission/<oid:sid>/report/save", methods=["POST"])
 @role_required("teacher")
 def submission_report_save(sid):
     """保存老师在报告页对 Markdown 的手工修改。"""
@@ -1886,7 +2006,7 @@ def submission_report_save(sid):
     return redirect(url_for("submission_report", sid=sid))
 
 
-@app.route("/submission/<int:sid>/report/download")
+@app.route("/submission/<oid:sid>/report/download")
 @role_required("teacher")
 def submission_report_download(sid):
     sub, hw, _ = own_submission(sid)
@@ -1898,7 +2018,7 @@ def submission_report_download(sid):
                      mimetype="text/markdown", as_attachment=True, download_name=name)
 
 
-@app.route("/student/submission/<int:sid>/report")
+@app.route("/student/submission/<oid:sid>/report")
 @role_required("student")
 def student_report(sid):
     db = get_db()
