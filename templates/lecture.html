@@ -3,23 +3,51 @@
 {% block content %}
 <p><a href="{{ url_for('course_detail', cid=course.id) }}">← 返回 {{ course.name }}</a></p>
 <h1>{{ hw.title }}</h1>
-<p class="muted">{{ hw.description }}{% if hw.deadline %} · 截止 {{ hw.deadline.replace('T',' ') }}{% endif %}</p>
+<p class="muted">讲次{% if hw.deadline %} · 截止 {{ hw.deadline.replace('T',' ') }}{% endif %}{% if hw.description %} · {{ hw.description }}{% endif %}</p>
 
 <div class="card">
-  <h2>标准答案</h2>
+  <h2>学生版讲义</h2>
+  {% if hw.student_pdf %}
+    <p><a href="{{ url_for('uploaded_file', filename=hw.student_pdf) }}" target="_blank">查看当前学生版 PDF</a>
+      <span class="muted small">学生可在自己的讲次页下载。</span></p>
+  {% else %}
+    <p class="muted">尚未上传学生版讲义。学生端不会显示下载入口。</p>
+  {% endif %}
+  <form method="post" action="{{ url_for('lecture_student_pdf', hid=hw.id) }}"
+        enctype="multipart/form-data" class="inline-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <input type="file" name="student_pdf" accept=".pdf" required>
+    <button type="submit">{{ '更换' if hw.student_pdf else '上传' }}学生版 PDF</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>标准答案（教师版）</h2>
   {% if hw.answer_pdf %}
     <p><a href="{{ url_for('uploaded_file', filename=hw.answer_pdf) }}">查看当前答案 PDF</a></p>
   {% else %}
     <p class="muted">尚未上传答案。AI 批阅需要把学生作业和这份标准答案一起发送给模型。</p>
   {% endif %}
-  <form method="post" action="{{ url_for('homework_answer', hid=hw.id) }}"
+  <form method="post" action="{{ url_for('lecture_answer', hid=hw.id) }}"
         enctype="multipart/form-data" class="inline-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <input type="file" name="answer_pdf" accept=".pdf" required>
     <button type="submit">{{ '更换' if hw.answer_pdf else '上传' }}答案 PDF</button>
   </form>
-  <p class="muted small">批阅时会把「学生作业 + 标准答案」两份文件一起交给 AI 逐题对照；
-    需要「AI 设置」里选择支持 PDF 输入的模型。</p>
+  <p class="muted small">批阅时会把「学生作业 + 标准答案」两份文件逐页渲染成图片一起交给 AI 对照；
+    需要在「AI 设置」里选择支持图片输入的多模态模型。</p>
+</div>
+
+<div class="card">
+  <h2>讲次信息</h2>
+  <form method="post" action="{{ url_for('lecture_edit', hid=hw.id) }}" class="stack-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <label>讲次名称 <input name="title" value="{{ hw.title }}" required></label>
+    <label>说明 <textarea name="description" rows="2">{{ hw.description or '' }}</textarea></label>
+    <label>截止时间 <input type="datetime-local" name="deadline" value="{{ hw.deadline or '' }}"></label>
+    <button type="submit">保存修改</button>
+  </form>
+  <p class="muted small">清空截止时间再保存，即取消截止限制。</p>
 </div>
 
 <div class="card">

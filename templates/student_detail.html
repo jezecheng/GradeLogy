@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}{{ student.display_name }} - {{ course.name }}{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('course_detail', cid=course.id) }}">← 返回 {{ course.name }}</a></p>
+<h1>{{ student.display_name }}</h1>
+<p class="muted">{{ course.name }} · {{ student.username }}{% if student.real_name %} · {{ student.real_name }}{% endif %}{% if student.student_no %} · 学籍号 {{ student.student_no }}{% endif %}</p>
+
+<div class="card">
+  <h2>讲次进度（{{ lectures|length }}）</h2>
+  {% if lectures %}
+  <table>
+    <tr><th>讲次</th><th>截止时间</th><th>提交</th><th>状态</th><th>得分</th><th></th></tr>
+    {% for h in lectures %}
+    <tr>
+      <td><a href="{{ url_for('lecture_detail', hid=h.id) }}">{{ h.title }}</a></td>
+      <td class="muted">{{ (h.deadline or '').replace('T',' ') or '—' }}</td>
+      <td>{{ h.n_subs }} 次</td>
+      <td>
+        {% if h.my_status %}<span class="tag tag-{{ h.my_status }}">{{ h.my_status }}</span>
+        {% else %}<span class="tag tag-未提交">未提交</span>{% endif %}
+      </td>
+      <td>{% if h.my_score %}<span class="score">{{ h.my_score }}</span>{% else %}—{% endif %}</td>
+      <td>
+        {% if h.last_sub_id %}
+        <a class="btn-link" href="{{ url_for('submission_review', sid=h.last_sub_id) }}">查看批改</a>
+        {% else %}<span class="muted small">—</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">本课程还没有讲次。</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>考试成绩（{{ exams|length }}）</h2>
+  {% if exams %}
+  <table>
+    <tr><th>考试</th><th>日期</th><th>满分</th><th>得分</th><th>评语</th></tr>
+    {% for e in exams %}
+    <tr>
+      <td><a href="{{ url_for('exam_detail', eid=e.id) }}">{{ e.title }}</a></td>
+      <td class="muted">{{ e.exam_date or '—' }}</td>
+      <td>{{ '%g'|format(e.full_score|float) }}</td>
+      <td>{% if e.score %}<span class="score">{{ e.score }}</span>{% else %}<span class="muted">未录入</span>{% endif %}</td>
+      <td class="muted">{{ e.comment or '—' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">本课程还没有考试。</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>学生资料</h2>
+  <form method="post" action="{{ url_for('student_update', cid=course.id, sid=student.id) }}" class="stack-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <label>姓名 <input name="display_name" value="{{ student.display_name }}" required></label>
+    <label>真实姓名 <input name="real_name" value="{{ student.real_name or '' }}"></label>
+    <label>学籍号 <input name="student_no" value="{{ student.student_no or '' }}"></label>
+    <button type="submit">保存资料</button>
+  </form>
+  <form method="post" action="{{ url_for('student_reset_password', cid=course.id, sid=student.id) }}"
+        class="inline-form" onsubmit="return confirm('重置该学生的登录密码？')">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <input name="password" placeholder="新密码（留空为 123456）" class="tiny">
+    <button class="small">重置密码</button>
+  </form>
+  <p class="muted small">登录用户名 {{ student.username }} 不可修改。</p>
+</div>
+{% endblock %}

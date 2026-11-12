@@ -6,10 +6,10 @@
 <div class="card">
   <h2>数据概览</h2>
   <table class="card-table">
-    <tr><th>用户</th><th>课程</th><th>作业</th><th>提交</th><th>题目记录</th></tr>
+    <tr><th>用户</th><th>课程</th><th>讲次</th><th>考试</th><th>提交</th><th>题目记录</th></tr>
     <tr>
-      <td>{{ stats.users }}</td><td>{{ stats.courses }}</td><td>{{ stats.homeworks }}</td>
-      <td>{{ stats.submissions }}</td><td>{{ stats.questions }}</td>
+      <td>{{ stats.users }}</td><td>{{ stats.courses }}</td><td>{{ stats.lectures }}</td>
+      <td>{{ stats.exams }}</td><td>{{ stats.submissions }}</td><td>{{ stats.questions }}</td>
     </tr>
   </table>
   <p class="muted small">数据目录：<code>{{ data_dir }}</code><br>数据库：<code>{{ db_path }}</code></p>
@@ -73,7 +73,7 @@
     {% endfor %}
   </table>
   <form method="post" action="{{ url_for('consistency_fix') }}"
-        onsubmit="return confirm('执行安全修复？只会删除孤儿记录、重置失效的流程绑定，不会删除任何作业文件。')">
+        onsubmit="return confirm('执行安全修复？只会删除孤儿记录、重置失效的流程绑定，不会删除任何提交文件。')">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <button type="submit">执行安全修复</button>
     <span class="muted small">文件丢失类问题只报告不自动处理，避免误删数据。</span>

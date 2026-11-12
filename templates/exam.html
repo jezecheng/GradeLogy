@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}{{ exam.title }}{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('course_detail', cid=course.id) }}">← 返回 {{ course.name }}</a></p>
+<h1>{{ exam.title }}</h1>
+<p class="muted">
+  {{ course.name }}
+  {% if exam.exam_date %} · {{ exam.exam_date }}{% endif %}
+  · 满分 {{ '%g'|format(exam.full_score|float) }}
+  {% if exam.description %} · {{ exam.description }}{% endif %}
+</p>
+
+<div class="card">
+  <h2>成绩录入（{{ rows|length }} 名学生）</h2>
+  {% if rows %}
+  <form method="post" action="{{ url_for('exam_scores_save', eid=exam.id) }}">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <table>
+      <tr><th>姓名</th><th>学籍号</th><th>得分</th><th>评语</th></tr>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.display_name }}{% if r.real_name and r.real_name != r.display_name %}
+          <span class="muted small">{{ r.real_name }}</span>{% endif %}</td>
+        <td class="muted">{{ r.student_no or '—' }}</td>
+        <td><input name="score_{{ r.id }}" value="{{ r.score or '' }}" class="score-input"
+                   placeholder="0 - {{ '%g'|format(exam.full_score|float) }}"></td>
+        <td><input name="comment_{{ r.id }}" value="{{ r.comment or '' }}" placeholder="可选"></td>
+      </tr>
+      {% endfor %}
+    </table>
+    <div class="save-bar">
+      <button type="submit">保存成绩</button>
+      <span class="muted small">留空表示未参加或未录入；保存后学生端立即可见。</span>
+    </div>
+  </form>
+  {% else %}
+  <p class="muted">课程里还没有学生，先到课程页添加学生。</p>
+  {% endif %}
+</div>
+{% endblock %}

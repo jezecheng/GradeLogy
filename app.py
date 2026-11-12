@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""化学竞赛作业管理平台
-角色：admin（用户管理）/ teacher（课程、作业、批改、AI 设置）/ student（提交与查看批改）
+"""化学竞赛教学管理平台
+结构：课程 → 讲次（作业 + AI 批阅）/ 考试（只录分数）
+角色：admin（用户管理）/ teacher（课程、讲次、考试、批改、AI 设置）/ student（提交与查看批改）
 """
 import json
 import logging
@@ -122,17 +123,33 @@ CREATE TABLE IF NOT EXISTS enrollments(
   student_id INTEGER NOT NULL REFERENCES users(id),
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY(course_id, student_id));
-CREATE TABLE IF NOT EXISTS homeworks(
+CREATE TABLE IF NOT EXISTS lectures(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   course_id INTEGER NOT NULL REFERENCES courses(id),
   title TEXT NOT NULL,
   description TEXT DEFAULT '',
   deadline TEXT DEFAULT '',
   answer_pdf TEXT DEFAULT '',
+  student_pdf TEXT DEFAULT '',
   created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS exams(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  course_id INTEGER NOT NULL REFERENCES courses(id),
+  title TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  exam_date TEXT DEFAULT '',
+  full_score REAL DEFAULT 100,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS exam_scores(
+  exam_id INTEGER NOT NULL REFERENCES exams(id),
+  student_id INTEGER NOT NULL REFERENCES users(id),
+  score TEXT DEFAULT '',
+  comment TEXT DEFAULT '',
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(exam_id, student_id));
 CREATE TABLE IF NOT EXISTS submissions(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  homework_id INTEGER NOT NULL REFERENCES homeworks(id),
+  lecture_id INTEGER NOT NULL REFERENCES lectures(id),
   student_id INTEGER NOT NULL REFERENCES users(id),
   file_path TEXT NOT NULL,
   status TEXT DEFAULT '已提交',
@@ -195,6 +212,14 @@ def init_db():
         con.close()
         os.replace(DB_PATH, DB_PATH + ".v1.bak")
         con = sqlite3.connect(DB_PATH)
+    # 课程下的「作业」更名为「讲次」：一次作业即一讲，旧数据直接改名沿用
+    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "homeworks" in tables and "lectures" not in tables:
+        con.execute("ALTER TABLE homeworks RENAME TO lectures")
+    if "submissions" in tables:
+        scols_now = {r[1] for r in con.execute("PRAGMA table_info(submissions)")}
+        if "homework_id" in scols_now and "lecture_id" not in scols_now:
+            con.execute("ALTER TABLE submissions RENAME COLUMN homework_id TO lecture_id")
     con.executescript(SCHEMA)
     # 轻量迁移：早期版本没有 page_no 列
     qcols = {r[1] for r in con.execute("PRAGMA table_info(questions)")}
@@ -209,6 +234,10 @@ def init_db():
     scols = {r[1] for r in con.execute("PRAGMA table_info(submissions)")}
     if "ai_summary" not in scols:
         con.execute("ALTER TABLE submissions ADD COLUMN ai_summary TEXT DEFAULT ''")
+    # 轻量迁移：讲次新增「学生版」讲义 PDF，与「教师版」标准答案并存
+    lcols = {r[1] for r in con.execute("PRAGMA table_info(lectures)")}
+    if "student_pdf" not in lcols:
+        con.execute("ALTER TABLE lectures ADD COLUMN student_pdf TEXT DEFAULT ''")
     # 轻量迁移：仍在使用初始密码的账号，登录后强制先改密码
     ucols = {r[1] for r in con.execute("PRAGMA table_info(users)")}
     if "must_change_password" not in ucols:
@@ -497,9 +526,12 @@ def admin_user_delete(uid):
     db.execute("DELETE FROM enrollments WHERE student_id=?", (uid,))
     db.execute("DELETE FROM submissions WHERE student_id=?", (uid,))
     for c in db.execute("SELECT id FROM courses WHERE teacher_id=?", (uid,)).fetchall():
-        db.execute("DELETE FROM submissions WHERE homework_id IN "
-                   "(SELECT id FROM homeworks WHERE course_id=?)", (c["id"],))
-        db.execute("DELETE FROM homeworks WHERE course_id=?", (c["id"],))
+        db.execute("DELETE FROM submissions WHERE lecture_id IN "
+                   "(SELECT id FROM lectures WHERE course_id=?)", (c["id"],))
+        db.execute("DELETE FROM lectures WHERE course_id=?", (c["id"],))
+        db.execute("DELETE FROM exam_scores WHERE exam_id IN "
+                   "(SELECT id FROM exams WHERE course_id=?)", (c["id"],))
+        db.execute("DELETE FROM exams WHERE course_id=?", (c["id"],))
         db.execute("DELETE FROM enrollments WHERE course_id=?", (c["id"],))
         db.execute("DELETE FROM lesson_plans WHERE course_id=?", (c["id"],))
         db.execute("DELETE FROM courses WHERE id=?", (c["id"],))
@@ -529,7 +561,8 @@ def courses():
     rows = get_db().execute("""
         SELECT c.*,
           (SELECT COUNT(*) FROM enrollments e WHERE e.course_id=c.id) AS n_students,
-          (SELECT COUNT(*) FROM homeworks h WHERE h.course_id=c.id) AS n_homeworks
+          (SELECT COUNT(*) FROM lectures h WHERE h.course_id=c.id) AS n_lectures,
+          (SELECT COUNT(*) FROM exams x WHERE x.course_id=c.id) AS n_exams
         FROM courses c WHERE c.teacher_id=? ORDER BY c.id DESC""", (g.user["id"],)).fetchall()
     return render_template("courses.html", courses=rows)
 
@@ -612,15 +645,20 @@ def course_detail(cid):
         WHERE u.role='student' AND u.id NOT IN
               (SELECT student_id FROM enrollments WHERE course_id=?)
         ORDER BY u.display_name""", (cid,)).fetchall()
-    homeworks = db.execute("""
+    lectures = db.execute("""
         SELECT h.*,
-          (SELECT COUNT(*) FROM submissions s WHERE s.homework_id=h.id) AS n_subs,
+          (SELECT COUNT(*) FROM submissions s WHERE s.lecture_id=h.id) AS n_subs,
           (SELECT COUNT(*) FROM enrollments e WHERE e.course_id=h.course_id) AS n_students
-        FROM homeworks h WHERE h.course_id=? ORDER BY h.id DESC""", (cid,)).fetchall()
+        FROM lectures h WHERE h.course_id=? ORDER BY h.id""", (cid,)).fetchall()
     plans = db.execute("SELECT * FROM lesson_plans WHERE course_id=? ORDER BY updated_at DESC",
                        (cid,)).fetchall()
+    exams = db.execute("""
+        SELECT e.*,
+          (SELECT COUNT(*) FROM exam_scores s WHERE s.exam_id=e.id AND s.score!='') AS n_scores
+        FROM exams e WHERE e.course_id=? ORDER BY e.id DESC""", (cid,)).fetchall()
     return render_template("course.html", course=course, students=students,
-                           candidates=candidates, homeworks=homeworks, plans=plans)
+                           candidates=candidates, lectures=lectures, exams=exams,
+                           plans=plans)
 
 
 @app.route("/course/<int:cid>/delete", methods=["POST"])
@@ -628,10 +666,13 @@ def course_detail(cid):
 def course_delete(cid):
     own_course(cid)
     db = get_db()
-    db.execute("DELETE FROM submissions WHERE homework_id IN "
-               "(SELECT id FROM homeworks WHERE course_id=?)", (cid,))
-    for t in ("homeworks", "enrollments", "lesson_plans"):
+    db.execute("DELETE FROM submissions WHERE lecture_id IN "
+               "(SELECT id FROM lectures WHERE course_id=?)", (cid,))
+    for t in ("lectures", "enrollments", "lesson_plans"):
         db.execute(f"DELETE FROM {t} WHERE course_id=?", (cid,))
+    db.execute("DELETE FROM exam_scores WHERE exam_id IN (SELECT id FROM exams WHERE course_id=?)",
+               (cid,))
+    db.execute("DELETE FROM exams WHERE course_id=?", (cid,))
     db.execute("DELETE FROM courses WHERE id=?", (cid,))
     db.commit()
     return redirect(url_for("courses"))
@@ -858,70 +899,252 @@ def course_unenroll(cid, sid):
     return redirect(url_for("course_detail", cid=cid))
 
 
-# ---------- 老师：作业 ----------
-@app.route("/course/<int:cid>/homework/create", methods=["POST"])
+# ---------- 老师：讲次 ----------
+@app.route("/course/<int:cid>/lecture/create", methods=["POST"])
 @role_required("teacher")
-def homework_create(cid):
+def lecture_create(cid):
     own_course(cid)
     title = request.form.get("title", "").strip()
     if not title:
         return redirect(url_for("course_detail", cid=cid))
-    answer_pdf = ""
-    f = request.files.get("answer_pdf")
-    if f and f.filename and allowed_file(f.filename):
-        answer_pdf = save_upload(f)
+    def take(field):
+        f = request.files.get(field)
+        return save_upload(f) if f and f.filename and allowed_file(f.filename) else ""
+
     db = get_db()
-    db.execute("INSERT INTO homeworks(course_id,title,description,deadline,answer_pdf) "
-               "VALUES(?,?,?,?,?)",
+    db.execute("INSERT INTO lectures(course_id,title,description,deadline,answer_pdf,student_pdf) "
+               "VALUES(?,?,?,?,?,?)",
                (cid, title, request.form.get("description", "").strip(),
-                request.form.get("deadline", ""), answer_pdf))
+                request.form.get("deadline", ""), take("answer_pdf"), take("student_pdf")))
     db.commit()
     return redirect(url_for("course_detail", cid=cid))
 
 
-@app.route("/homework/<int:hid>")
+@app.route("/lecture/<int:hid>")
 @role_required("teacher")
-def homework_detail(hid):
+def lecture_detail(hid):
     db = get_db()
-    hw = db.execute("SELECT * FROM homeworks WHERE id=?", (hid,)).fetchone()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
     if not hw:
         abort(404)
     course = own_course(hw["course_id"])
     subs = db.execute("""
         SELECT s.*, u.display_name, u.username FROM submissions s
         JOIN users u ON u.id=s.student_id
-        WHERE s.homework_id=? ORDER BY s.created_at DESC""", (hid,)).fetchall()
-    return render_template("homework.html", hw=hw, course=course, subs=subs)
+        WHERE s.lecture_id=? ORDER BY s.created_at DESC""", (hid,)).fetchall()
+    return render_template("lecture.html", hw=hw, course=course, subs=subs)
 
 
 
-@app.route("/homework/<int:hid>/answer", methods=["POST"])
+@app.route("/lecture/<int:hid>/edit", methods=["POST"])
 @role_required("teacher")
-def homework_answer(hid):
+def lecture_edit(hid):
     db = get_db()
-    hw = db.execute("SELECT * FROM homeworks WHERE id=?", (hid,)).fetchone()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
+    if not hw:
+        abort(404)
+    own_course(hw["course_id"])
+    title = request.form.get("title", "").strip()
+    if title:
+        db.execute("UPDATE lectures SET title=?, description=?, deadline=? WHERE id=?",
+                   (title, request.form.get("description", "").strip(),
+                    request.form.get("deadline", ""), hid))
+        db.commit()
+    return redirect(url_for("lecture_detail", hid=hid))
+
+
+@app.route("/lecture/<int:hid>/answer", methods=["POST"])
+@role_required("teacher")
+def lecture_answer(hid):
+    db = get_db()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
     if not hw:
         abort(404)
     own_course(hw["course_id"])
     f = request.files.get("answer_pdf")
     if f and f.filename and allowed_file(f.filename):
-        db.execute("UPDATE homeworks SET answer_pdf=? WHERE id=?", (save_upload(f), hid))
+        db.execute("UPDATE lectures SET answer_pdf=? WHERE id=?", (save_upload(f), hid))
         db.commit()
-    return redirect(url_for("homework_detail", hid=hid))
+    return redirect(url_for("lecture_detail", hid=hid))
 
 
-@app.route("/homework/<int:hid>/delete", methods=["POST"])
+@app.route("/lecture/<int:hid>/student-pdf", methods=["POST"])
 @role_required("teacher")
-def homework_delete(hid):
+def lecture_student_pdf(hid):
     db = get_db()
-    hw = db.execute("SELECT * FROM homeworks WHERE id=?", (hid,)).fetchone()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
     if not hw:
         abort(404)
     own_course(hw["course_id"])
-    db.execute("DELETE FROM submissions WHERE homework_id=?", (hid,))
-    db.execute("DELETE FROM homeworks WHERE id=?", (hid,))
+    f = request.files.get("student_pdf")
+    if f and f.filename and allowed_file(f.filename):
+        db.execute("UPDATE lectures SET student_pdf=? WHERE id=?", (save_upload(f), hid))
+        db.commit()
+        flash("学生版讲义已更新，学生端可下载")
+    return redirect(url_for("lecture_detail", hid=hid))
+
+
+@app.route("/lecture/<int:hid>/delete", methods=["POST"])
+@role_required("teacher")
+def lecture_delete(hid):
+    db = get_db()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
+    if not hw:
+        abort(404)
+    own_course(hw["course_id"])
+    db.execute("DELETE FROM submissions WHERE lecture_id=?", (hid,))
+    db.execute("DELETE FROM lectures WHERE id=?", (hid,))
     db.commit()
     return redirect(url_for("course_detail", cid=hw["course_id"]))
+
+
+# ---------- 老师：单个学生在课程内的进度 ----------
+def own_student(cid, sid):
+    """确认学生在本课程名单内，返回学生记录。"""
+    own_course(cid)
+    row = get_db().execute("""
+        SELECT u.* FROM enrollments e JOIN users u ON u.id=e.student_id
+        WHERE e.course_id=? AND e.student_id=?""", (cid, sid)).fetchone()
+    if not row:
+        abort(404)
+    return row
+
+
+@app.route("/course/<int:cid>/student/<int:sid>")
+@role_required("teacher")
+def student_detail(cid, sid):
+    db = get_db()
+    student = own_student(cid, sid)
+    course = own_course(cid)
+    lectures = db.execute("""
+        SELECT h.id, h.title, h.deadline,
+          (SELECT s.id FROM submissions s WHERE s.lecture_id=h.id AND s.student_id=?
+            ORDER BY s.id DESC LIMIT 1) AS last_sub_id,
+          (SELECT COUNT(*) FROM submissions s WHERE s.lecture_id=h.id AND s.student_id=?) AS n_subs,
+          (SELECT s.status FROM submissions s WHERE s.lecture_id=h.id AND s.student_id=?
+            ORDER BY s.id DESC LIMIT 1) AS my_status,
+          (SELECT s.score FROM submissions s WHERE s.lecture_id=h.id AND s.student_id=?
+            ORDER BY s.id DESC LIMIT 1) AS my_score
+        FROM lectures h WHERE h.course_id=? ORDER BY h.id""",
+        (sid, sid, sid, sid, cid)).fetchall()
+    exams = db.execute("""
+        SELECT x.id, x.title, x.exam_date, x.full_score, s.score, s.comment
+        FROM exams x LEFT JOIN exam_scores s ON s.exam_id=x.id AND s.student_id=?
+        WHERE x.course_id=? ORDER BY x.id DESC""", (sid, cid)).fetchall()
+    return render_template("student_detail.html", course=course, student=student,
+                           lectures=lectures, exams=exams)
+
+
+@app.route("/course/<int:cid>/student/<int:sid>/update", methods=["POST"])
+@role_required("teacher")
+def student_update(cid, sid):
+    own_student(cid, sid)
+    db = get_db()
+    display_name = request.form.get("display_name", "").strip()
+    if not display_name:
+        flash("姓名不能为空")
+        return redirect(url_for("student_detail", cid=cid, sid=sid))
+    db.execute("UPDATE users SET display_name=?, real_name=?, student_no=? WHERE id=?",
+               (display_name, request.form.get("real_name", "").strip(),
+                request.form.get("student_no", "").strip(), sid))
+    db.commit()
+    flash("学生资料已更新")
+    return redirect(url_for("student_detail", cid=cid, sid=sid))
+
+
+@app.route("/course/<int:cid>/student/<int:sid>/reset", methods=["POST"])
+@role_required("teacher")
+def student_reset_password(cid, sid):
+    own_student(cid, sid)
+    password = request.form.get("password", "").strip() or "123456"
+    get_db().execute("UPDATE users SET password_hash=?, must_change_password=? WHERE id=?",
+                     (generate_password_hash(password),
+                      1 if password in DEFAULT_PASSWORDS else 0, sid))
+    get_db().commit()
+    log.info("老师重置学生密码 teacher=%s#%s student=%s#%s",
+             g.user["username"], g.user["id"], sid, cid)
+    flash(f"密码已重置为 {password}")
+    return redirect(url_for("student_detail", cid=cid, sid=sid))
+
+
+# ---------- 老师：考试（只录分数，不做 AI 批阅） ----------
+def own_exam(eid):
+    exam = get_db().execute("SELECT * FROM exams WHERE id=?", (eid,)).fetchone()
+    if not exam:
+        abort(404)
+    own_course(exam["course_id"])
+    return exam
+
+
+@app.route("/course/<int:cid>/exam/create", methods=["POST"])
+@role_required("teacher")
+def exam_create(cid):
+    own_course(cid)
+    title = request.form.get("title", "").strip()
+    if title:
+        try:
+            full_score = float(request.form.get("full_score") or 100)
+        except ValueError:
+            full_score = 100.0
+        db = get_db()
+        db.execute("INSERT INTO exams(course_id,title,description,exam_date,full_score) "
+                   "VALUES(?,?,?,?,?)",
+                   (cid, title, request.form.get("description", "").strip(),
+                    request.form.get("exam_date", ""), full_score))
+        db.commit()
+    return redirect(url_for("course_detail", cid=cid))
+
+
+@app.route("/exam/<int:eid>")
+@role_required("teacher")
+def exam_detail(eid):
+    db = get_db()
+    exam = own_exam(eid)
+    course = own_course(exam["course_id"])
+    rows = db.execute("""
+        SELECT u.id, u.username, u.display_name, u.real_name, u.student_no,
+               s.score, s.comment
+        FROM enrollments e
+        JOIN users u ON u.id=e.student_id
+        LEFT JOIN exam_scores s ON s.exam_id=? AND s.student_id=u.id
+        WHERE e.course_id=? ORDER BY u.display_name""", (eid, exam["course_id"])).fetchall()
+    return render_template("exam.html", exam=exam, course=course, rows=rows)
+
+
+@app.route("/exam/<int:eid>/scores", methods=["POST"])
+@role_required("teacher")
+def exam_scores_save(eid):
+    db = get_db()
+    exam = own_exam(eid)
+    for key in request.form:
+        if not key.startswith("score_"):
+            continue
+        sid = key[len("score_"):]
+        score = request.form.get(key, "").strip()
+        comment = request.form.get(f"comment_{sid}", "").strip()
+        if not score and not comment:
+            db.execute("DELETE FROM exam_scores WHERE exam_id=? AND student_id=?", (eid, sid))
+            continue
+        db.execute(
+            "INSERT INTO exam_scores(exam_id,student_id,score,comment,updated_at) "
+            "VALUES(?,?,?,?,CURRENT_TIMESTAMP) "
+            "ON CONFLICT(exam_id,student_id) DO UPDATE SET score=excluded.score, "
+            "comment=excluded.comment, updated_at=CURRENT_TIMESTAMP",
+            (eid, sid, score, comment))
+    db.commit()
+    flash("成绩已保存，学生端立即可见")
+    return redirect(url_for("exam_detail", eid=eid))
+
+
+@app.route("/exam/<int:eid>/delete", methods=["POST"])
+@role_required("teacher")
+def exam_delete(eid):
+    db = get_db()
+    exam = own_exam(eid)
+    db.execute("DELETE FROM exam_scores WHERE exam_id=?", (eid,))
+    db.execute("DELETE FROM exams WHERE id=?", (eid,))
+    db.commit()
+    return redirect(url_for("course_detail", cid=exam["course_id"]))
 
 
 # ---------- 批改：学生作业与标准答案一起交给 AI，老师逐题核对 ----------
@@ -933,19 +1156,19 @@ def submission_grade(sid):
     sub = db.execute("SELECT * FROM submissions WHERE id=?", (sid,)).fetchone()
     if not sub:
         abort(404)
-    hw = db.execute("SELECT * FROM homeworks WHERE id=?", (sub["homework_id"],)).fetchone()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (sub["lecture_id"],)).fetchone()
     own_course(hw["course_id"])
     if not hw["answer_pdf"]:
         flash("请先上传教师版标准答案 PDF，再开始批阅。")
-        return redirect(url_for("homework_detail", hid=hw["id"]))
+        return redirect(url_for("lecture_detail", hid=hw["id"]))
 
-    log.info("开始批阅 submission=%s homework=%s file=%s answer=%s",
+    log.info("开始批阅 submission=%s lecture=%s file=%s answer=%s",
              sid, hw["id"], sub["file_path"], hw["answer_pdf"])
     gen = run_grading(g.user["id"], sub["file_path"], hw["answer_pdf"])
     if gen["error"]:
         log.warning("批阅失败 submission=%s 原因=%s", sid, gen["error"])
         flash(gen["error"])
-        return redirect(url_for("homework_detail", hid=hw["id"]))
+        return redirect(url_for("lecture_detail", hid=hw["id"]))
 
     db.execute("DELETE FROM questions WHERE submission_id=?", (sid,))
     for i, q in enumerate(gen["questions"], 1):
@@ -981,7 +1204,7 @@ def submission_review(sid):
         JOIN users u ON u.id=s.student_id WHERE s.id=?""", (sid,)).fetchone()
     if not sub:
         abort(404)
-    hw = db.execute("SELECT * FROM homeworks WHERE id=?", (sub["homework_id"],)).fetchone()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (sub["lecture_id"],)).fetchone()
     course = own_course(hw["course_id"])
     questions = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
                            (sid,)).fetchall()
@@ -996,7 +1219,7 @@ def submission_review_save(sid):
     sub = db.execute("SELECT * FROM submissions WHERE id=?", (sid,)).fetchone()
     if not sub:
         abort(404)
-    hw = db.execute("SELECT * FROM homeworks WHERE id=?", (sub["homework_id"],)).fetchone()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (sub["lecture_id"],)).fetchone()
     own_course(hw["course_id"])
     for q in db.execute("SELECT id FROM questions WHERE submission_id=?", (sid,)).fetchall():
         qid = q["id"]
@@ -1028,7 +1251,7 @@ def submission_correct(sid):
     sub = db.execute("SELECT * FROM submissions WHERE id=?", (sid,)).fetchone()
     if not sub:
         abort(404)
-    hw = db.execute("SELECT * FROM homeworks WHERE id=?", (sub["homework_id"],)).fetchone()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (sub["lecture_id"],)).fetchone()
     own_course(hw["course_id"])
     db.execute("UPDATE submissions SET score=?, feedback=?, status='已批改', grader=?, "
                "updated_at=CURRENT_TIMESTAMP WHERE id=?",
@@ -1037,7 +1260,7 @@ def submission_correct(sid):
                 f"{g.user['display_name']} 手动更正", sid))
     db.commit()
     flash("批改结果已更新")
-    return redirect(url_for("homework_detail", hid=sub["homework_id"]))
+    return redirect(url_for("lecture_detail", hid=sub["lecture_id"]))
 
 
 # ---------- 教案 ----------
@@ -1139,10 +1362,10 @@ def settings_test():
 
 
 # ---------- 学生端 ----------
-def student_homework(hid):
+def student_lecture(hid):
     db = get_db()
     hw = db.execute("""
-        SELECT h.*, c.name AS course_name FROM homeworks h
+        SELECT h.*, c.name AS course_name FROM lectures h
         JOIN courses c ON c.id=h.course_id WHERE h.id=?""", (hid,)).fetchone()
     if not hw:
         abort(404)
@@ -1157,40 +1380,47 @@ def student_homework(hid):
 @role_required("student")
 def student_home():
     db = get_db()
-    homeworks = db.execute("""
+    lectures = db.execute("""
         SELECT h.*, c.name AS course_name,
           (SELECT COUNT(*) FROM submissions s
-            WHERE s.homework_id=h.id AND s.student_id=?) AS my_subs,
+            WHERE s.lecture_id=h.id AND s.student_id=?) AS my_subs,
           (SELECT s.status FROM submissions s
-            WHERE s.homework_id=h.id AND s.student_id=?
+            WHERE s.lecture_id=h.id AND s.student_id=?
             ORDER BY s.id DESC LIMIT 1) AS my_status,
           (SELECT s.score FROM submissions s
-            WHERE s.homework_id=h.id AND s.student_id=?
+            WHERE s.lecture_id=h.id AND s.student_id=?
             ORDER BY s.id DESC LIMIT 1) AS my_score
-        FROM homeworks h
+        FROM lectures h
         JOIN courses c ON c.id=h.course_id
         JOIN enrollments e ON e.course_id=c.id AND e.student_id=?
         ORDER BY h.id DESC""",
         (g.user["id"],) * 4).fetchall()
-    return render_template("student_home.html", homeworks=homeworks)
+    exams = db.execute("""
+        SELECT x.*, c.name AS course_name, s.score, s.comment
+        FROM exams x
+        JOIN courses c ON c.id=x.course_id
+        JOIN enrollments e ON e.course_id=c.id AND e.student_id=?
+        LEFT JOIN exam_scores s ON s.exam_id=x.id AND s.student_id=?
+        ORDER BY x.id DESC""", (g.user["id"], g.user["id"])).fetchall()
+    return render_template("student_home.html", lectures=lectures, exams=exams)
 
 
-@app.route("/student/homework/<int:hid>", methods=["GET", "POST"])
+@app.route("/student/lecture/<int:hid>", methods=["GET", "POST"])
 @role_required("student")
-def student_homework_page(hid):
-    hw = student_homework(hid)
+def student_lecture_page(hid):
+    hw = student_lecture(hid)
     db = get_db()
     if request.method == "POST":
         f = request.files.get("file")
         if not (f and f.filename and allowed_file(f.filename)):
             flash("请上传 png / jpg / webp / pdf 文件")
         else:
-            db.execute("INSERT INTO submissions(homework_id,student_id,file_path) VALUES(?,?,?)",
+            db.execute("INSERT INTO submissions(lecture_id,student_id,file_path) VALUES(?,?,?)",
                        (hid, g.user["id"], save_upload(f)))
             db.commit()
             flash("提交成功，等待老师批改")
-        return redirect(url_for("student_homework_page", hid=hid))
-    subs = db.execute("SELECT * FROM submissions WHERE homework_id=? AND student_id=? "
+        return redirect(url_for("student_lecture_page", hid=hid))
+    subs = db.execute("SELECT * FROM submissions WHERE lecture_id=? AND student_id=? "
                       "ORDER BY id DESC", (hid, g.user["id"])).fetchall()
     # 只有老师复核完成（status=已批改）才向学生公开逐题明细；AI 原始结果不直接透出。
     # 明细按最新一次提交取，且不再依赖 score（默认定性批改时 score 为空）。
@@ -1200,7 +1430,7 @@ def student_homework_page(hid):
     if revealed:
         items = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
                            (latest["id"],)).fetchall()
-    return render_template("student_homework.html", hw=hw, subs=subs, items=items,
+    return render_template("student_lecture.html", hw=hw, subs=subs, items=items,
                            revealed=revealed)
 
 
@@ -1293,14 +1523,14 @@ def _consistency_issues():
             "SELECT q.id FROM questions q LEFT JOIN submissions s ON s.id=q.submission_id "
             "WHERE s.id IS NULL")], fixable=True, detail="可安全删除")
 
-    add("missing_submission_file", "error", "提交记录对应的作业文件已丢失",
+    add("missing_submission_file", "error", "提交记录对应的学生文件已丢失",
         [(r["id"],) for r in missing(
             db.execute("SELECT id, file_path FROM submissions").fetchall(), "file_path")],
         detail="原文件不可下载，批改结果仍在")
 
-    add("missing_answer_pdf", "warn", "作业的教师版 PDF 丢失",
+    add("missing_answer_pdf", "warn", "讲次的教师版 PDF 丢失",
         [(r["id"],) for r in missing(
-            db.execute("SELECT id, answer_pdf FROM homeworks WHERE answer_pdf != ''").fetchall(),
+            db.execute("SELECT id, answer_pdf FROM lectures WHERE answer_pdf != ''").fetchall(),
             "answer_pdf")], detail="缺少标准答案 PDF 时无法进行 AI 批阅")
     return issues
 
@@ -1309,7 +1539,7 @@ def _consistency_issues():
 @role_required("admin")
 def consistency_page():
     stats = {t: get_db().execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-             for t in ("users", "courses", "homeworks", "submissions", "questions")}
+             for t in ("users", "courses", "lectures", "exams", "submissions", "questions")}
     backups = []
     if os.path.isdir(BACKUP_DIR):
         for name in sorted(os.listdir(BACKUP_DIR), reverse=True):
@@ -1353,7 +1583,7 @@ def _build_backup_zip(dest):
     con = sqlite3.connect(DB_PATH)
     try:
         counts = {t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-                  for t in ("users", "courses", "homeworks", "submissions", "questions")}
+                  for t in ("users", "courses", "lectures", "exams", "submissions", "questions")}
     finally:
         con.close()
     manifest = {"app": "GradeLogy", "version": cfg.APP_VERSION,
@@ -1515,7 +1745,9 @@ def admin_restore():
         src = sqlite3.connect(f"file:{src_db}?mode=ro", uri=True)
         tables = {r[0] for r in src.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
-        if not {"users", "homeworks", "submissions"} <= tables:
+        # 旧备份里作业表叫 homeworks，恢复后由 init_db 迁移为 lectures
+        if not ({"users", "submissions"} <= tables
+                and ({"lectures", "homeworks"} & tables)):
             flash("备份包里的数据库结构不符合本系统，已拒绝导入")
             return redirect(url_for("consistency_page"))
         if src.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
@@ -1567,9 +1799,9 @@ def admin_restore():
 
 
 def _student_files(uid):
-    """学生可访问的文件白名单：自己的提交原件 + 自己提交下的题目裁剪图。
+    """学生可访问的文件白名单：自己的提交原件 + 自己提交下的题目裁剪图 + 所选课程的讲次学生版讲义。
 
-    教师版答案、他人作业一律不在集合内，避免知道路径就能下载。
+    教师版答案、未选课程的材料、他人作业一律不在集合内，避免知道路径就能下载。
     """
     db = get_db()
     paths = set()
@@ -1580,6 +1812,11 @@ def _student_files(uid):
                         "JOIN submissions s ON s.id=q.submission_id "
                         "WHERE s.student_id=? AND q.image_path != ''", (uid,)):
         paths.add(os.path.normpath(r["image_path"]).replace("\\", "/"))
+    for r in db.execute("""
+            SELECT h.student_pdf FROM lectures h
+            JOIN enrollments e ON e.course_id=h.course_id AND e.student_id=?
+            WHERE h.student_pdf != ''""", (uid,)):
+        paths.add(os.path.normpath(r["student_pdf"]).replace("\\", "/"))
     return paths
 
 

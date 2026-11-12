@@ -1,11 +1,14 @@
 {% extends "base.html" %}
-{% block title %}{{ hw.title }} - 提交作业{% endblock %}
+{% block title %}{{ hw.title }} - 讲次{% endblock %}
 {% block content %}
 {% set verdict_cls = {'对': 'right', '半对': 'partial', '错': 'wrong', '无法判定': 'unknown'} %}
-<p><a href="{{ url_for('student_home') }}">← 返回我的作业</a></p>
+<p><a href="{{ url_for('student_home') }}">← 返回我的学习</a></p>
 <h1>{{ hw.title }}</h1>
-<p class="muted">{{ hw.course_name }}{% if hw.deadline %} · 截止 {{ hw.deadline.replace('T',' ') }}{% endif %}</p>
+<p class="muted">{{ hw.course_name }} · 讲次{% if hw.deadline %} · 截止 {{ hw.deadline.replace('T',' ') }}{% endif %}</p>
 {% if hw.description %}<p>{{ hw.description }}</p>{% endif %}
+{% if hw.student_pdf %}
+<p><a href="{{ url_for('uploaded_file', filename=hw.student_pdf) }}" target="_blank">下载本讲学生版讲义（PDF）</a></p>
+{% endif %}
 
 <div class="card">
   <h2>上传作业扫描件</h2>
@@ -16,7 +19,7 @@
     </label>
     <button type="submit">提交</button>
   </form>
-  <p class="muted small">可以重复提交，老师以最新一次为准批改。</p>
+  <p class="muted small">可以重复提交，老师以最新一次为准批阅。</p>
 </div>
 
 <div class="card">
@@ -40,7 +43,7 @@
     {% if s.feedback %}<pre class="feedback">{{ s.feedback }}</pre>
     {% elif revealed and sm and sm.evaluation %}<pre class="feedback">{{ sm.evaluation }}</pre>
     {% elif s.status == '已批改' %}<p class="muted small">老师已完成批改，暂无文字评语。</p>
-    {% else %}<p class="muted small">老师批改中，结果暂不公开。</p>{% endif %}
+    {% else %}<p class="muted small">老师批阅中，结果暂不公开。</p>{% endif %}
   </div>
   {% endfor %}
   {% if items %}

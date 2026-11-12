@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token() }}">
-  <title>{% block title %}作业管理平台{% endblock %}</title>
+  <title>{% block title %}教学管理平台{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
 {% if g.user %}
 <nav class="nav">
-  <a class="brand" href="{{ url_for('index') }}">作业管理平台</a>
+  <a class="brand" href="{{ url_for('index') }}">教学管理平台</a>
   {% if g.user.role == 'admin' %}
     <a href="{{ url_for('admin_users') }}">用户管理</a>
     <a href="{{ url_for('consistency_page') }}">系统维护</a>
@@ -18,7 +18,7 @@
     <a href="{{ url_for('courses') }}">我的课程</a>
     <a href="{{ url_for('settings_page') }}">AI 设置</a>
   {% else %}
-    <a href="{{ url_for('student_home') }}">我的作业</a>
+    <a href="{{ url_for('student_home') }}">我的学习</a>
   {% endif %}
   <span class="nav-right">
     <a href="{{ url_for('change_password') }}">{{ g.user.display_name }}</a>

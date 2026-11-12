@@ -4,7 +4,7 @@
 {% set summary = sub.ai_summary|fromjson %}
 {% set verdict_cls = {'对': 'right', '半对': 'partial', '错': 'wrong', '无法判定': 'unknown'} %}
 {% set pdf_url = url_for('uploaded_file', filename=sub.file_path) %}
-<p><a href="{{ url_for('homework_detail', hid=hw.id) }}">← 返回 {{ hw.title }}</a></p>
+<p><a href="{{ url_for('lecture_detail', hid=hw.id) }}">← 返回 {{ hw.title }}</a></p>
 <h1>逐题批改：{{ sub.display_name }}</h1>
 <p class="muted">
   {{ sub.username }} · {{ hw.title }} · 提交于 {{ sub.created_at }}

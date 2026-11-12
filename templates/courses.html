@@ -31,9 +31,9 @@
   <div class="card course-card">
     <h3><a href="{{ url_for('course_detail', cid=c.id) }}">{{ c.name }}</a></h3>
     <p class="muted">{{ c.description or '暂无简介' }}</p>
-    <p class="muted">{{ c.n_students }} 名学生 · {{ c.n_homeworks }} 份作业</p>
+    <p class="muted">{{ c.n_students }} 名学生 · {{ c.n_lectures }} 个讲次 · {{ c.n_exams }} 场考试</p>
     <form method="post" action="{{ url_for('course_delete', cid=c.id) }}"
-          onsubmit="return confirm('删除课程会同时删除其学生关系、作业和教案，确定？')">
+          onsubmit="return confirm('删除课程会同时删除其学生关系、讲次、考试和教案，确定？')">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
       <button class="danger small">删除课程</button>
     </form>

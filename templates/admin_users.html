@@ -2,7 +2,7 @@
 {% block title %}用户管理{% endblock %}
 {% block content %}
 <h1>用户管理</h1>
-<p class="muted">管理员可创建老师与学生账号、重置密码。老师登录后可管理课程与作业，学生登录后可提交作业并查看批改。</p>
+<p class="muted">管理员可创建老师与学生账号、重置密码。老师登录后可管理课程、讲次与考试成绩，学生登录后可提交讲次作业并查看批改。</p>
 
 <div class="card">
   <h2>创建账号</h2>
@@ -47,7 +47,7 @@
         </form>
         {% if u.id != g.user.id %}
         <form method="post" action="{{ url_for('admin_user_delete', uid=u.id) }}" class="inline"
-              onsubmit="return confirm('删除账号 {{ u.username }}？其课程、作业与提交会一起删除。')">
+              onsubmit="return confirm('删除账号 {{ u.username }}？其课程、讲次、考试与提交会一起删除。')">
           <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
           <button class="danger small">删除</button>
         </form>

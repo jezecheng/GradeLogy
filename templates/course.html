@@ -35,11 +35,12 @@
     <tr><th>姓名</th><th>真实姓名</th><th>学籍号</th><th>用户名</th><th></th></tr>
     {% for s in students %}
     <tr>
-      <td>{{ s.display_name }}</td>
+      <td><a href="{{ url_for('student_detail', cid=course.id, sid=s.id) }}">{{ s.display_name }}</a></td>
       <td>{{ s.real_name or '—' }}</td>
       <td class="muted">{{ s.student_no or '—' }}</td>
       <td class="muted">{{ s.username }}</td>
       <td>
+        <a class="btn-link" href="{{ url_for('student_detail', cid=course.id, sid=s.id) }}">进度</a>
         <form method="post" action="{{ url_for('course_unenroll', cid=course.id, sid=s.id) }}"
               onsubmit="return confirm('将该学生移出课程？')">
           <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
@@ -53,28 +54,66 @@
 </div>
 
 <div class="card">
-  <h2>作业（{{ homeworks|length }}）</h2>
-  <form method="post" action="{{ url_for('homework_create', cid=course.id) }}"
+  <h2>讲次（{{ lectures|length }}）</h2>
+  <form method="post" action="{{ url_for('lecture_create', cid=course.id) }}"
         enctype="multipart/form-data" class="stack-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <input name="title" placeholder="作业标题，如：第三章 综合练习" required>
-    <textarea name="description" rows="2" placeholder="作业说明（可选）"></textarea>
+    <input name="title" placeholder="讲次名称，如：水溶液中的反应" required>
+    <textarea name="description" rows="2" placeholder="讲次说明（可选）"></textarea>
     <label>截止时间 <input type="datetime-local" name="deadline"></label>
-    <label>标准答案 PDF（可选，AI 批改时会作参考）<input type="file" name="answer_pdf" accept=".pdf"></label>
-    <button type="submit">发布作业</button>
+    <label>学生版讲义 PDF（可选，学生可在讲次页下载）<input type="file" name="student_pdf" accept=".pdf"></label>
+    <label>教师版标准答案 PDF（可选，AI 批阅时会作参考）<input type="file" name="answer_pdf" accept=".pdf"></label>
+    <button type="submit">新建讲次</button>
   </form>
-  {% if homeworks %}
+  {% if lectures %}
   <table>
-    <tr><th>标题</th><th>截止时间</th><th>提交进度</th><th>答案</th><th></th></tr>
-    {% for h in homeworks %}
+    <tr><th>讲次</th><th>截止时间</th><th>提交进度</th><th>讲义/答案</th><th></th></tr>
+    {% for h in lectures %}
     <tr>
-      <td><a href="{{ url_for('homework_detail', hid=h.id) }}">{{ h.title }}</a></td>
+      <td><a href="{{ url_for('lecture_detail', hid=h.id) }}">{{ h.title }}</a></td>
       <td class="muted">{{ (h.deadline or '').replace('T',' ') or '—' }}</td>
       <td>{{ h.n_subs }} / {{ h.n_students }}</td>
-      <td>{% if h.answer_pdf %}<a href="{{ url_for('uploaded_file', filename=h.answer_pdf) }}">PDF</a>{% else %}—{% endif %}</td>
+      <td class="small">
+        {% if h.student_pdf %}<a href="{{ url_for('uploaded_file', filename=h.student_pdf) }}">学生版</a>{% else %}<span class="muted">学生版—</span>{% endif %}
+        ·
+        {% if h.answer_pdf %}<a href="{{ url_for('uploaded_file', filename=h.answer_pdf) }}">教师版</a>{% else %}<span class="muted">教师版—</span>{% endif %}
+      </td>
       <td>
-        <form method="post" action="{{ url_for('homework_delete', hid=h.id) }}"
-              onsubmit="return confirm('删除作业及其全部提交？')">
+        <form method="post" action="{{ url_for('lecture_delete', hid=h.id) }}"
+              onsubmit="return confirm('删除该讲次及其全部提交？')">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <button class="danger small">删除</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>考试（{{ exams|length }}）</h2>
+  <p class="muted small">考试只记录分数与评语，不上传试卷、不做 AI 批阅。</p>
+  <form method="post" action="{{ url_for('exam_create', cid=course.id) }}" class="stack-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <input name="title" placeholder="考试名称，如：期中考试" required>
+    <input name="exam_date" type="date" title="考试日期">
+    <input name="full_score" type="number" step="0.5" min="0" value="100" placeholder="满分">
+    <textarea name="description" rows="2" placeholder="说明（可选）"></textarea>
+    <button type="submit">新建考试</button>
+  </form>
+  {% if exams %}
+  <table>
+    <tr><th>考试</th><th>日期</th><th>满分</th><th>已录分数</th><th></th></tr>
+    {% for e in exams %}
+    <tr>
+      <td><a href="{{ url_for('exam_detail', eid=e.id) }}">{{ e.title }}</a></td>
+      <td class="muted">{{ e.exam_date or '—' }}</td>
+      <td>{{ '%g'|format(e.full_score|float) }}</td>
+      <td>{{ e.n_scores }} / {{ students|length }}</td>
+      <td>
+        <form method="post" action="{{ url_for('exam_delete', eid=e.id) }}"
+              onsubmit="return confirm('删除该考试及其成绩？')">
           <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
           <button class="danger small">删除</button>
         </form>
