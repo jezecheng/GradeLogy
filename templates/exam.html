@@ -19,8 +19,7 @@
       <tr><th>姓名</th><th>学籍号</th><th>得分</th><th>评语</th></tr>
       {% for r in rows %}
       <tr>
-        <td>{{ r.display_name }}{% if r.real_name and r.real_name != r.display_name %}
-          <span class="muted small">{{ r.real_name }}</span>{% endif %}</td>
+        <td>{{ r.display_name }}</td>
         <td class="muted">{{ r.student_no or '—' }}</td>
         <td><input name="score_{{ r.id }}" value="{{ r.score or '' }}" class="score-input"
                    placeholder="0 - {{ '%g'|format(exam.full_score|float) }}"></td>

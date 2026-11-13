@@ -3,7 +3,7 @@
 {% block content %}
 <p><a href="{{ url_for('course_detail', cid=course.id) }}">← 返回 {{ course.name }}</a></p>
 <h1>{{ student.display_name }}</h1>
-<p class="muted">{{ course.name }} · {{ student.username }}{% if student.real_name %} · {{ student.real_name }}{% endif %}{% if student.student_no %} · 学籍号 {{ student.student_no }}{% endif %}</p>
+<p class="muted">{{ course.name }} · {{ student.username }}{% if student.student_no %} · 学籍号 {{ student.student_no }}{% endif %}</p>
 
 <div class="card">
   <h2>讲次进度（{{ lectures|length }}）</h2>
@@ -57,7 +57,6 @@
   <h2>学生资料</h2>
   <table>
     <tr><th>姓名</th><td>{{ student.display_name }}</td></tr>
-    <tr><th>真实姓名</th><td>{{ student.real_name or '—' }}</td></tr>
     <tr><th>学籍号</th><td>{{ student.student_no or '—' }}</td></tr>
     <tr><th>登录用户名</th><td>{{ student.username }}</td></tr>
   </table>

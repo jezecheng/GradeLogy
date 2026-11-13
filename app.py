@@ -17,7 +17,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 try:
@@ -229,6 +229,18 @@ def _md_safe(md):
 app.jinja_env.filters["markdown_safe"] = _md_safe
 
 
+@app.template_filter("localtime")
+def _localtime(value):
+    """SQLite CURRENT_TIMESTAMP 存 UTC，展示时转成本机时区。"""
+    if not value:
+        return ""
+    try:
+        dt = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return value
+    return dt.replace(tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+
+
 def csrf_token():
     """为当前会话生成并复用 CSRF token；模板里用 csrf_token() 写入表单隐藏域。"""
     token = session.get("_csrf")
@@ -250,9 +262,9 @@ CREATE TABLE IF NOT EXISTS users(
   password_hash TEXT NOT NULL,
   display_name TEXT NOT NULL,
   role TEXT NOT NULL CHECK(role IN ('admin','teacher','student')),
-  real_name TEXT DEFAULT '',
   student_no TEXT DEFAULT '',
   active INTEGER NOT NULL DEFAULT 1,
+  last_login_at TEXT DEFAULT '',
   must_change_password INTEGER DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS courses(
@@ -446,10 +458,11 @@ def init_db():
         for r in con.execute("SELECT id, password_hash FROM users").fetchall():
             if any(check_password_hash(r[1], p) for p in DEFAULT_PASSWORDS):
                 con.execute("UPDATE users SET must_change_password=1 WHERE id=?", (r[0],))
-    # 轻量迁移：学生真实姓名与学籍号（与登录用户名分离）
-    for col in ("real_name", "student_no"):
-        if col not in ucols:
-            con.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT DEFAULT ''")
+    # 轻量迁移：学籍号（与登录用户名分离）与末次登录时间
+    if "student_no" not in ucols:
+        con.execute("ALTER TABLE users ADD COLUMN student_no TEXT DEFAULT ''")
+    if "last_login_at" not in ucols:
+        con.execute("ALTER TABLE users ADD COLUMN last_login_at TEXT DEFAULT ''")
     # 轻量迁移：账号启用状态（停用后不能登录，也不会被加入新课程）
     if "active" not in ucols:
         con.execute("ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
@@ -668,6 +681,9 @@ def login():
             session.clear()
             session["uid"] = user["id"]
             session.permanent = True  # 启用 8 小时空闲过期
+            db = get_db()
+            db.execute("UPDATE users SET last_login_at=CURRENT_TIMESTAMP WHERE id=?", (user["id"],))
+            db.commit()
             log.info("登录成功 user=%s role=%s ip=%s",
                      username, user["role"], request.remote_addr or "-")
             nxt = _safe_next(request.args.get("next"))
@@ -722,16 +738,64 @@ def home_alias():
 
 
 # ---------- 管理员：用户管理 ----------
+USER_SORT_COLUMNS = {"username": "u.username", "role": "u.role", "active": "u.active",
+                     "created_at": "u.created_at", "last_login_at": "u.last_login_at"}
+USER_SORT_DEFAULT = "created_at"
+
+
+def _admin_user_query():
+    """按查询参数筛选 / 排序账号列表，返回 (users, filters)。"""
+    args = request.args
+    q = (args.get("q") or "").strip()
+    role = args.get("role") if args.get("role") in ("admin", "teacher", "student") else ""
+    active = args.get("active") if args.get("active") in ("0", "1") else ""
+    created = args.get("created") if args.get("created") in ("today", "7d", "30d") else ""
+    login = args.get("login") if args.get("login") in ("today", "7d", "30d", "never") else ""
+    sort = args.get("sort") if args.get("sort") in USER_SORT_COLUMNS else USER_SORT_DEFAULT
+    order = "asc" if args.get("order") == "asc" else "desc"
+
+    where, params = [], []
+    if q:
+        where.append("u.username LIKE ?")
+        params.append(f"%{q}%")
+    if role:
+        where.append("u.role=?")
+        params.append(role)
+    if active:
+        where.append("u.active=?")
+        params.append(int(active))
+    if created == "today":
+        where.append("date(u.created_at,'localtime')=date('now','localtime')")
+    elif created in ("7d", "30d"):
+        where.append("u.created_at >= datetime('now', ?)")
+        params.append("-7 day" if created == "7d" else "-30 day")
+    if login == "never":
+        where.append("COALESCE(u.last_login_at,'')=''")
+    elif login == "today":
+        where.append("date(u.last_login_at,'localtime')=date('now','localtime')")
+    elif login in ("7d", "30d"):
+        where.append("u.last_login_at >= datetime('now', ?)")
+        params.append("-7 day" if login == "7d" else "-30 day")
+
+    sql = ["SELECT u.*,",
+           "(SELECT COUNT(*) FROM course_teachers ct WHERE ct.teacher_id=u.id) AS n_courses,",
+           "(SELECT COUNT(*) FROM enrollments e WHERE e.student_id=u.id) AS n_enrolled",
+           "FROM users u"]
+    if where:
+        sql.append("WHERE " + " AND ".join(where))
+    sql.append(f"ORDER BY {USER_SORT_COLUMNS[sort]} {order.upper()}, u.id {order.upper()}")
+    users = get_db().execute(" ".join(sql), params).fetchall()
+    filters = {"q": q, "role": role, "active": active, "created": created,
+               "login": login, "sort": sort, "order": order}
+    return users, filters
+
+
 @app.route("/admin/users")
 @role_required("admin")
 def admin_users():
-    users = get_db().execute("""
-        SELECT u.*,
-               (SELECT COUNT(*) FROM course_teachers ct WHERE ct.teacher_id=u.id) AS n_courses,
-               (SELECT COUNT(*) FROM enrollments e WHERE e.student_id=u.id) AS n_enrolled
-        FROM users u ORDER BY CASE u.role WHEN 'admin' THEN 0 WHEN 'teacher' THEN 1 ELSE 2 END, u.id
-        """).fetchall()
-    return render_template("admin_users.html", users=users)
+    users, filters = _admin_user_query()
+    return render_template("admin_users.html", users=users, filters=filters,
+                           pristine=_is_pristine())
 
 
 @app.route("/admin_users")
@@ -745,7 +809,6 @@ def admin_users_alias():
 def admin_user_create():
     username = request.form.get("username", "").strip()
     name = request.form.get("display_name", "").strip() or username
-    real_name = request.form.get("real_name", "").strip() or name
     student_no = request.form.get("student_no", "").strip()
     role = request.form.get("role", "student")
     password = request.form.get("password", "") or "123456"
@@ -755,15 +818,15 @@ def admin_user_create():
         flash("角色不合法")
     elif student_no and not roster.STUDENT_NO_RE.match(student_no):
         flash("学籍号不合法（1-32 位字母、数字或 _ . -）")
-    elif len(real_name) > 32:
-        flash("真实姓名最多 32 字")
+    elif len(name) > 32:
+        flash("姓名最多 32 字")
     else:
         try:
             db = get_db()
             db.execute("INSERT INTO users(username,password_hash,display_name,role,"
-                       "real_name,student_no,must_change_password) VALUES(?,?,?,?,?,?,?)",
+                       "student_no,must_change_password) VALUES(?,?,?,?,?,?)",
                        (username, generate_password_hash(password), name, role,
-                        real_name, student_no, 1 if password in DEFAULT_PASSWORDS else 0))
+                        student_no, 1 if password in DEFAULT_PASSWORDS else 0))
             db.commit()
             log.info("创建账号 operator=%s#%s user=%s role=%s",
                      g.user["username"], g.user["id"], username, role)
@@ -771,6 +834,63 @@ def admin_user_create():
         except sqlite3.IntegrityError:
             flash(f"用户名 {username} 已存在")
     return redirect(url_for("admin_users"))
+
+
+def _unique_username(db, base, used):
+    """按拼音基名生成不重复用户名：已存在则依次追加 2、3、4…"""
+    candidate, n = base, 1
+    while candidate in used or db.execute(
+            "SELECT 1 FROM users WHERE username=?", (candidate,)).fetchone():
+        n += 1
+        candidate = f"{base}{n}"
+    used.add(candidate)
+    return candidate
+
+
+@app.route("/admin/users/import", methods=["POST"])
+@role_required("admin")
+def admin_users_import():
+    """批量建号：CSV 单列姓名，按拼音自动生成用户名。"""
+    role = request.form.get("role", "student")
+    if role not in ("teacher", "student"):
+        flash("批量导入只支持老师或学生账号")
+        return redirect(url_for("admin_users"))
+    f = request.files.get("file")
+    if not f or not f.filename:
+        flash("请选择 CSV 文件")
+        return redirect(url_for("admin_users"))
+    if not f.filename.lower().endswith((".csv", ".txt")):
+        flash("只支持 .csv 文件（Excel 可另存为 CSV）")
+        return redirect(url_for("admin_users"))
+    raw = f.read(1024 * 1024 + 1)
+    if len(raw) > 1024 * 1024:
+        flash("文件超过 1MB，请拆分后再导入")
+        return redirect(url_for("admin_users"))
+    try:
+        names, errors = roster.parse_name_csv(raw)
+    except ValueError as e:
+        flash(str(e))
+        return redirect(url_for("admin_users"))
+    if not names:
+        flash("没有可导入的姓名：" + ("；".join(errors[:3]) if errors else "文件为空"))
+        return redirect(url_for("admin_users"))
+
+    db = get_db()
+    used, created = set(), []
+    password = "123456"
+    for name in names:
+        base = roster.username_from_name(name) or "user"
+        username = _unique_username(db, base, used)
+        db.execute("INSERT INTO users(username,password_hash,display_name,role,"
+                   "must_change_password) VALUES(?,?,?,?,1)",
+                   (username, generate_password_hash(password), name, role))
+        created.append({"name": name, "username": username})
+    db.commit()
+    log.info("批量建号 operator=%s#%s role=%s count=%s",
+             g.user["username"], g.user["id"], role, len(created))
+    return render_template("admin_users_import_result.html", created=created,
+                           errors=errors, role=role, password=password)
+
 
 
 @app.route("/admin/users/<int:uid>/reset", methods=["POST"])
@@ -789,23 +909,22 @@ def admin_user_reset(uid):
 @app.route("/admin/users/<int:uid>/edit", methods=["POST"])
 @role_required("admin")
 def admin_user_edit(uid):
-    """修改账号主数据（姓名、真实姓名、学籍号），由管理员统一维护。"""
+    """修改账号主数据（姓名、学籍号），由管理员统一维护。"""
     db = get_db()
     user = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
     if not user:
         abort(404)
     display_name = request.form.get("display_name", "").strip()
-    real_name = request.form.get("real_name", "").strip() or display_name
     student_no = request.form.get("student_no", "").strip()
     if not display_name:
         flash("姓名不能为空")
-    elif len(display_name) > 32 or len(real_name) > 32:
-        flash("姓名与真实姓名最多 32 字")
+    elif len(display_name) > 32:
+        flash("姓名最多 32 字")
     elif student_no and not roster.STUDENT_NO_RE.match(student_no):
         flash("学籍号不合法（1-32 位字母、数字或 _ . -）")
     else:
-        db.execute("UPDATE users SET display_name=?, real_name=?, student_no=? WHERE id=?",
-                   (display_name, real_name, student_no, uid))
+        db.execute("UPDATE users SET display_name=?, student_no=? WHERE id=?",
+                   (display_name, student_no, uid))
         db.commit()
         log.info("修改账号资料 operator=%s#%s uid=%s", g.user["username"], g.user["id"], uid)
         flash(f"已更新 {user['username']} 的资料")
@@ -934,12 +1053,12 @@ def course_detail(cid):
     db = get_db()
     course = own_course(cid)
     students = db.execute("""
-        SELECT u.id, u.username, u.display_name, u.real_name, u.student_no FROM enrollments e
+        SELECT u.id, u.username, u.display_name, u.student_no FROM enrollments e
         JOIN users u ON u.id=e.student_id
         WHERE e.course_id=? AND u.active=1 ORDER BY u.display_name""",
         (cid,)).fetchall()
     candidates = db.execute("""
-        SELECT u.id, u.username, u.display_name, u.real_name, u.student_no FROM users u
+        SELECT u.id, u.username, u.display_name, u.student_no FROM users u
         WHERE u.role='student' AND u.active=1 AND u.id NOT IN
               (SELECT student_id FROM enrollments WHERE course_id=?)
         ORDER BY u.display_name""", (cid,)).fetchall()
@@ -956,7 +1075,7 @@ def course_detail(cid):
           (SELECT COUNT(*) FROM exam_scores s WHERE s.exam_id=e.id AND s.score!='') AS n_scores
         FROM exams e WHERE e.course_id=? ORDER BY e.id DESC""", (cid,)).fetchall()
     teachers = db.execute("""
-        SELECT u.id, u.username, u.display_name, u.real_name,
+        SELECT u.id, u.username, u.display_name,
                (u.id=c.teacher_id) AS is_owner
         FROM course_teachers ct JOIN users u ON u.id=ct.teacher_id
         JOIN courses c ON c.id=ct.course_id
@@ -1522,12 +1641,12 @@ def exam_detail(eid):
     exam = own_exam(eid)
     course = own_course(exam["course_id"])
     rows = db.execute("""
-        SELECT u.id, u.username, u.display_name, u.real_name, u.student_no,
+        SELECT u.id, u.username, u.display_name, u.student_no,
                s.score, s.comment
         FROM enrollments e
         JOIN users u ON u.id=e.student_id
         LEFT JOIN exam_scores s ON s.exam_id=? AND s.student_id=u.id
-        WHERE e.course_id=? ORDER BY u.display_name""", (eid, exam["course_id"])).fetchall()
+        WHERE e.course_id=? AND u.active=1 ORDER BY u.display_name""", (eid, exam["course_id"])).fetchall()
     return render_template("exam.html", exam=exam, course=course, rows=rows)
 
 
@@ -2647,6 +2766,82 @@ def admin_backup_download(name):
     return send_file(path, as_attachment=True, download_name=name)
 
 
+def _extract_backup_zip(zpath, extract_root):
+    """校验 zip 路径安全 / 数据库结构 / 完整性后解压，返回 (src_db, 错误提示)。"""
+    if not zipfile.is_zipfile(zpath):
+        return None, "不是有效的 zip 备份包"
+    os.makedirs(extract_root, exist_ok=True)
+    limit = cfg.MAX_RESTORE_MB * 1024 * 1024
+    total = 0
+    with zipfile.ZipFile(zpath) as z:
+        members = z.infolist()
+        if len(members) > 50000:
+            return None, "备份包文件数量异常，已拒绝导入"
+        for info in members:
+            target = os.path.abspath(os.path.join(extract_root, info.filename))
+            if target != extract_root and not target.startswith(extract_root + os.sep):
+                log.warning("备份包含越界路径：%s", info.filename)
+                return None, "备份包包含非法路径，已拒绝导入"
+            total += info.file_size
+            if total > limit:
+                return None, f"备份包解压后超过 {cfg.MAX_RESTORE_MB}MB 上限，已拒绝导入"
+        z.extractall(extract_root)
+
+    src_db = os.path.join(extract_root, "data.sqlite")
+    if not os.path.isfile(src_db):
+        return None, "备份包缺少 data.sqlite，不是本系统导出的备份"
+    con = sqlite3.connect(f"file:{src_db}?mode=ro", uri=True)
+    try:
+        tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        # 旧备份里作业表叫 homeworks，恢复后由 init_db 迁移为 lectures
+        if not ({"users", "submissions"} <= tables and ({"lectures", "homeworks"} & tables)):
+            return None, "备份包里的数据库结构不符合本系统，已拒绝导入"
+        if con.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            return None, "备份包里的数据库未通过完整性检查，已拒绝导入"
+    except sqlite3.DatabaseError:
+        log.exception("备份数据库不可用")
+        return None, "备份包里的数据库文件损坏，无法恢复"
+    finally:
+        con.close()
+    return src_db, None
+
+
+def _apply_restore(extract_root):
+    """用已解压的备份覆盖当前数据库与附件，返回 (账号数, 提交数, 旧数据备份目录)。"""
+    src_db = os.path.join(extract_root, "data.sqlite")
+    # 破坏性操作前，先把当前数据完整备份一份，失败可人工回退
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    bdir = os.path.join(cfg.DATA_DIR, "backups")
+    os.makedirs(bdir, exist_ok=True)
+    cur = sqlite3.connect(DB_PATH, timeout=10)
+    bk = sqlite3.connect(os.path.join(bdir, f"pre_restore_{ts}.sqlite"))
+    src = sqlite3.connect(f"file:{src_db}?mode=ro", uri=True)
+    try:
+        cur.backup(bk)
+        src.backup(cur)  # 用 backup API 覆盖，避免替换文件句柄影响正在处理的请求
+    finally:
+        src.close()
+        bk.close()
+        cur.close()
+
+    # 附件整体替换：旧目录先移入备份，再把包内的 uploads 放回原位
+    if os.path.isdir(UPLOAD_DIR):
+        shutil.move(UPLOAD_DIR, os.path.join(bdir, f"uploads_{ts}"))
+    new_uploads = os.path.join(extract_root, "uploads")
+    if os.path.isdir(new_uploads):
+        shutil.move(new_uploads, UPLOAD_DIR)
+    cfg.ensure_dirs()
+    # 旧备份可能缺后续版本新增的列/表，恢复后立刻跑一次迁移
+    init_db()
+
+    db = get_db()
+    n_users = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    n_subs = db.execute("SELECT COUNT(*) FROM submissions").fetchone()[0]
+    log.info("从备份恢复：%s 个账号、%s 份提交，旧数据备份于 %s", n_users, n_subs, bdir)
+    session.clear()
+    return n_users, n_subs, bdir
+
+
 @app.route("/admin/restore", methods=["POST"])
 @role_required("admin")
 def admin_restore():
@@ -2657,79 +2852,15 @@ def admin_restore():
         return redirect(url_for("consistency_page"))
 
     tmpdir = tempfile.mkdtemp(prefix=".restore_", dir=cfg.DATA_DIR)
-    src = None
     try:
         zpath = os.path.join(tmpdir, "backup.zip")
         up.save(zpath)
-        if not zipfile.is_zipfile(zpath):
-            flash("不是有效的 zip 备份包")
-            return redirect(url_for("consistency_page"))
-
         extract_root = os.path.join(tmpdir, "data")
-        os.makedirs(extract_root)
-        limit = cfg.MAX_RESTORE_MB * 1024 * 1024
-        total = 0
-        with zipfile.ZipFile(zpath) as z:
-            members = z.infolist()
-            if len(members) > 50000:
-                flash("备份包文件数量异常，已拒绝导入")
-                return redirect(url_for("consistency_page"))
-            for info in members:
-                target = os.path.abspath(os.path.join(extract_root, info.filename))
-                if target != extract_root and not target.startswith(extract_root + os.sep):
-                    log.warning("备份包含越界路径：%s", info.filename)
-                    flash("备份包包含非法路径，已拒绝导入")
-                    return redirect(url_for("consistency_page"))
-                total += info.file_size
-                if total > limit:
-                    flash(f"备份包解压后超过 {cfg.MAX_RESTORE_MB}MB 上限，已拒绝导入")
-                    return redirect(url_for("consistency_page"))
-            z.extractall(extract_root)
-
-        src_db = os.path.join(extract_root, "data.sqlite")
-        if not os.path.isfile(src_db):
-            flash("备份包缺少 data.sqlite，不是本系统导出的备份")
+        _, err = _extract_backup_zip(zpath, extract_root)
+        if err:
+            flash(err)
             return redirect(url_for("consistency_page"))
-        src = sqlite3.connect(f"file:{src_db}?mode=ro", uri=True)
-        tables = {r[0] for r in src.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")}
-        # 旧备份里作业表叫 homeworks，恢复后由 init_db 迁移为 lectures
-        if not ({"users", "submissions"} <= tables
-                and ({"lectures", "homeworks"} & tables)):
-            flash("备份包里的数据库结构不符合本系统，已拒绝导入")
-            return redirect(url_for("consistency_page"))
-        if src.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-            flash("备份包里的数据库未通过完整性检查，已拒绝导入")
-            return redirect(url_for("consistency_page"))
-
-        # 破坏性操作前，先把当前数据完整备份一份，失败可人工回退
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        bdir = os.path.join(cfg.DATA_DIR, "backups")
-        os.makedirs(bdir, exist_ok=True)
-        cur = sqlite3.connect(DB_PATH, timeout=10)
-        bk = sqlite3.connect(os.path.join(bdir, f"pre_restore_{ts}.sqlite"))
-        try:
-            cur.backup(bk)
-            src.backup(cur)  # 用 backup API 覆盖，避免替换文件句柄影响正在处理的请求
-        finally:
-            bk.close()
-            cur.close()
-
-        # 附件整体替换：旧目录先移入备份，再把包内的 uploads 放回原位
-        if os.path.isdir(UPLOAD_DIR):
-            shutil.move(UPLOAD_DIR, os.path.join(bdir, f"uploads_{ts}"))
-        new_uploads = os.path.join(extract_root, "uploads")
-        if os.path.isdir(new_uploads):
-            shutil.move(new_uploads, UPLOAD_DIR)
-        cfg.ensure_dirs()
-        # 旧备份可能缺后续版本新增的列/表，恢复后立刻跑一次迁移
-        init_db()
-
-        db = get_db()
-        n_users = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        n_subs = db.execute("SELECT COUNT(*) FROM submissions").fetchone()[0]
-        log.info("从备份恢复：%s 个账号、%s 份提交，旧数据备份于 %s", n_users, n_subs, bdir)
-        session.clear()
+        n_users, n_subs, bdir = _apply_restore(extract_root)
         flash(f"恢复完成：{n_users} 个账号、{n_subs} 份提交。旧数据已备份到 {bdir}，请重新登录。")
         return redirect(url_for("login"))
     except sqlite3.DatabaseError:
@@ -2741,9 +2872,174 @@ def admin_restore():
         flash(f"恢复失败，当前数据已备份到 {os.path.join(cfg.DATA_DIR, 'backups')}，请检查磁盘与权限")
         return redirect(url_for("consistency_page"))
     finally:
-        if src is not None:
-            src.close()
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ---------- 初始化导入向导（仅全新空系统可用） ----------
+SETUP_TMP_ROOT = os.path.join(cfg.DATA_DIR, "tmp_setup")
+
+
+def _is_pristine():
+    """系统是否全新全空：没有老师 / 学生账号，也没有任何课程、讲次、考试与提交。"""
+    row = get_db().execute("""
+        SELECT (SELECT COUNT(*) FROM users WHERE role!='admin') AS users,
+               (SELECT COUNT(*) FROM courses) AS courses,
+               (SELECT COUNT(*) FROM lectures) AS lectures,
+               (SELECT COUNT(*) FROM exams) AS exams,
+               (SELECT COUNT(*) FROM submissions) AS submissions,
+               (SELECT COUNT(*) FROM enrollments) AS enrollments,
+               (SELECT COUNT(*) FROM course_teachers) AS course_teachers
+        """).fetchone()
+    return all(row[k] == 0 for k in row.keys())
+
+
+def _purge_setup_stash():
+    """清掉上一轮向导上传的临时目录，避免占用磁盘。"""
+    stash = session.pop("setup_import", None)
+    if not stash:
+        return
+    path = os.path.abspath(stash.get("dir") or "")
+    root = os.path.abspath(SETUP_TMP_ROOT)
+    if path.startswith(root + os.sep):
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _backup_summary(extract_root):
+    """统计包内数据库与附件，供确认页展示。"""
+    con = sqlite3.connect(f"file:{os.path.join(extract_root, 'data.sqlite')}?mode=ro", uri=True)
+    try:
+        counts = {}
+        for table in ("users", "courses", "lectures", "exams", "submissions", "questions"):
+            try:
+                counts[table] = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            except sqlite3.Error:
+                counts[table] = 0
+        try:
+            teachers = con.execute("SELECT COUNT(*) FROM users WHERE role='teacher'").fetchone()[0]
+            students = con.execute("SELECT COUNT(*) FROM users WHERE role='student'").fetchone()[0]
+        except sqlite3.Error:
+            teachers = students = 0
+    finally:
+        con.close()
+
+    manifest = {}
+    mpath = os.path.join(extract_root, "manifest.json")
+    if os.path.isfile(mpath):
+        try:
+            with open(mpath, encoding="utf-8") as f:
+                manifest = json.load(f)
+        except (OSError, ValueError):
+            manifest = {}
+    n_files = total = 0
+    for root, _, files in os.walk(os.path.join(extract_root, "uploads")):
+        for name in files:
+            n_files += 1
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+    return {"counts": counts, "teachers": teachers, "students": students,
+            "files": n_files, "bytes": total, "manifest": manifest}
+
+
+@app.route("/setup")
+@role_required("admin")
+def setup_import():
+    if not _is_pristine():
+        flash("系统里已有数据，初始化导入向导仅限全新空系统使用；如需恢复旧备份，请到「系统维护」页")
+        return redirect(url_for("index"))
+    return render_template("setup_import.html", step="upload")
+
+
+@app.route("/setup/upload", methods=["POST"])
+@role_required("admin")
+def setup_upload():
+    if not _is_pristine():
+        flash("系统里已有数据，初始化导入向导仅限全新空系统使用")
+        return redirect(url_for("index"))
+    up = request.files.get("backup")
+    if not up or not up.filename:
+        flash("请选择备份 zip 文件")
+        return redirect(url_for("setup_import"))
+    if not up.filename.lower().endswith(".zip"):
+        flash("请上传 .zip 备份包")
+        return redirect(url_for("setup_import"))
+
+    _purge_setup_stash()
+    os.makedirs(SETUP_TMP_ROOT, exist_ok=True)
+    tmpdir = tempfile.mkdtemp(prefix="import_", dir=SETUP_TMP_ROOT)
+    try:
+        zpath = os.path.join(tmpdir, "backup.zip")
+        up.save(zpath)
+        extract_root = os.path.join(tmpdir, "data")
+        _, err = _extract_backup_zip(zpath, extract_root)
+        if err:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            flash(err)
+            return redirect(url_for("setup_import"))
+        session["setup_import"] = {"dir": tmpdir, "summary": _backup_summary(extract_root)}
+    except OSError:
+        log.exception("初始化导入：保存上传文件失败")
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        flash("上传失败，请检查磁盘空间与权限")
+        return redirect(url_for("setup_import"))
+    return redirect(url_for("setup_preview"))
+
+
+@app.route("/setup/preview")
+@role_required("admin")
+def setup_preview():
+    stash = session.get("setup_import")
+    if not stash or not os.path.isdir(stash.get("dir", "")):
+        flash("请先选择备份包")
+        return redirect(url_for("setup_import"))
+    if not _is_pristine():
+        _purge_setup_stash()
+        flash("系统里已有数据，初始化导入已取消")
+        return redirect(url_for("index"))
+    return render_template("setup_import.html", step="preview", summary=stash["summary"])
+
+
+@app.route("/setup/confirm", methods=["POST"])
+@role_required("admin")
+def setup_confirm():
+    stash = session.get("setup_import")
+    if not stash or not os.path.isdir(stash.get("dir", "")):
+        flash("上传的备份已失效，请重新选择")
+        return redirect(url_for("setup_import"))
+    tmpdir = stash["dir"]
+    if not os.path.abspath(tmpdir).startswith(os.path.abspath(SETUP_TMP_ROOT) + os.sep):
+        _purge_setup_stash()
+        abort(400)
+    if not _is_pristine():
+        _purge_setup_stash()
+        flash("系统里已有数据，初始化导入已取消")
+        return redirect(url_for("index"))
+
+    try:
+        n_users, n_subs, _ = _apply_restore(os.path.join(tmpdir, "data"))
+    except sqlite3.DatabaseError:
+        log.exception("初始化导入失败：数据库不可用")
+        flash("备份包里的数据库无法使用，系统未改动")
+        return redirect(url_for("setup_import"))
+    except OSError:
+        log.exception("初始化导入失败（磁盘/权限）")
+        flash("导入失败，请检查磁盘空间与权限")
+        return redirect(url_for("setup_import"))
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    log.info("初始化导入完成：%s 个账号、%s 份提交", n_users, n_subs)
+    flash(f"初始化导入完成：{n_users} 个账号、{n_subs} 份提交。请用原系统的账号登录。")
+    return redirect(url_for("login"))
+
+
+@app.route("/setup/cancel", methods=["POST"])
+@role_required("admin")
+def setup_cancel():
+    _purge_setup_stash()
+    flash("已取消，上传的备份包已删除")
+    return redirect(url_for("setup_import"))
+
 
 
 def _student_files(uid):

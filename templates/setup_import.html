@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}初始化导入{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('admin_users') }}">← 返回首页</a></p>
+<h1>初始化导入向导</h1>
+<p class="muted">仅当系统全新全空（没有老师 / 学生账号，也没有课程、讲次、考试与提交）时可用。
+  把旧系统「系统维护 → 导出全部数据」生成的 zip 一次导入，即可恢复全部账号、课程、讲次、批改记录与附件。</p>
+
+<div class="card">
+  <p class="muted small">① 选择备份包 → ② 核对包内内容 → ③ 确认导入</p>
+
+  {% if step == 'upload' %}
+  <h2>第 1 步 · 选择备份包</h2>
+  <form method="post" action="{{ url_for('setup_upload') }}" enctype="multipart/form-data" class="stack-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <label>备份 zip 文件
+      <input type="file" name="backup" accept=".zip,application/zip" required>
+    </label>
+    <p class="muted small">上传后只会解压到临时目录做校验，确认前不会改动系统任何数据。</p>
+    <div class="modal-actions" style="justify-content:flex-start">
+      <button type="submit">上传并校验</button>
+    </div>
+  </form>
+  {% else %}
+  <h2>第 2 步 · 核对包内内容</h2>
+  <table>
+    <tr><th>项目</th><th>数量</th></tr>
+    <tr><td>账号</td>
+      <td>{{ summary.counts.users }} 个（老师 {{ summary.teachers }} · 学生 {{ summary.students }}）</td></tr>
+    <tr><td>课程</td><td>{{ summary.counts.courses }} 门</td></tr>
+    <tr><td>讲次</td><td>{{ summary.counts.lectures }} 讲</td></tr>
+    <tr><td>考试 / 成绩</td><td>{{ summary.counts.exams }} 场</td></tr>
+    <tr><td>提交与批改</td><td>{{ summary.counts.submissions }} 份提交 · {{ summary.counts.questions }} 道题</td></tr>
+    <tr><td>附件文件</td>
+      <td>{{ summary.files }} 个 · {{ (summary.bytes / 1024 / 1024)|round(2) }} MB</td></tr>
+    {% if summary.manifest.exported_at %}
+    <tr><td>导出时间</td><td>{{ summary.manifest.exported_at }}</td></tr>
+    {% endif %}
+    {% if summary.manifest.version %}
+    <tr><td>导出时版本</td><td>{{ summary.manifest.version }}</td></tr>
+    {% endif %}
+  </table>
+
+  <p class="muted">确认后会清空当前空系统，用备份内容整体覆盖（数据库与附件），并自动留下恢复前快照。
+    导入完成后需要用原系统的账号重新登录。</p>
+  <form method="post" action="{{ url_for('setup_confirm') }}" class="inline-form"
+        onsubmit="return confirm('确认用该备份覆盖当前系统？')">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <button type="submit">确认导入</button>
+  </form>
+  <form method="post" action="{{ url_for('setup_cancel') }}" class="inline-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <button type="submit" class="ghost">取消并删除上传的包</button>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

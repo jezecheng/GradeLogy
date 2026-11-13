@@ -1,8 +1,25 @@
 {% extends "base.html" %}
 {% block title %}用户管理{% endblock %}
+{% macro sort_link(key, label) -%}
+  {% set nxt = 'asc' if (filters.sort != key or filters.order == 'desc') else 'desc' %}
+  <a class="sort-link" href="{{ url_for('admin_users', q=filters.q, role=filters.role, active=filters.active,
+        created=filters.created, login=filters.login, sort=key, order=nxt) }}">
+    {{ label }}{% if filters.sort == key %}<span class="sort-arrow">{{ '↑' if filters.order == 'asc' else '↓' }}</span>{% endif %}
+  </a>
+{%- endmacro %}
 {% block content %}
 <h1>用户管理</h1>
-<p class="muted">管理员可创建老师与学生账号、修改账号主数据（姓名 / 真实姓名 / 学籍号）、重置密码，以及启用 / 停用账号。停用后该账号无法登录，也不会被加入新课程（适合已毕业的学生）；课程内只会显示启用中的学生。</p>
+{% if pristine %}
+<div class="card">
+  <h2>欢迎使用 · 系统初始化</h2>
+  <p class="muted">检测到系统还是全新的：没有老师 / 学生账号，也没有课程、讲次、考试与提交。
+    如果你是从旧系统迁移，可以直接导入备份 zip，一次性恢复全部账号、课程、批改记录与附件，
+    无需手工重建。</p>
+  <a class="btn" href="{{ url_for('setup_import') }}">从备份 zip 初始化导入 →</a>
+  <p class="muted small">不需要迁移？直接关闭本卡片即可，按下方「创建账号」开始使用。</p>
+</div>
+{% endif %}
+<p class="muted">管理员可创建老师与学生账号、修改账号资料（姓名 / 学籍号）、重置密码，以及启用 / 停用账号。停用后该账号无法登录，也不会被加入新课程（适合已毕业的学生）；课程内只会显示启用中的学生。</p>
 
 <div class="card">
   <h2>创建账号</h2>
@@ -10,7 +27,6 @@
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <input name="username" placeholder="用户名（登录用，如 teacher01）" required>
     <input name="display_name" placeholder="姓名">
-    <input name="real_name" placeholder="真实姓名（学生，可选）">
     <input name="student_no" placeholder="学籍号（学生，可选）">
     <select name="role">
       <option value="teacher">老师</option>
@@ -23,14 +39,74 @@
 </div>
 
 <div class="card">
-  <h2>账号列表（{{ users|length }}）</h2>
+  <h2>批量创建账号（CSV）</h2>
+  <form method="post" action="{{ url_for('admin_users_import') }}" enctype="multipart/form-data" class="inline-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <input type="file" name="file" accept=".csv,text/csv" required>
+    <select name="role">
+      <option value="student">学生</option>
+      <option value="teacher">老师</option>
+    </select>
+    <button type="submit">批量创建</button>
+  </form>
+  <p class="muted small">CSV 只要一列姓名（首行可写「姓名」）。用户名按姓名拼音自动生成：程诺 → chnuo、张三 → zhsan，
+    重名时自动追加数字（如 zhsan2）。初始密码统一为 123456，首次登录需改密。文件 ≤1MB，单次最多 1000 人。
+    Excel 请另存为「CSV UTF-8」。</p>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>账号列表（{{ users|length }}）</h2>
+  </div>
+
+  <form method="get" action="{{ url_for('admin_users') }}" class="filter-form">
+    <input type="hidden" name="sort" value="{{ filters.sort }}">
+    <input type="hidden" name="order" value="{{ filters.order }}">
+    <input name="q" value="{{ filters.q }}" placeholder="搜索用户名">
+    <select name="role">
+      <option value="">全部角色</option>
+      <option value="admin" {% if filters.role == 'admin' %}selected{% endif %}>管理员</option>
+      <option value="teacher" {% if filters.role == 'teacher' %}selected{% endif %}>老师</option>
+      <option value="student" {% if filters.role == 'student' %}selected{% endif %}>学生</option>
+    </select>
+    <select name="active">
+      <option value="">全部状态</option>
+      <option value="1" {% if filters.active == '1' %}selected{% endif %}>启用中</option>
+      <option value="0" {% if filters.active == '0' %}selected{% endif %}>已停用</option>
+    </select>
+    <select name="created">
+      <option value="">全部创建时间</option>
+      <option value="today" {% if filters.created == 'today' %}selected{% endif %}>今天创建</option>
+      <option value="7d" {% if filters.created == '7d' %}selected{% endif %}>最近 7 天</option>
+      <option value="30d" {% if filters.created == '30d' %}selected{% endif %}>最近 30 天</option>
+    </select>
+    <select name="login">
+      <option value="">全部登录情况</option>
+      <option value="today" {% if filters.login == 'today' %}selected{% endif %}>今天登录</option>
+      <option value="7d" {% if filters.login == '7d' %}selected{% endif %}>最近 7 天登录</option>
+      <option value="30d" {% if filters.login == '30d' %}selected{% endif %}>最近 30 天登录</option>
+      <option value="never" {% if filters.login == 'never' %}selected{% endif %}>从未登录</option>
+    </select>
+    <button type="submit" class="small">筛选</button>
+    <a class="btn-link" href="{{ url_for('admin_users') }}">重置</a>
+  </form>
+
   <table>
-    <tr><th>用户名</th><th>姓名</th><th>真实姓名</th><th>学籍号</th><th>角色</th><th>状态</th><th>数据</th><th>创建时间</th><th>操作</th></tr>
+    <tr>
+      <th>{{ sort_link('username', '用户名') }}</th>
+      <th>姓名</th>
+      <th>学籍号</th>
+      <th>{{ sort_link('role', '角色') }}</th>
+      <th>{{ sort_link('active', '状态') }}</th>
+      <th>数据</th>
+      <th>{{ sort_link('created_at', '创建时间') }}</th>
+      <th>{{ sort_link('last_login_at', '末次登录') }}</th>
+      <th>操作</th>
+    </tr>
     {% for u in users %}
     <tr>
       <td><strong>{{ u.username }}</strong></td>
       <td>{{ u.display_name }}</td>
-      <td>{{ u.real_name or '—' }}</td>
       <td class="muted">{{ u.student_no or '—' }}</td>
       <td><span class="role-badge role-{{ u.role }}">{{ {'admin':'管理员','teacher':'老师','student':'学生'}[u.role] }}</span></td>
       <td>
@@ -42,15 +118,18 @@
         {% elif u.role == 'student' %}{{ u.n_enrolled }} 门课程
         {% else %}—{% endif %}
       </td>
-      <td class="muted">{{ u.created_at }}</td>
+      <td class="muted">{{ u.created_at|localtime }}</td>
+      <td class="muted">{{ (u.last_login_at|localtime) or '从未登录' }}</td>
       <td class="actions">
-        {% if u.id != g.user.id %}
+        <button type="button" class="small ghost" data-dialog-open="edit-user-{{ u.id }}">编辑资料</button>
         <form method="post" action="{{ url_for('admin_user_toggle', uid=u.id) }}" class="inline">
           <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-          <button class="small ghost">{{ u.active and '停用' or '启用' }}</button>
+          {% if u.active %}
+          <button class="small ghost">停用</button>
+          {% else %}
+          <button class="small">启用</button>
+          {% endif %}
         </form>
-        {% endif %}
-        <button type="button" class="small ghost" data-dialog-open="edit-user-{{ u.id }}">编辑资料</button>
         <form method="post" action="{{ url_for('admin_user_reset', uid=u.id) }}" class="inline">
           <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
           <input name="password" placeholder="新密码" class="tiny">
@@ -67,6 +146,7 @@
     </tr>
     {% endfor %}
   </table>
+  {% if not users %}<p class="muted">没有符合条件的账号。</p>{% endif %}
 </div>
 
 {% for u in users %}
@@ -75,7 +155,6 @@
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <h2>编辑 {{ u.username }}</h2>
     <label>姓名 <input name="display_name" value="{{ u.display_name }}" required></label>
-    <label>真实姓名 <input name="real_name" value="{{ u.real_name or '' }}"></label>
     <label>学籍号 <input name="student_no" value="{{ u.student_no or '' }}"></label>
     <p class="muted small">登录用户名不可修改；密码请用列表中的「重置密码」。</p>
     <div class="modal-actions">

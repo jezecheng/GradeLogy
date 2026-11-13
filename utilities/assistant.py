@@ -227,17 +227,16 @@ def find_student(teacher_id, name):
     db = _db()
     try:
         rows = _rows(db.execute("""
-            SELECT DISTINCT u.id, u.username, u.display_name, u.real_name,
+            SELECT DISTINCT u.id, u.username, u.display_name,
                    c.id AS course_id, c.name AS course_name,
                    (SELECT COUNT(*) FROM submissions s WHERE s.student_id=u.id) AS submissions
             FROM users u
             JOIN enrollments e ON e.student_id=u.id
             JOIN courses c ON c.id=e.course_id
             JOIN course_teachers ct ON ct.course_id=c.id AND ct.teacher_id=?
-            WHERE u.role='student' AND (u.display_name LIKE ? OR u.real_name LIKE ?
-                                        OR u.username LIKE ?)
+            WHERE u.role='student' AND (u.display_name LIKE ? OR u.username LIKE ?)
             ORDER BY u.display_name""",
-            (teacher_id, f"%{name}%", f"%{name}%", f"%{name}%")))
+            (teacher_id, f"%{name}%", f"%{name}%")))
         return {"students": [dict(r) for r in rows]}
     finally:
         db.close()
@@ -252,8 +251,8 @@ def student_report(teacher_id, course, student, lecture=None):
         stu = db.execute("""
             SELECT u.* FROM users u JOIN enrollments e ON e.student_id=u.id
             WHERE e.course_id=? AND u.role='student'
-              AND (u.display_name LIKE ? OR u.real_name LIKE ? OR u.username LIKE ?)
-            LIMIT 1""", (c["id"], f"%{student}%", f"%{student}%", f"%{student}%")).fetchone()
+              AND (u.display_name LIKE ? OR u.username LIKE ?)
+            LIMIT 1""", (c["id"], f"%{student}%", f"%{student}%")).fetchone()
         if not stu:
             return {"error": f"课程「{c['name']}」里没有找到学生「{student}」"}
         stu = dict(stu)

@@ -3,3 +3,4 @@ certifi>=2024.0
 gunicorn>=21.0
 pypdfium2>=4.30
 pillow>=10.0
+pypinyin>=0.53

@@ -89,6 +89,12 @@ form.inline { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; 
 input, textarea, select { padding: 8px 10px; border: 1px solid #d0d5dd; border-radius: 6px;
                           font-size: 14px; font-family: inherit; width: 100%; }
 .inline-form input, .inline-form select { width: auto; flex: 1; min-width: 150px; }
+.filter-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+.filter-form input { width: 180px; }
+.filter-form select { width: auto; min-width: 130px; }
+.sort-link { color: inherit; text-decoration: none; font-weight: 600; white-space: nowrap; }
+.sort-link:hover { color: #1456f0; }
+.sort-arrow { margin-left: 2px; font-size: 12px; }
 input.tiny { width: 110px; padding: 4px 8px; font-size: 13px; }
 label { font-size: 14px; color: #444; display: flex; flex-direction: column; gap: 4px; }
 label.check-line { flex-direction: row; align-items: center; gap: 8px; }

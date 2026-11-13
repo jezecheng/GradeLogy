@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}批量建号结果{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('admin_users') }}">← 返回用户管理</a></p>
+<h1>批量建号完成</h1>
+<p class="muted">角色：{{ {'teacher':'老师','student':'学生'}[role] }} · 共创建 {{ created|length }} 个账号 ·
+  初始密码 {{ password }}（首次登录需改密）</p>
+
+<div class="card">
+  <h2>新建账号（{{ created|length }}）</h2>
+  <table>
+    <tr><th>#</th><th>姓名</th><th>用户名</th></tr>
+    {% for c in created %}
+    <tr><td class="muted">{{ loop.index }}</td><td>{{ c.name }}</td><td><strong>{{ c.username }}</strong></td></tr>
+    {% endfor %}
+  </table>
+</div>
+
+{% if errors %}
+<div class="card">
+  <h2>未处理的行（{{ errors|length }}）</h2>
+  <ul>
+    {% for e in errors %}<li class="muted">{{ e }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+{% endblock %}
