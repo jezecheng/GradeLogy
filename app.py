@@ -107,6 +107,41 @@ EST_TOKENS_OUTPUT = 4000   # 输出：逐题 JSON + 评语
 
 DEFAULT_PASSWORDS = ("admin123", "123456")
 
+
+# ---------- 闲时批阅：TokenHub 高峰时段价格翻倍 ----------
+# 高峰定义（参考腾讯云公开价目说明）：工作日 9:00-12:00, 14:00-18:00
+# 闲时窗口：非高峰（包括所有夜间、早高峰前、午间午休、以及周六周日全天）
+# 如果当前不在闲时且老师开启了「仅闲时批阅」，则拦截 AI 调用
+PEAK_RANGES = [  # (start_hour, start_minute, end_hour, end_minute)，24 小时制
+    (9, 0, 12, 0),
+    (14, 0, 18, 0),
+]
+
+
+def _now_in_peak():
+    """返回 (是否高峰, 下一次闲时开始时刻的 HH:MM 描述)。"""
+    now = datetime.now()
+    # 周六=5, 周日=6 全天闲时
+    if now.weekday() >= 5:
+        return False, None
+    h, m = now.hour, now.minute
+    for sh, sm, eh, em in PEAK_RANGES:
+        if (h, m) >= (sh, sm) and (h, m) < (eh, em):
+            # 下一个闲时就是该高峰段的结束时刻
+            return True, f"{eh:02d}:{em:02d}"
+    return False, None
+
+
+def _offpeak_block_if_enabled(teacher_id):
+    """如果老师开启了「仅闲时批阅」且当前是高峰，返回提示文案；否则返回 None。"""
+    if get_setting(teacher_id, "ai_offpeak_only") != "1":
+        return None
+    peak, end_hint = _now_in_peak()
+    if not peak:
+        return None
+    return (f"当前是腾讯云 TokenHub 高峰时段（价格约翻倍），"
+            f"已开启「仅闲时批阅」。建议 {end_hint} 之后再调用 AI。")
+
 def load_secret_key():
     """密钥持久化，避免每次重启把所有人都登出（容器里通过 SECRET_KEY 环境变量注入）。"""
     path = cfg.SECRET_KEY_FILE
@@ -1243,6 +1278,10 @@ def lecture_scope_analyze(hid):
     if get_setting(teacher_id, "ai_demo") == "1":
         flash("演示模式不会调用 AI，无法分析题目清单；请到「AI 设置」关闭演示模式。")
         return redirect(url_for("lecture_detail", hid=hid))
+    block = _offpeak_block_if_enabled(teacher_id)
+    if block:
+        flash(block)
+        return redirect(url_for("lecture_detail", hid=hid))
     api_url = get_setting(teacher_id, "ai_api_url").rstrip("/")
     api_key = get_setting(teacher_id, "ai_api_key")
     model = get_setting(teacher_id, "ai_model")
@@ -1310,6 +1349,11 @@ def lecture_summary_generate(hid):
         WHERE s.lecture_id=?
         GROUP BY q.no
         ORDER BY CAST(q.no AS TEXT)""", (hid,)).fetchall()
+
+    block = _offpeak_block_if_enabled(g.user["id"])
+    if block:
+        flash(block)
+        return redirect(url_for("lecture_detail", hid=hid))
 
     api_url = get_setting(g.user["id"], "ai_api_url")
     api_key = get_setting(g.user["id"], "ai_api_key")
@@ -1517,6 +1561,11 @@ def submission_grade(sid):
         flash("请先上传教师版标准答案 PDF，再开始批阅。")
         return redirect(url_for("lecture_detail", hid=hw["id"]))
 
+    block = _offpeak_block_if_enabled(g.user["id"])
+    if block:
+        flash(block)
+        return redirect(url_for("lecture_detail", hid=hw["id"]))
+
     with _GRADING_LOCK:
         if sid in _GRADING:
             flash("这份作业正在批阅中，请等待本次完成后再操作。")
@@ -1698,11 +1747,12 @@ def settings_page():
                     continue  # Key 留空表示不修改，避免误清空
                 save_setting(g.user["id"], k, value)
             save_setting(g.user["id"], "ai_demo", "1" if request.form.get("ai_demo") else "")
+            save_setting(g.user["id"], "ai_offpeak_only", "1" if request.form.get("ai_offpeak_only") else "")
         get_db().commit()
         flash("已保存")
         return redirect(url_for("settings_page"))
     cfg = {k: get_setting(g.user["id"], k)
-           for k in ("ai_api_url", "ai_api_key", "ai_model", "ai_prompt", "ai_demo")}
+           for k in ("ai_api_url", "ai_api_key", "ai_model", "ai_prompt", "ai_demo", "ai_offpeak_only")}
     return render_template("settings.html", cfg=cfg, env_keys=[k for k, v in ENV_AI_SETTINGS.items() if v],
                            model_presets=MODEL_PRESETS,
                            est_tokens_input=EST_TOKENS_INPUT,
@@ -2082,12 +2132,15 @@ def generate_report(db, sub_id, teacher_id, reuse=False):
     summary = _json_or_none(sub["ai_summary"]) or {}
     detail = _json_or_none(sub["report_detail"]) or {} if reuse else {}
     if not detail and questions and get_setting(teacher_id, "ai_demo") != "1":
-        api_url = get_setting(teacher_id, "ai_api_url").rstrip("/")
-        api_key = get_setting(teacher_id, "ai_api_key")
-        model = get_setting(teacher_id, "ai_model")
-        if api_url and api_key and model:
-            detail = ai_report_comment(questions, summary.get("weak_points") or [],
-                                       summary.get("evaluation", ""), api_url, api_key, model)
+        # 自动生成报告评语也遵守闲时设置（手动点击"生成新的总评"也会经过这里）
+        block = _offpeak_block_if_enabled(teacher_id)
+        if not block:
+            api_url = get_setting(teacher_id, "ai_api_url").rstrip("/")
+            api_key = get_setting(teacher_id, "ai_api_key")
+            model = get_setting(teacher_id, "ai_model")
+            if api_url and api_key and model:
+                detail = ai_report_comment(questions, summary.get("weak_points") or [],
+                                           summary.get("evaluation", ""), api_url, api_key, model)
     try:
         stamp = datetime.strptime(str(sub["created_at"])[:10], "%Y-%m-%d")
         date_label = f"{stamp.month}月{stamp.day}日"

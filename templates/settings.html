@@ -184,6 +184,15 @@
              style="width:auto">
       启用演示模式（不调用 AI）
     </label>
+    <label class="check-line">
+      <input type="checkbox" name="ai_offpeak_only" value="1" {% if cfg.ai_offpeak_only == '1' %}checked{% endif %}
+             style="width:auto">
+      仅闲时调用 AI（腾讯云 TokenHub 高峰时段价格约翻倍）
+    </label>
+    <p class="muted small" style="margin-top:-4px; margin-left:20px">
+      开启后：工作日 9:00-12:00、14:00-18:00 会阻止所有 AI 调用（整份批阅、范围分析、讲次汇总、报告评语），
+      提示你在闲时（夜间、午休、周末）再操作。其他时间不受影响。
+    </p>
     <button type="submit">保存设置</button>
   </form>
   <form method="post" action="{{ url_for('settings_test') }}" style="margin-top:10px">
