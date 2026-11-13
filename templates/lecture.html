@@ -208,6 +208,82 @@
   {% endif %}
 </div>
 {% include "_pdf_panel.html" %}
+
+{% macro render_bar(right, partial, wrong, unknown, total) %}
+{% set n = (right + partial + wrong + unknown) or 1 %}
+<div class="bar-stack" aria-label="判定分布">
+  <span class="bar-seg bar-right"   style="width:{{ (right / n * 100)|round(1) }}%"></span>
+  <span class="bar-seg bar-partial" style="width:{{ (partial / n * 100)|round(1) }}%"></span>
+  <span class="bar-seg bar-wrong"   style="width:{{ (wrong / n * 100)|round(1) }}%"></span>
+  <span class="bar-seg bar-unknown" style="width:{{ (unknown / n * 100)|round(1) }}%"></span>
+</div>
+<div class="bar-labels small muted">
+  <span class="legend-dot ok"></span>对 {{ right }}
+  <span class="legend-dot partial"></span>半对 {{ partial }}
+  <span class="legend-dot bad"></span>错 {{ wrong }}
+  {% if unknown %}<span class="legend-dot unk"></span>未知 {{ unknown }}{% endif %}
+</div>
+{% endmacro %}
+
+<div class="card" id="lecture-stats">
+  <div class="card-head">
+    <h2>作业统计</h2>
+    <form method="post" action="{{ url_for('lecture_summary_generate', hid=hw.id) }}"
+          class="summary-form" data-has-result="{{ '1' if hw.summary_md else '0' }}">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <button type="submit" class="small ghost">
+        {{ '重新生成讲次汇总' if hw.summary_md else '生成讲次汇总' }}
+      </button>
+    </form>
+  </div>
+
+  {% if qstats %}
+  <div class="stats-kpis">
+    <div class="kpi">
+      <div class="kpi-num">{{ n_subs }}</div>
+      <div class="kpi-lbl">已提交</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-num">{{ n_graded }}</div>
+      <div class="kpi-lbl">已批改</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-num">{{ n_reviewed }}</div>
+      <div class="kpi-lbl">已审核</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-num">{{ qstats|length }}</div>
+      <div class="kpi-lbl">题目总数</div>
+    </div>
+  </div>
+
+  <h3 style="margin:16px 0 8px">每题判定分布</h3>
+  <table class="bar-table">
+    <thead><tr><th style="width:80px">题号</th><th>判定分布</th></tr></thead>
+    <tbody>
+    {% for q in qstats %}
+    <tr>
+      <td><strong>{{ q.no }}</strong></td>
+      <td>
+        {{ render_bar(q.n_right, q.n_partial, q.n_wrong, q.n_unknown,
+                       q.n_right + q.n_partial + q.n_wrong + q.n_unknown) }}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">还没有学生提交，或还没有完成 AI 批阅。批阅开始后这里会自动显示全班分布。</p>
+  {% endif %}
+
+  {% if hw.summary_md %}
+  <div style="margin-top:20px; padding-top:12px; border-top:1px dashed #eef0f3">
+    <h3 style="margin-bottom:4px">讲次汇总</h3>
+    <p class="muted small">生成于 {{ hw.summary_at }}（覆盖生成会弹确认）</p>
+    <div class="lecture-summary-body">{{ hw.summary_md|markdown_safe }}</div>
+  </div>
+  {% endif %}
+</div>
 <script>
 // 上传 PDF：文件选择放在弹窗里，点「上传/更换」才打开
 (function () {
@@ -298,6 +374,25 @@
       boxes.forEach(function (b) { b.checked = on; });
       refresh();
     });
+  });
+})();
+// 讲次汇总：生成会耗时几十秒，按钮进入处理中状态；已有汇总时覆盖先确认
+(function () {
+  var form = document.querySelector('.summary-form');
+  if (!form) return;
+  form.addEventListener('submit', function (e) {
+    if (form.dataset.hasResult === '1' && form.dataset.confirmed !== '1') {
+      e.preventDefault();
+      confirmDialog('重新生成会覆盖当前讲次汇总（每题要点 + 整体总结），确定继续吗？',
+                    '重新生成').then(function (ok) {
+        if (!ok) return;
+        form.dataset.confirmed = '1';
+        busyOn(form.querySelector('button'), '生成中…');
+        form.submit();
+      });
+      return;
+    }
+    busyOn(form.querySelector('button'), '生成中…');
   });
 })();
 </script>

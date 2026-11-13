@@ -18,7 +18,7 @@ services:
       # AI Key 走环境变量注入，不写进数据库；设置后优先于页面上的 AI 设置
       # AI_API_URL: https://tokenhub.tencentmaas.com/v1
       # AI_API_KEY: sk-xxxx
-      # AI_MODEL: hunyuan-t1-vision-20250916
+      # AI_MODEL: deepseek-v4.1-flash
       LOG_LEVEL: INFO
     volumes:
       # 数据库、附件、日志全部落在 /data，备份时整目录拷走即可

@@ -112,7 +112,7 @@ stu002,小李,李四,20260002,abc123
 |----|------|
 | 接口地址 | 任意 OpenAI 兼容服务，如 `https://tokenhub.tencentmaas.com/v1` |
 | API Key | 留空提交表示保持原值不变 |
-| 模型 | 必须是**支持图片输入的多模态模型**，如 `deepseek-v4-flash-vision-exp`、`qwen-vl-max`、`gpt-4o` |
+| 模型 | 必须是**支持图片输入的多模态模型**，如 `deepseek-v4.1-flash`（腾讯云 TokenHub 推荐）、`glm-5.3-flash`、`gpt-4o` |
 | 演示模式 | 未配 Key 时可用，生成占位批阅结果，仅用于走通流程 |
 | 测试连接 | 发送一次最小请求验证地址、Key 与模型 |
 

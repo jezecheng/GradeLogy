@@ -295,3 +295,46 @@ def ai_report_comment(questions, weak_points, evaluation, api_url, api_key, mode
     return {"good": str(data.get("good", "")).strip(),
             "improve": improve,
             "next": str(data.get("next", "")).strip()}
+
+
+# ---------- 讲次级别的整体汇总 ----------
+
+LECTURE_SUMMARY_PROMPT = (
+    "你是化学竞赛教研组组长。下面给出一次作业中全班学生的逐题判定统计，"
+    "以及每道题的代表性评语（取多份作业的 ai_comment）。\n"
+    "请输出两段内容：\n"
+    "1) 每题要点（每题一行短句，5~25 字）：这道题全班主要的错在哪里、或者大家普遍做得好的地方。\n"
+    "2) 整体总结（3~6 句，150~300 字）：这次作业全班整体情况、最普遍的几类问题、值得肯定的地方、对下次教学的建议。\n"
+    "只输出 JSON：\n"
+    '{"per_question":{"题号":"要点",...},'
+    '"overall":"整体总结内容"}\n'
+    "要求：只依据给定数据，不要编造；每题要点简洁，重点突出；整体总结客观、有教学参考价值。"
+)
+
+
+def ai_lecture_summary(qstats, api_url, api_key, model, max_tokens=4096):
+    """根据全班逐题判定与评语，生成讲次汇总。失败返回 {}。"""
+    payload = []
+    for row in qstats or []:
+        comments = (row["all_comments"] or "").split("||SPLIT||")
+        comments = [c.strip() for c in comments if c and c.strip()][:5]
+        payload.append({
+            "no": row["no"],
+            "total": row["n_right"] + row["n_partial"] + row["n_wrong"] + row["n_unknown"],
+            "right": row["n_right"],
+            "partial": row["n_partial"],
+            "wrong": row["n_wrong"],
+            "unknown": row["n_unknown"],
+            "sample_comments": comments,
+        })
+    content = [{"type": "text", "text": LECTURE_SUMMARY_PROMPT + "\n\n数据：\n" +
+                json.dumps(payload, ensure_ascii=False)}]
+    reply, finish, err = llm.chat(api_url, api_key, model, content,
+                                  max_tokens=max_tokens, timeout=180, retries=1)
+    if err:
+        return {}
+    data = llm.extract_json(reply)
+    if not isinstance(data, dict):
+        return {}
+    return {"per_question": data.get("per_question", {}),
+            "overall": str(data.get("overall", "")).strip()}

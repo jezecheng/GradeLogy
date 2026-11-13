@@ -33,7 +33,7 @@ from werkzeug.utils import secure_filename
 
 import config as cfg
 from utilities import roster, storage
-from utilities.pdfgrade import ai_report_comment, analyze_answer_pdf, grade_pdf_submission
+from utilities.pdfgrade import ai_report_comment, ai_lecture_summary, analyze_answer_pdf, grade_pdf_submission
 
 cfg.ensure_dirs()
 cfg.setup_logging()
@@ -128,6 +128,16 @@ def _json_or_none(value):
 
 
 app.jinja_env.filters["fromjson"] = _json_or_none
+
+
+def _md_safe(md):
+    """模板里直接用 {{ hw.summary_md|markdown_safe }} 渲染 Markdown 片段。"""
+    if not md:
+        return ""
+    return render_markdown(md)
+
+
+app.jinja_env.filters["markdown_safe"] = _md_safe
 
 
 def csrf_token():
@@ -297,6 +307,10 @@ def init_db():
         con.execute("ALTER TABLE lectures ADD COLUMN student_pdf TEXT DEFAULT ''")
     # 轻量迁移：作业范围（AI 识别的题目清单 + 老师勾选的批阅范围）
     for col in ("scope_candidates", "scope_selected"):
+        if col not in lcols:
+            con.execute(f"ALTER TABLE lectures ADD COLUMN {col} TEXT DEFAULT ''")
+    # 轻量迁移：讲次级别的整体统计 summary（每题 AI 评语汇总 + 整体 summary）
+    for col in ("summary_md", "summary_at"):
         if col not in lcols:
             con.execute(f"ALTER TABLE lectures ADD COLUMN {col} TEXT DEFAULT ''")
     # 轻量迁移：仍在使用初始密码的账号，登录后强制先改密码
@@ -1043,7 +1057,31 @@ def lecture_detail(hid):
         SELECT u.id, u.display_name, u.username FROM enrollments e
         JOIN users u ON u.id=e.student_id
         WHERE e.course_id=? ORDER BY u.display_name""", (course["id"],)).fetchall()
-    return render_template("lecture.html", hw=hw, course=course, subs=subs, students=students)
+
+    # ---------- 每题统计：对/半对/错/未作答/总人数 ----------
+    qstats = db.execute("""
+        SELECT q.no,
+          SUM(CASE WHEN q.verdict='对' THEN 1 ELSE 0 END)   AS n_right,
+          SUM(CASE WHEN q.verdict='半对' THEN 1 ELSE 0 END) AS n_partial,
+          SUM(CASE WHEN q.verdict='错' THEN 1 ELSE 0 END)   AS n_wrong,
+          SUM(CASE WHEN q.verdict='无法判定' THEN 1 ELSE 0 END) AS n_unknown,
+          (SELECT COUNT(*) FROM submissions s WHERE s.lecture_id=? AND
+            EXISTS(SELECT 1 FROM questions q2 WHERE q2.submission_id=s.id)) AS n_total_subs,
+          GROUP_CONCAT(CASE WHEN q.ai_comment THEN q.ai_comment ELSE NULL END, '||SPLIT||') AS all_comments
+        FROM questions q
+        JOIN submissions s ON s.id=q.submission_id
+        WHERE s.lecture_id=?
+        GROUP BY q.no
+        ORDER BY CAST(q.no AS TEXT)
+    """, (hid, hid)).fetchall()
+
+    # 顶层汇总
+    n_subs = len(subs)
+    n_graded = sum(1 for s in subs if s["n_questions"] and s["n_questions"] > 0)
+    n_reviewed = sum(1 for s in subs if s["n_questions"] and s["n_reviewed"] >= s["n_questions"])
+
+    return render_template("lecture.html", hw=hw, course=course, subs=subs, students=students,
+                           qstats=qstats, n_subs=n_subs, n_graded=n_graded, n_reviewed=n_reviewed)
 
 
 @app.route("/lecture/<oid:hid>/upload-for", methods=["POST"])
@@ -1189,6 +1227,60 @@ def lecture_scope_save(hid):
                (json.dumps(keys, ensure_ascii=False) if keys else "", hid))
     db.commit()
     flash(f"已保存作业范围：{len(keys)} 道题" if keys else "已清除作业范围：批改全部题目")
+    return redirect(url_for("lecture_detail", hid=hid))
+
+
+@app.route("/lecture/<oid:hid>/summary/generate", methods=["POST"])
+@role_required("teacher")
+def lecture_summary_generate(hid):
+    """AI 聚合全班逐题判定与评语，生成讲次 summary（每题要点 + 整体总结）。"""
+    db = get_db()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
+    if not hw:
+        abort(404)
+    own_course(hw["course_id"])
+    # 必须至少有一份 AI 批阅结果才有意义
+    qcheck = db.execute("""
+        SELECT COUNT(*) FROM questions q
+        JOIN submissions s ON s.id=q.submission_id
+        WHERE s.lecture_id=? AND s.status='已批改' AND q.verdict != ''""", (hid,)).fetchone()[0]
+    if qcheck == 0:
+        flash("还没有批改完成的作业，无法生成讲次汇总")
+        return redirect(url_for("lecture_detail", hid=hid))
+    # 聚合统计（与 lecture_detail 里一致）
+    qstats = db.execute("""
+        SELECT q.no,
+          SUM(CASE WHEN q.verdict='对' THEN 1 ELSE 0 END) AS n_right,
+          SUM(CASE WHEN q.verdict='半对' THEN 1 ELSE 0 END) AS n_partial,
+          SUM(CASE WHEN q.verdict='错' THEN 1 ELSE 0 END) AS n_wrong,
+          SUM(CASE WHEN q.verdict='无法判定' THEN 1 ELSE 0 END) AS n_unknown,
+          GROUP_CONCAT(CASE WHEN q.ai_comment THEN q.ai_comment ELSE NULL END, '||SPLIT||') AS all_comments
+        FROM questions q
+        JOIN submissions s ON s.id=q.submission_id
+        WHERE s.lecture_id=?
+        GROUP BY q.no
+        ORDER BY CAST(q.no AS TEXT)""", (hid,)).fetchall()
+
+    api_url = get_setting(g.user["id"], "ai_api_url")
+    api_key = get_setting(g.user["id"], "ai_api_key")
+    model = get_setting(g.user["id"], "ai_model")
+    result = ai_lecture_summary(qstats, api_url, api_key, model, max_tokens=4096)
+    if not result:
+        flash("讲次汇总生成失败，请稍后重试或检查 AI 设置")
+        return redirect(url_for("lecture_detail", hid=hid))
+    # 渲染成 Markdown 存库（per_question 字典按题号展开 + overall）
+    per_q = result.get("per_question") or {}
+    lines = ["## 每题要点\n"]
+    for no in sorted(per_q.keys(), key=lambda x: (0 if x.replace(".", "").isdigit() else 1, str(x))):
+        lines.append(f"- **第 {no} 题**：{per_q[no]}")
+    lines.append("\n## 整体总结\n")
+    lines.append(result.get("overall", ""))
+    md = "\n".join(lines)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    db.execute("UPDATE lectures SET summary_md=?, summary_at=? WHERE id=?", (md, now, hid))
+    db.commit()
+    log.info("讲次 summary 生成成功 lecture=%s by=%s", hid, g.user["username"])
+    flash("讲次汇总已更新")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
