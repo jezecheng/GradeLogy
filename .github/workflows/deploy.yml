@@ -11,9 +11,10 @@
 name: Deploy to server
 
 on:
-  push:
-    branches: [main]
-  workflow_dispatch:   # 也可以在 Actions 页面手动触发
+  # 自动部署暂时停用：恢复时把下面的 workflow_dispatch 换回
+  #   push:
+  #     branches: [main]
+  workflow_dispatch:   # 临时改为只能手动触发
 
 concurrency:
   group: deploy-main
