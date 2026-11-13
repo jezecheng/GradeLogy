@@ -6,6 +6,58 @@
 <p class="muted">{{ course.description }}</p>
 
 <div class="card">
+  <div class="card-head">
+    <h2>共同管理老师（{{ teachers|length }}）</h2>
+    {% if can_manage_teachers and teacher_candidates %}
+    <button type="button" class="small" data-dialog-open="teacher-dialog">＋ 添加老师</button>
+    {% endif %}
+  </div>
+  <p class="muted small">共同管理老师可以进入本课程，管理学生名单、讲次、考试与批改；只有课程创建者能增删老师。</p>
+
+  <dialog id="teacher-dialog" class="modal">
+    <form method="post" action="{{ url_for('course_teacher_add', cid=course.id) }}" class="stack-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <h2>添加共同管理老师</h2>
+      <label>老师账号
+        <select name="teacher_id" required>
+          <option value="">从老师账号中选择…</option>
+          {% for t in teacher_candidates %}
+          <option value="{{ t.id }}">{{ t.display_name }}（{{ t.username }}）</option>
+          {% endfor %}
+        </select>
+      </label>
+      <p class="muted small">对方登录后就能在「我的课程」里看到本课程。</p>
+      <div class="modal-actions">
+        <button type="button" class="ghost" data-dialog-close>取消</button>
+        <button type="submit">添加</button>
+      </div>
+    </form>
+  </dialog>
+
+  <table>
+    <tr><th>老师</th><th>用户名</th><th>角色</th><th></th></tr>
+    {% for t in teachers %}
+    <tr>
+      <td>{{ t.display_name }}{% if t.real_name and t.real_name != t.display_name %}
+        <span class="muted small">（{{ t.real_name }}）</span>{% endif %}</td>
+      <td class="muted">{{ t.username }}</td>
+      <td>{% if t.is_owner %}<span class="reviewed-badge">创建者</span>
+          {% else %}<span class="muted small">共同管理</span>{% endif %}</td>
+      <td>
+        {% if can_manage_teachers and not t.is_owner %}
+        <form method="post" action="{{ url_for('course_teacher_remove', cid=course.id, tid=t.id) }}"
+              onsubmit="return confirm('将该老师移出本课程？其账号与其它课程不受影响。')">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <button class="danger small">移除</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="card">
   <h2>学生名单（{{ students|length }}）</h2>
   <form method="post" action="{{ url_for('course_enroll', cid=course.id) }}" class="inline-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">

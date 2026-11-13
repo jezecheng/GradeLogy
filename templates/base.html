@@ -34,6 +34,7 @@
   {% block content %}{% endblock %}
 </main>
 <script src="{{ url_for('static', filename='ui.js') }}"></script>
+{% include "_assistant.html" %}
 {% block scripts %}{% endblock %}
 </body>
 </html>

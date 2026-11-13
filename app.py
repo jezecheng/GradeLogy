@@ -25,15 +25,15 @@ try:
 except ImportError:  # pragma: no cover
     fcntl = None
 
-from flask import (Flask, abort, flash, g, redirect, render_template, request,
-                   send_file, send_from_directory, session, url_for)
+from flask import (Flask, abort, flash, g, jsonify, redirect, render_template,
+                   request, send_file, send_from_directory, session, url_for)
 from itsdangerous import BadSignature, URLSafeSerializer
 from werkzeug.routing import BaseConverter, ValidationError
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
 import config as cfg
-from utilities import roster, storage
+from utilities import assistant, llm, roster, storage
 from utilities.pdfgrade import (ai_report_comment, ai_lecture_summary,
                                 analyze_answer_pdf, grade_pdf_submission,
                                 pdf_page_count, render_page_jpeg)
@@ -264,6 +264,11 @@ CREATE TABLE IF NOT EXISTS enrollments(
   student_id INTEGER NOT NULL REFERENCES users(id),
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY(course_id, student_id));
+CREATE TABLE IF NOT EXISTS course_teachers(
+  course_id INTEGER NOT NULL REFERENCES courses(id),
+  teacher_id INTEGER NOT NULL REFERENCES users(id),
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(course_id, teacher_id));
 CREATE TABLE IF NOT EXISTS lectures(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   course_id INTEGER NOT NULL REFERENCES courses(id),
@@ -416,6 +421,9 @@ def init_db():
     for col in ("real_name", "student_no"):
         if col not in ucols:
             con.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT DEFAULT ''")
+    # 课程可多名老师共同管理：把每门课的原创建者补进 course_teachers
+    con.execute("INSERT OR IGNORE INTO course_teachers(course_id, teacher_id) "
+                "SELECT id, teacher_id FROM courses")
     if con.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
         con.execute("INSERT INTO users(username,password_hash,display_name,role,must_change_password) "
                     "VALUES(?,?,?,?,1)",
@@ -660,7 +668,7 @@ def home_alias():
 def admin_users():
     users = get_db().execute("""
         SELECT u.*,
-               (SELECT COUNT(*) FROM courses c WHERE c.teacher_id=u.id) AS n_courses,
+               (SELECT COUNT(*) FROM course_teachers ct WHERE ct.teacher_id=u.id) AS n_courses,
                (SELECT COUNT(*) FROM enrollments e WHERE e.student_id=u.id) AS n_enrolled
         FROM users u ORDER BY CASE u.role WHEN 'admin' THEN 0 WHEN 'teacher' THEN 1 ELSE 2 END, u.id
         """).fetchall()
@@ -729,7 +737,14 @@ def admin_user_delete(uid):
     target = db.execute("SELECT username, role FROM users WHERE id=?", (uid,)).fetchone()
     db.execute("DELETE FROM enrollments WHERE student_id=?", (uid,))
     db.execute("DELETE FROM submissions WHERE student_id=?", (uid,))
+    # 只解除共同管理关系；仍担任创建者的课程要转交，没人接手才整门删除
+    db.execute("DELETE FROM course_teachers WHERE teacher_id=?", (uid,))
     for c in db.execute("SELECT id FROM courses WHERE teacher_id=?", (uid,)).fetchall():
+        heir = db.execute("SELECT teacher_id FROM course_teachers WHERE course_id=? LIMIT 1",
+                          (c["id"],)).fetchone()
+        if heir:
+            db.execute("UPDATE courses SET teacher_id=? WHERE id=?", (heir["teacher_id"], c["id"]))
+            continue
         db.execute("DELETE FROM submissions WHERE lecture_id IN "
                    "(SELECT id FROM lectures WHERE course_id=?)", (c["id"],))
         db.execute("DELETE FROM lectures WHERE course_id=?", (c["id"],))
@@ -751,12 +766,22 @@ def admin_user_delete(uid):
 
 # ---------- 老师：课程 ----------
 def own_course(cid):
-    course = get_db().execute("SELECT * FROM courses WHERE id=?", (cid,)).fetchone()
+    """课程归属校验：创建者与共同管理老师都能进入，管理员不受限。"""
+    db = get_db()
+    course = db.execute("SELECT * FROM courses WHERE id=?", (cid,)).fetchone()
     if not course:
         abort(404)
-    if g.user["role"] != "admin" and course["teacher_id"] != g.user["id"]:
-        abort(403)
+    if g.user["role"] != "admin":
+        member = db.execute("SELECT 1 FROM course_teachers WHERE course_id=? AND teacher_id=?",
+                            (cid, g.user["id"])).fetchone()
+        if not member:
+            abort(403)
     return course
+
+
+def is_course_owner(course):
+    """课程创建者（或管理员）才能增删共同管理老师。"""
+    return g.user["role"] == "admin" or course["teacher_id"] == g.user["id"]
 
 
 @app.route("/courses")
@@ -766,8 +791,12 @@ def courses():
         SELECT c.*,
           (SELECT COUNT(*) FROM enrollments e WHERE e.course_id=c.id) AS n_students,
           (SELECT COUNT(*) FROM lectures h WHERE h.course_id=c.id) AS n_lectures,
-          (SELECT COUNT(*) FROM exams x WHERE x.course_id=c.id) AS n_exams
-        FROM courses c WHERE c.teacher_id=? ORDER BY c.id DESC""", (g.user["id"],)).fetchall()
+          (SELECT COUNT(*) FROM exams x WHERE x.course_id=c.id) AS n_exams,
+          (SELECT COUNT(*) FROM course_teachers t WHERE t.course_id=c.id) AS n_teachers,
+          (c.teacher_id=?) AS is_owner
+        FROM courses c
+        JOIN course_teachers ct ON ct.course_id=c.id AND ct.teacher_id=?
+        ORDER BY c.id DESC""", (g.user["id"], g.user["id"])).fetchall()
     return render_template("courses.html", courses=rows)
 
 
@@ -777,8 +806,11 @@ def course_create():
     name = request.form.get("name", "").strip()
     if name:
         db = get_db()
-        db.execute("INSERT INTO courses(name,description,teacher_id) VALUES(?,?,?)",
-                   (name, request.form.get("description", "").strip(), g.user["id"]))
+        cid = db.execute("INSERT INTO courses(name,description,teacher_id) VALUES(?,?,?)",
+                         (name, request.form.get("description", "").strip(),
+                          g.user["id"])).lastrowid
+        db.execute("INSERT OR IGNORE INTO course_teachers(course_id,teacher_id) VALUES(?,?)",
+                   (cid, g.user["id"]))
         db.commit()
     return redirect(url_for("courses"))
 
@@ -860,19 +892,74 @@ def course_detail(cid):
         SELECT e.*,
           (SELECT COUNT(*) FROM exam_scores s WHERE s.exam_id=e.id AND s.score!='') AS n_scores
         FROM exams e WHERE e.course_id=? ORDER BY e.id DESC""", (cid,)).fetchall()
+    teachers = db.execute("""
+        SELECT u.id, u.username, u.display_name, u.real_name,
+               (u.id=c.teacher_id) AS is_owner
+        FROM course_teachers ct JOIN users u ON u.id=ct.teacher_id
+        JOIN courses c ON c.id=ct.course_id
+        WHERE ct.course_id=? ORDER BY is_owner DESC, u.display_name""", (cid,)).fetchall()
+    teacher_candidates = db.execute("""
+        SELECT u.id, u.username, u.display_name FROM users u
+        WHERE u.role='teacher' AND u.id NOT IN
+              (SELECT teacher_id FROM course_teachers WHERE course_id=?)
+        ORDER BY u.display_name""", (cid,)).fetchall()
     return render_template("course.html", course=course, students=students,
                            candidates=candidates, lectures=lectures, exams=exams,
-                           plans=plans)
+                           plans=plans, teachers=teachers,
+                           teacher_candidates=teacher_candidates,
+                           can_manage_teachers=is_course_owner(course))
+
+
+@app.route("/course/<oid:cid>/teachers", methods=["POST"])
+@role_required("teacher")
+def course_teacher_add(cid):
+    """把另一名老师加入课程共同管理（仅创建者或管理员可操作）。"""
+    course = own_course(cid)
+    if not is_course_owner(course):
+        abort(403)
+    tid = request.form.get("teacher_id", "")
+    db = get_db()
+    target = db.execute("SELECT id, display_name FROM users WHERE id=? AND role='teacher'",
+                        (tid,)).fetchone()
+    if not target:
+        flash("请选择有效的老师账号")
+    else:
+        db.execute("INSERT OR IGNORE INTO course_teachers(course_id,teacher_id) VALUES(?,?)",
+                   (cid, target["id"]))
+        db.commit()
+        log.info("课程加老师 operator=%s#%s course=%s teacher=%s#%s",
+                 g.user["username"], g.user["id"], cid, target["display_name"], target["id"])
+        flash(f"已把 {target['display_name']} 加入课程共同管理")
+    return redirect(url_for("course_detail", cid=cid))
+
+
+@app.route("/course/<oid:cid>/teachers/<oid:tid>/delete", methods=["POST"])
+@role_required("teacher")
+def course_teacher_remove(cid, tid):
+    course = own_course(cid)
+    if not is_course_owner(course):
+        abort(403)
+    if int(tid) == course["teacher_id"]:
+        flash("不能移除课程创建者")
+        return redirect(url_for("course_detail", cid=cid))
+    db = get_db()
+    db.execute("DELETE FROM course_teachers WHERE course_id=? AND teacher_id=?", (cid, tid))
+    db.commit()
+    flash("已移除该共同管理老师")
+    return redirect(url_for("course_detail", cid=cid))
 
 
 @app.route("/course/<oid:cid>/delete", methods=["POST"])
 @role_required("teacher")
 def course_delete(cid):
-    own_course(cid)
+    course = own_course(cid)
+    if not is_course_owner(course):
+        flash("只有课程创建者可以删除课程")
+        return redirect(url_for("course_detail", cid=cid))
     db = get_db()
     db.execute("DELETE FROM submissions WHERE lecture_id IN "
                "(SELECT id FROM lectures WHERE course_id=?)", (cid,))
-    for t in ("lectures", "enrollments", "lesson_plans"):
+    for t in ("lectures", "enrollments", "lesson_plans", "course_teachers"):
         db.execute(f"DELETE FROM {t} WHERE course_id=?", (cid,))
     db.execute("DELETE FROM exam_scores WHERE exam_id IN (SELECT id FROM exams WHERE course_id=?)",
                (cid,))
@@ -1006,8 +1093,9 @@ def _course_groups(teacher_id, rows):
     for r in rows:
         name = r["course"]
         if name not in groups:
-            existing = db.execute("SELECT id FROM courses WHERE name=? AND teacher_id=?",
-                                  (name, teacher_id)).fetchone()
+            existing = db.execute(
+                "SELECT c.id FROM courses c JOIN course_teachers ct ON ct.course_id=c.id "
+                "WHERE c.name=? AND ct.teacher_id=?", (name, teacher_id)).fetchone()
             groups[name] = {"name": name, "id": existing["id"] if existing else None,
                             "rows": []}
             order.append(name)
@@ -1031,6 +1119,8 @@ def _apply_course_groups(teacher_id, groups):
         if cid is None:
             cid = db.execute("INSERT INTO courses(name,description,teacher_id) VALUES(?,?,?)",
                              (g["name"], "", teacher_id)).lastrowid
+            db.execute("INSERT OR IGNORE INTO course_teachers(course_id,teacher_id) VALUES(?,?)",
+                       (cid, teacher_id))
             total["course_new"] += 1
             plan = _student_plan(None, g["rows"])
         else:
@@ -1833,6 +1923,27 @@ def settings_page():
                            model_presets=MODEL_PRESETS,
                            est_tokens_input=EST_TOKENS_INPUT,
                            est_tokens_output=EST_TOKENS_OUTPUT)
+
+
+@app.route("/assistant/chat", methods=["POST"])
+@role_required("teacher")
+def assistant_chat():
+    """页面右下角教师助手：带工具调用的多轮对话，只读查询本老师的数据。"""
+    data = request.get_json(silent=True) or {}
+    msgs = []
+    for m in (data.get("messages") or [])[-12:]:
+        if not isinstance(m, dict):
+            continue
+        role, content = m.get("role"), (m.get("content") or "").strip()
+        if role in ("user", "assistant") and content:
+            msgs.append({"role": role, "content": content[:4000]})
+    if not msgs or msgs[-1]["role"] != "user":
+        return jsonify({"error": "请先输入问题"}), 400
+    # 助手是交互式的，单次请求很小，不受「仅闲时批阅」限制
+    reply, trace, err = assistant.reply(msgs, llm.resolve_config(g.user["id"]), g.user["id"])
+    if err:
+        return jsonify({"error": err, "trace": trace}), 502
+    return jsonify({"reply": reply, "trace": trace})
 
 
 @app.route("/settings/test", methods=["POST"])
