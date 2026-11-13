@@ -100,7 +100,8 @@
     </span>
   </summary>
   <div class="scope-actions">
-    <form method="post" action="{{ url_for('lecture_scope_analyze', hid=hw.id) }}" class="scope-analyze-form">
+    <form method="post" action="{{ url_for('lecture_scope_analyze', hid=hw.id) }}" class="scope-analyze-form"
+          data-has-result="{{ '1' if cands else '0' }}">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
       <button type="submit" class="small">{{ '重新分析标准答案' if cands else '分析标准答案生成题目列表' }}</button>
     </form>
@@ -191,7 +192,8 @@
       {% elif s.report_md %}
         <span class="pending-badge">报告草稿</span>
       {% endif %}
-      <form method="post" action="{{ url_for('submission_grade', sid=s.id) }}" class="grade-form">
+      <form method="post" action="{{ url_for('submission_grade', sid=s.id) }}" class="grade-form"
+            data-has-result="{{ '1' if (s.n_questions or s.status == '已批改') else '0' }}">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
         <button class="small">{{ '重新批阅' if s.status == '待批改' or s.feedback else 'AI 批阅' }}</button>
       </form>
@@ -230,17 +232,29 @@
     }
   });
 })();
-// 批阅是同步长任务：提交后禁用按钮并提示进度，避免重复点击重复调用 AI
+// 批阅是同步长任务：提交后禁用按钮并显示小圆环，避免重复点击重复调用 AI
 (function () {
   document.querySelectorAll('form.grade-form').forEach(function (form) {
-    form.addEventListener('submit', function () {
+    function start() {
       var btn = form.querySelector('button');
-      if (btn && !btn.disabled) {
-        btn.disabled = true;
-        btn.textContent = '批阅中…';
-      }
+      busyOn(btn, '批阅中…');
       var hint = form.closest('.sub-card').querySelector('.grade-hint');
       if (hint) hint.hidden = false;
+    }
+    form.addEventListener('submit', function (e) {
+      // 已有 AI 结果时，重新批阅会覆盖现有逐题结果与报告，先确认
+      if (form.dataset.hasResult === '1' && form.dataset.confirmed !== '1') {
+        e.preventDefault();
+        confirmDialog('重新批阅会覆盖这份作业现有的逐题判定、得分与批改报告，确定要重新生成吗？',
+                      '重新批阅').then(function (ok) {
+          if (!ok) return;
+          form.dataset.confirmed = '1';
+          start();
+          form.submit();
+        });
+        return;
+      }
+      start();
     });
   });
 })();
@@ -248,12 +262,24 @@
 (function () {
   var analyze = document.querySelector('.scope-analyze-form');
   if (analyze) {
-    analyze.addEventListener('submit', function () {
-      var btn = analyze.querySelector('button');
-      btn.disabled = true;
-      btn.textContent = '分析中…';
+    function start() {
+      busyOn(analyze.querySelector('button'), '分析中…');
       var hint = document.querySelector('.scope-hint');
       if (hint) hint.hidden = false;
+    }
+    analyze.addEventListener('submit', function (e) {
+      if (analyze.dataset.hasResult === '1' && analyze.dataset.confirmed !== '1') {
+        e.preventDefault();
+        confirmDialog('重新分析会覆盖现有题目清单，已勾选的作业范围需要重新确认，确定要重新生成吗？',
+                      '重新分析').then(function (ok) {
+          if (!ok) return;
+          analyze.dataset.confirmed = '1';
+          start();
+          analyze.submit();
+        });
+        return;
+      }
+      start();
     });
   }
   var form = document.getElementById('scope-form');

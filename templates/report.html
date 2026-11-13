@@ -6,7 +6,8 @@
     <h1>批改报告</h1>
     {% if is_teacher %}
     <div style="display:flex;gap:8px;flex-wrap:wrap">
-      <form method="post" action="{{ url_for('submission_report_build', sid=sub.id) }}">
+      <form method="post" action="{{ url_for('submission_report_build', sid=sub.id) }}"
+            class="report-build-form" data-has-result="{{ '1' if md else '0' }}">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
         <button class="small ghost">{{ '生成批改报告' if not md else '重新生成' }}</button>
       </form>
@@ -54,4 +55,29 @@
   </p>
   {% endif %}
 </div>
+
+{% if is_teacher %}
+<script>
+// 重新生成报告：已有内容时先确认覆盖，提交后按钮显示小圆环并禁用
+(function () {
+  var form = document.querySelector('.report-build-form');
+  if (!form) return;
+  var btn = form.querySelector('button');
+  form.addEventListener('submit', function (e) {
+    if (form.dataset.hasResult === '1' && form.dataset.confirmed !== '1') {
+      e.preventDefault();
+      confirmDialog('重新生成会覆盖当前报告内容（含手工修改的部分），确定继续吗？', '重新生成')
+        .then(function (ok) {
+          if (!ok) return;
+          form.dataset.confirmed = '1';
+          busyOn(btn, '生成中…');
+          form.submit();
+        });
+      return;
+    }
+    busyOn(btn, '生成中…');
+  });
+})();
+</script>
+{% endif %}
 {% endblock %}

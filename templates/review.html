@@ -64,14 +64,15 @@
 {% if not questions %}
 <div class="card">
   <p class="muted">还没有批阅结果。点「AI 批阅」后，AI 会把整份学生作业与标准答案对照，逐题给出判定、评语与建议分数。</p>
-  <form method="post" action="{{ url_for('submission_grade', sid=sub.id) }}">
+  <form method="post" action="{{ url_for('submission_grade', sid=sub.id) }}" class="review-grade-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <button>AI 批阅</button>
   </form>
 </div>
 {% else %}
 <div class="card">
-  <form method="post" action="{{ url_for('submission_review_save', sid=sub.id) }}">
+  <form method="post" action="{{ url_for('submission_review_save', sid=sub.id) }}"
+        id="review-form" data-has-report="{{ '1' if sub.report_md else '0' }}">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     {% for q in questions %}
     <details class="review-item">
@@ -136,6 +137,7 @@
         <textarea name="overall" id="overall" rows="4">{{ sub.feedback or (summary.evaluation if summary else '') }}</textarea>
         <div class="overall-actions">
           <button type="button" id="gen-overall" class="small ghost"
+                  data-has-result="{{ '1' if (sub.feedback or (summary and summary.evaluation)) else '0' }}"
                   {% if not all_reviewed %}disabled{% endif %}>生成新的总评</button>
           <span class="muted small" id="gen-overall-hint">
             {% if not all_reviewed %}还有 {{ n_total - n_reviewed }} 题未复核，全部复核后才能生成总评{% else %}已全部复核，可用 AI 重写总评（生成后仍可继续修改）{% endif %}
@@ -235,26 +237,67 @@
   // 全部复核完成后，用 AI 生成一份新总评回填文本框，教师可继续修改
   if (genBtn) {
     genBtn.addEventListener('click', function () {
-      genBtn.disabled = true;
-      var old = genBtn.textContent;
-      genBtn.textContent = '生成中…';
-      fetch('{{ url_for("submission_report_comment", sid=sub.id) }}', {
-        method: 'POST', headers: { 'X-CSRF-Token': csrf }
-      }).then(function (r) { return r.json().then(function (d) { return [r.ok, d]; }); })
-        .then(function (res) {
-          var ok = res[0], data = res[1];
-          if (!ok || !data.ok) throw new Error(data.error || '生成失败');
-          document.getElementById('overall').value = data.text;
-          genHint.textContent = '已生成新的总评，可继续修改后保存';
-        }).catch(function (e) {
-          alert(e.message || '生成总评失败，请稍后重试');
-        }).then(function () {
-          genBtn.textContent = old;
-          syncProgress();
-        });
+      var run = function () {
+        busyOn(genBtn, '生成中…');
+        fetch('{{ url_for("submission_report_comment", sid=sub.id) }}', {
+          method: 'POST', headers: { 'X-CSRF-Token': csrf }
+        }).then(function (r) { return r.json().then(function (d) { return [r.ok, d]; }); })
+          .then(function (res) {
+            var ok = res[0], data = res[1];
+            if (!ok || !data.ok) throw new Error(data.error || '生成失败');
+            document.getElementById('overall').value = data.text;
+            genBtn.dataset.hasResult = '1';
+            genHint.textContent = '已生成新的总评，可继续修改后保存';
+          }).catch(function (e) {
+            alert(e.message || '生成总评失败，请稍后重试');
+          }).then(function () {
+            busyOff(genBtn);
+            syncProgress();
+          });
+      };
+      // 已有总评时，重新生成会覆盖当前内容，先确认
+      if (genBtn.dataset.hasResult === '1') {
+        confirmDialog('重新生成会用 AI 新写的总评覆盖当前总评内容（含手工修改的部分），确定继续吗？',
+                      '重新生成').then(function (ok) { if (ok) run(); });
+        return;
+      }
+      run();
     });
   }
   syncProgress();
+})();
+
+// 保存/生成报告：生成本身较慢，提交后禁用按钮并显示小圆环；已有报告时确认覆盖
+(function () {
+  var grade = document.querySelector('.review-grade-form');
+  if (grade) {
+    grade.addEventListener('submit', function () {
+      busyOn(grade.querySelector('button'), '批阅中…');
+    });
+  }
+  var form = document.getElementById('review-form');
+  if (!form) return;
+  form.addEventListener('submit', function (e) {
+    var btn = e.submitter;
+    if (!btn) return;
+    if (btn.value === 'report' && form.dataset.hasReport === '1' && form.dataset.confirmed !== '1') {
+      e.preventDefault();
+      confirmDialog('生成批阅报告会覆盖现有报告内容（含手工修改的部分），确定继续吗？',
+                    '生成报告').then(function (ok) {
+        if (!ok) return;
+        form.dataset.confirmed = '1';
+        var hidden = document.createElement('input');
+        hidden.type = 'hidden';
+        hidden.name = 'then';
+        hidden.value = 'report';
+        form.appendChild(hidden);
+        busyOn(btn, '生成中…');
+        form.submit();
+      });
+      return;
+    }
+    busyOn(btn, btn.value === 'report' ? '生成中…' : '保存中…');
+  });
 })();
 </script>
 {% endblock %}
