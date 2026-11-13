@@ -58,6 +58,40 @@
 </div>
 
 <div class="card">
+  <div class="card-head">
+    <h2>提示词配置</h2>
+    <a class="btn-link" href="{{ url_for('prompts_page') }}">管理我的提示词 →</a>
+  </div>
+  <p class="muted small">本课程 AI 批改作业、生成批改报告时使用的提示词。
+    不选则使用系统内置默认提示词；每位共同管理老师自建的提示词都可以在这里选用。</p>
+  <form method="post" action="{{ url_for('course_prompts_save', cid=course.id) }}"
+        class="stack-form" style="max-width:560px">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <label>批改提示词
+      <select name="grade_prompt_id">
+        <option value="0" {% if not course.grade_prompt_id %}selected{% endif %}>系统内置默认提示词</option>
+        {% for p in grade_prompts if not p.is_default %}
+        <option value="{{ p.id }}" {% if course.grade_prompt_id == p.id %}selected{% endif %}>
+          {{ p.name }}{% if p.owner %}（{{ p.owner }}）{% endif %}
+        </option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>报告提示词
+      <select name="report_prompt_id">
+        <option value="0" {% if not course.report_prompt_id %}selected{% endif %}>系统内置默认提示词</option>
+        {% for p in report_prompts if not p.is_default %}
+        <option value="{{ p.id }}" {% if course.report_prompt_id == p.id %}selected{% endif %}>
+          {{ p.name }}{% if p.owner %}（{{ p.owner }}）{% endif %}
+        </option>
+        {% endfor %}
+      </select>
+    </label>
+    <div><button type="submit" class="small">保存提示词配置</button></div>
+  </form>
+</div>
+
+<div class="card">
   <h2>学生名单（{{ students|length }}）</h2>
   <form method="post" action="{{ url_for('course_enroll', cid=course.id) }}" class="inline-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
@@ -69,39 +103,42 @@
     </select>
     <button type="submit">加入课程</button>
   </form>
-  {% if not candidates %}<p class="muted">没有可添加的学生账号，可用下方 CSV 批量导入。</p>{% endif %}
-  <details class="muted">
-    <summary>批量导入学生名单（CSV）</summary>
-    <form method="post" action="{{ url_for('course_students_import', cid=course.id) }}"
-          enctype="multipart/form-data" class="stack-form">
-      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-      <input type="file" name="file" accept=".csv,text/csv" required>
-      <p class="muted">每行「用户名,姓名[,初始密码]」，首行可以是表头（用户名/姓名/真实姓名/学籍号/密码）。
-        上传后先显示预览，确认后才写入；用户名已存在则直接加入课程，不存在则新建学生账号
-        （密码默认 123456，首次登录需修改）。真实姓名与学籍号需用表头列提供。Excel 请另存为「CSV UTF-8」。</p>
-      <button type="submit">预览导入</button>
-    </form>
-  </details>
+  {% if not candidates %}<p class="muted">没有可添加的学生账号。学生账号由管理员在「用户管理」里创建并启用后，才会出现在这里。</p>{% endif %}
   {% if students %}
   <table>
-    <tr><th>姓名</th><th>真实姓名</th><th>学籍号</th><th>用户名</th><th></th></tr>
+    <tr><th>姓名</th><th>真实姓名</th><th>学籍号</th><th>用户名</th><th class="right">操作</th></tr>
     {% for s in students %}
     <tr>
       <td><a href="{{ url_for('student_detail', cid=course.id, sid=s.id) }}">{{ s.display_name }}</a></td>
       <td>{{ s.real_name or '—' }}</td>
       <td class="muted">{{ s.student_no or '—' }}</td>
       <td class="muted">{{ s.username }}</td>
-      <td>
+      <td class="right nowrap">
         <a class="btn-link" href="{{ url_for('student_detail', cid=course.id, sid=s.id) }}">进度</a>
-        <form method="post" action="{{ url_for('course_unenroll', cid=course.id, sid=s.id) }}"
-              onsubmit="return confirm('将该学生移出课程？')">
-          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-          <button class="danger small">移出</button>
-        </form>
+        <button type="button" class="danger small" data-dialog-open="remove-student-{{ s.id }}">移出</button>
       </td>
     </tr>
     {% endfor %}
   </table>
+  {% for s in students %}
+  <dialog id="remove-student-{{ s.id }}" class="modal">
+    <form method="post" action="{{ url_for('course_unenroll', cid=course.id, sid=s.id) }}" class="stack-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <h2>移出 {{ s.display_name }}？</h2>
+      <p>这会在数据库层面<strong>永久删除</strong>该学生在本课程内的全部记录，包括：</p>
+      <ul class="muted small">
+        <li>所有讲次的提交文件与批改结果（含逐题得分、评语）</li>
+        <li>本课程所有考试的成绩与评语</li>
+        <li>本课程的选课关系</li>
+      </ul>
+      <p class="danger-text small">删除后无法恢复。该学生的账号与其它课程的数据不受影响。</p>
+      <div class="modal-actions">
+        <button type="button" class="ghost" data-dialog-close>取消</button>
+        <button type="submit" class="danger">确认移出并删除记录</button>
+      </div>
+    </form>
+  </dialog>
+  {% endfor %}
   {% endif %}
 </div>
 

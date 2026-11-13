@@ -16,6 +16,7 @@
     <a href="{{ url_for('consistency_page') }}">系统维护</a>
   {% elif g.user.role == 'teacher' %}
     <a href="{{ url_for('courses') }}">我的课程</a>
+    <a href="{{ url_for('prompts_page') }}">我的提示词</a>
     <a href="{{ url_for('settings_page') }}">AI 设置</a>
   {% else %}
     <a href="{{ url_for('student_home') }}">我的学习</a>

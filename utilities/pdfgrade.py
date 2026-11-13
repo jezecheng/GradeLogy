@@ -14,14 +14,12 @@ import pypdfium2 as pdfium
 
 from . import llm
 
-PDF_GRADE_PROMPT = (
+# 提示词分成「正文规则」与「固定输出格式」两段：
+# 老师可自定义正文，但输出格式由系统追加，保证程序一定能解析出结构化结果。
+DEFAULT_GRADE_PROMPT = (
     "你是化学竞赛阅卷老师。附件依次是：① 学生作业（按页顺序给出的整页扫描图）；"
     "② 教师版标准答案（同样按页顺序给出）。\n"
-    "请逐题对照批阅，只输出 JSON，不要输出解释或代码块标记：\n"
-    '{"questions":[{"no":"题号","ocr":"学生实际作答内容","standard_answer":"标准答案要点",'
-    '"verdict":"对|半对|错|无法判定","score":0,"max_score":0,"comment":"给分/扣分说明"}],'
-    '"weak_points":[{"no":"题号","type":"失分类型","detail":"具体说明"}],'
-    '"evaluation":"整份作业总评（不超过 100 字）","total_score":"如 12/20，没有分值就留空"}\n'
+    "请逐题对照批阅。\n"
     "红线规则：\n"
     "1. 学生作业里的实际书写是唯一评分依据，严禁把标准答案当成学生的作答。\n"
     "2. 看不清就写〔不清〕；无法分辨时必须判「无法判定」，严禁猜测或编造学生写了什么。\n"
@@ -31,7 +29,18 @@ PDF_GRADE_PROMPT = (
     "未作答判「错」并注明未作答。\n"
     "5. 作业没有标注分值就不要编造分数：score 与 max_score 都输出 0，只给定性判定。\n"
     "6. comment 不超过 60 个汉字，standard_answer 不超过 60 个汉字。\n"
-    "7. 学生作业中缺失或与标准答案对不上的题，不要凭空补题。")
+    "7. 学生作业中缺失或与标准答案对不上的题，不要凭空补题。"
+)
+
+GRADE_OUTPUT_CONTRACT = (
+    "输出格式（必须严格遵守）：只输出 JSON，不要输出解释或代码块标记：\n"
+    '{"questions":[{"no":"题号","ocr":"学生实际作答内容","standard_answer":"标准答案要点",'
+    '"verdict":"对|半对|错|无法判定","score":0,"max_score":0,"comment":"给分/扣分说明"}],'
+    '"weak_points":[{"no":"题号","type":"失分类型","detail":"具体说明"}],'
+    '"evaluation":"整份作业总评（不超过 100 字）","total_score":"如 12/20，没有分值就留空"}'
+)
+
+PDF_GRADE_PROMPT = DEFAULT_GRADE_PROMPT + "\n" + GRADE_OUTPUT_CONTRACT
 
 MAX_FILE_MB = 20
 MAX_PAGES = 40          # 单份文件页数上限，避免一次请求图片过多
@@ -242,12 +251,13 @@ def analyze_answer_pdf(answer_path, api_url, api_key, model, max_tokens=16384,
 
 
 def grade_pdf_submission(student_path, answer_path, api_url, api_key, model,
-                         extra="", max_tokens=32768, answer_pages=None):
+                         extra="", max_tokens=32768, answer_pages=None, prompt=""):
     """批阅一份作业，返回 {questions, weak_points, evaluation, total_score, errors, error}。
 
     student_path / answer_path 为本地绝对路径。模型必须是支持图片输入的多模态模型；
     接口按 OpenAI 兼容的 chat/completions 协议传 image_url content part。
     answer_pages 为教师版 PDF 中要发送的页码（1 起），为空表示整份文件。
+    prompt 为老师自选的批阅提示词正文，输出格式由系统统一追加；为空用内置默认提示词。
     """
     if not answer_path:
         return {"questions": [], "weak_points": [], "evaluation": "", "total_score": "",
@@ -261,8 +271,9 @@ def grade_pdf_submission(student_path, answer_path, api_url, api_key, model,
         return {"questions": [], "weak_points": [], "evaluation": "", "total_score": "",
                 "errors": [], "error": err}
 
-    prompt = PDF_GRADE_PROMPT + (f"\n补充要求：{extra}" if extra else "")
-    content = [{"type": "text", "text": prompt},
+    base = (prompt.strip() + "\n" + GRADE_OUTPUT_CONTRACT) if prompt.strip() else PDF_GRADE_PROMPT
+    full_prompt = base + (f"\n补充要求：{extra}" if extra else "")
+    content = [{"type": "text", "text": full_prompt},
                {"type": "text", "text": f"① 学生作业，共 {len(student_parts)} 页："}]
     content += student_parts
     content.append({"type": "text", "text": f"② 教师版标准答案，共 {len(answer_parts)} 页："})
@@ -299,19 +310,25 @@ def grade_pdf_submission(student_path, answer_path, api_url, api_key, model,
     }
 
 
-REPORT_PROMPT = (
+DEFAULT_REPORT_PROMPT = (
     "你是化学竞赛阅卷老师。下面给出某位学生一次作业的逐题判定、失分点与总评。\n"
-    "请为学生写一段批改评语，只输出 JSON，不要解释或代码块标记：\n"
-    '{"good":"做得好的地方（80~160 字，要具体点出哪几题做得好）",'
-    '"improve":["需要改的第 1 处","第 2 处","第 3 处"],'
-    '"next":"下一步建议（60~120 字）"}\n'
+    "请为学生写一段批改评语。\n"
     "要求：只依据给定的判定，不要编造学生没写的内容；语气客观、以鼓励为主；"
     "improve 最多 3 条，按严重程度排序；没有失分点就给空数组。"
 )
 
+REPORT_OUTPUT_CONTRACT = (
+    "输出格式（必须严格遵守）：只输出 JSON，不要解释或代码块标记：\n"
+    '{"good":"做得好的地方（80~160 字，要具体点出哪几题做得好）",'
+    '"improve":["需要改的第 1 处","第 2 处","第 3 处"],'
+    '"next":"下一步建议（60~120 字）"}'
+)
+
+REPORT_PROMPT = DEFAULT_REPORT_PROMPT + "\n" + REPORT_OUTPUT_CONTRACT
+
 
 def ai_report_comment(questions, weak_points, evaluation, api_url, api_key, model,
-                      max_tokens=2048):
+                      max_tokens=2048, prompt=""):
     """根据逐题结果生成报告里的「评价」部分；失败返回 {}，不影响报告其余内容。"""
     def _field(q, *names):
         for name in names:
@@ -328,7 +345,8 @@ def ai_report_comment(questions, weak_points, evaluation, api_url, api_key, mode
              for q in (questions or [])]
     payload = json.dumps({"questions": brief, "weak_points": weak_points or [],
                           "evaluation": evaluation or ""}, ensure_ascii=False)
-    content = [{"type": "text", "text": REPORT_PROMPT + "\n\n数据：\n" + payload}]
+    base = (prompt.strip() + "\n" + REPORT_OUTPUT_CONTRACT) if prompt.strip() else REPORT_PROMPT
+    content = [{"type": "text", "text": base + "\n\n数据：\n" + payload}]
     reply, finish, err = llm.chat(api_url, api_key, model, content,
                                   max_tokens=max_tokens, timeout=120, retries=1)
     if err:

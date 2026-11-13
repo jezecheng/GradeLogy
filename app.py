@@ -34,7 +34,8 @@ from werkzeug.utils import secure_filename
 
 import config as cfg
 from utilities import assistant, llm, roster, storage
-from utilities.pdfgrade import (ai_report_comment, ai_lecture_summary,
+from utilities.pdfgrade import (DEFAULT_GRADE_PROMPT, DEFAULT_REPORT_PROMPT,
+                                ai_lecture_summary, ai_report_comment,
                                 analyze_answer_pdf, grade_pdf_submission,
                                 pdf_page_count, render_page_jpeg)
 
@@ -251,6 +252,7 @@ CREATE TABLE IF NOT EXISTS users(
   role TEXT NOT NULL CHECK(role IN ('admin','teacher','student')),
   real_name TEXT DEFAULT '',
   student_no TEXT DEFAULT '',
+  active INTEGER NOT NULL DEFAULT 1,
   must_change_password INTEGER DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS courses(
@@ -258,6 +260,8 @@ CREATE TABLE IF NOT EXISTS courses(
   name TEXT NOT NULL,
   description TEXT DEFAULT '',
   teacher_id INTEGER NOT NULL REFERENCES users(id),
+  grade_prompt_id INTEGER DEFAULT 0,
+  report_prompt_id INTEGER DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS enrollments(
   course_id INTEGER NOT NULL REFERENCES courses(id),
@@ -331,6 +335,15 @@ CREATE TABLE IF NOT EXISTS lesson_plans(
   course_id INTEGER NOT NULL REFERENCES courses(id),
   title TEXT NOT NULL,
   content TEXT DEFAULT '',
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS prompts(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  teacher_id INTEGER NOT NULL DEFAULT 0,
+  kind TEXT NOT NULL CHECK(kind IN ('grade','report')),
+  name TEXT NOT NULL,
+  content TEXT DEFAULT '',
+  is_default INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS settings(
   teacher_id INTEGER NOT NULL,
@@ -410,6 +423,22 @@ def init_db():
     for col in ("summary_md", "summary_at"):
         if col not in lcols:
             con.execute(f"ALTER TABLE lectures ADD COLUMN {col} TEXT DEFAULT ''")
+    # 轻量迁移：课程级提示词配置（0 表示使用系统内置默认提示词）
+    ccols = {r[1] for r in con.execute("PRAGMA table_info(courses)")}
+    for col in ("grade_prompt_id", "report_prompt_id"):
+        if col not in ccols:
+            con.execute(f"ALTER TABLE courses ADD COLUMN {col} INTEGER DEFAULT 0")
+    # 系统内置提示词：全局可用、不可删除，代码升级时内容随之更新
+    for kind, name, content in (("grade", "默认批改提示词", DEFAULT_GRADE_PROMPT),
+                                ("report", "默认报告提示词", DEFAULT_REPORT_PROMPT)):
+        row = con.execute("SELECT id FROM prompts WHERE is_default=1 AND kind=?",
+                          (kind,)).fetchone()
+        if row:
+            con.execute("UPDATE prompts SET name=?, content=?, updated_at=CURRENT_TIMESTAMP "
+                        "WHERE id=?", (name, content, row[0]))
+        else:
+            con.execute("INSERT INTO prompts(teacher_id,kind,name,content,is_default) "
+                        "VALUES(0,?,?,?,1)", (kind, name, content))
     # 轻量迁移：仍在使用初始密码的账号，登录后强制先改密码
     ucols = {r[1] for r in con.execute("PRAGMA table_info(users)")}
     if "must_change_password" not in ucols:
@@ -421,6 +450,9 @@ def init_db():
     for col in ("real_name", "student_no"):
         if col not in ucols:
             con.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT DEFAULT ''")
+    # 轻量迁移：账号启用状态（停用后不能登录，也不会被加入新课程）
+    if "active" not in ucols:
+        con.execute("ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
     # 课程可多名老师共同管理：把每门课的原创建者补进 course_teachers
     con.execute("INSERT OR IGNORE INTO course_teachers(course_id, teacher_id) "
                 "SELECT id, teacher_id FROM courses")
@@ -457,6 +489,29 @@ def save_setting(teacher_id, key, value):
         "INSERT INTO settings(teacher_id,key,value) VALUES(?,?,?) "
         "ON CONFLICT(teacher_id,key) DO UPDATE SET value=excluded.value",
         (teacher_id, key, value))
+
+
+# ---------- 提示词（批改 / 报告）----------
+PROMPT_KIND_LABEL = {"grade": "批改", "report": "报告"}
+
+
+def _prompt_content(kind, prompt_id):
+    """取提示词正文；0 或已失效时返回空串，由调用方回落到系统内置默认提示词。"""
+    if not prompt_id:
+        return ""
+    row = get_db().execute("SELECT content FROM prompts WHERE id=? AND kind=?",
+                           (prompt_id, kind)).fetchone()
+    return (row["content"] or "").strip() if row else ""
+
+
+def _prompt_options(course_id, kind):
+    """课程可选的提示词：系统内置 + 本课程所有管理老师自建的。"""
+    return get_db().execute("""
+        SELECT p.id, p.name, p.is_default, u.display_name AS owner
+        FROM prompts p LEFT JOIN users u ON u.id=p.teacher_id
+        WHERE p.kind=? AND (p.is_default=1 OR p.teacher_id IN
+              (SELECT teacher_id FROM course_teachers WHERE course_id=?))
+        ORDER BY p.is_default DESC, p.id""", (kind, course_id)).fetchall()
 
 
 # ---------- 访问日志 ----------
@@ -506,8 +561,10 @@ def load_user():
     g.user = None
     if uid:
         g.user = get_db().execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
-        if g.user is None:
+        if g.user is None or not g.user["active"]:
+            # 账号被删除或停用后，已登录的会话立即失效
             session.clear()
+            g.user = None
 
 
 @app.before_request
@@ -605,7 +662,9 @@ def login():
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
         user = get_db().execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
-        if user and check_password_hash(user["password_hash"], password):
+        if user and not user["active"]:
+            flash("该账号已停用，请联系管理员")
+        elif user and check_password_hash(user["password_hash"], password):
             session.clear()
             session["uid"] = user["id"]
             session.permanent = True  # 启用 8 小时空闲过期
@@ -727,6 +786,59 @@ def admin_user_reset(uid):
     return redirect(url_for("admin_users"))
 
 
+@app.route("/admin/users/<int:uid>/edit", methods=["POST"])
+@role_required("admin")
+def admin_user_edit(uid):
+    """修改账号主数据（姓名、真实姓名、学籍号），由管理员统一维护。"""
+    db = get_db()
+    user = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    if not user:
+        abort(404)
+    display_name = request.form.get("display_name", "").strip()
+    real_name = request.form.get("real_name", "").strip() or display_name
+    student_no = request.form.get("student_no", "").strip()
+    if not display_name:
+        flash("姓名不能为空")
+    elif len(display_name) > 32 or len(real_name) > 32:
+        flash("姓名与真实姓名最多 32 字")
+    elif student_no and not roster.STUDENT_NO_RE.match(student_no):
+        flash("学籍号不合法（1-32 位字母、数字或 _ . -）")
+    else:
+        db.execute("UPDATE users SET display_name=?, real_name=?, student_no=? WHERE id=?",
+                   (display_name, real_name, student_no, uid))
+        db.commit()
+        log.info("修改账号资料 operator=%s#%s uid=%s", g.user["username"], g.user["id"], uid)
+        flash(f"已更新 {user['username']} 的资料")
+    return redirect(url_for("admin_users"))
+
+
+@app.route("/admin/users/<int:uid>/toggle", methods=["POST"])
+@role_required("admin")
+def admin_user_toggle(uid):
+    """启用 / 停用账号。停用后无法登录，也不会出现在课程的可选学生里。"""
+    if uid == g.user["id"]:
+        flash("不能停用当前登录的管理员账号")
+        return redirect(url_for("admin_users"))
+    db = get_db()
+    user = db.execute("SELECT username, role, active FROM users WHERE id=?", (uid,)).fetchone()
+    if not user:
+        abort(404)
+    active = 0 if user["active"] else 1
+    db.execute("UPDATE users SET active=? WHERE id=?", (active, uid))
+    db.commit()
+    log.info("切换账号状态 operator=%s#%s user=%s active=%s",
+             g.user["username"], g.user["id"], user["username"], active)
+    if active:
+        flash(f"已启用 {user['username']}，该账号可以重新登录")
+    elif user["role"] == "teacher":
+        n = db.execute("SELECT COUNT(*) FROM course_teachers WHERE teacher_id=?", (uid,)).fetchone()[0]
+        flash(f"已停用 {user['username']}，该老师已登录的会话会立即失效；"
+              f"其参与的 {n} 门课程数据保留，可在课程里移除或转交")
+    else:
+        flash(f"已停用 {user['username']}，该账号无法登录，课程名单与选课候选中不再显示")
+    return redirect(url_for("admin_users"))
+
+
 @app.route("/admin/users/<int:uid>/delete", methods=["POST"])
 @role_required("admin")
 def admin_user_delete(uid):
@@ -789,7 +901,8 @@ def is_course_owner(course):
 def courses():
     rows = get_db().execute("""
         SELECT c.*,
-          (SELECT COUNT(*) FROM enrollments e WHERE e.course_id=c.id) AS n_students,
+          (SELECT COUNT(*) FROM enrollments e JOIN users u ON u.id=e.student_id
+            WHERE e.course_id=c.id AND u.active=1) AS n_students,
           (SELECT COUNT(*) FROM lectures h WHERE h.course_id=c.id) AS n_lectures,
           (SELECT COUNT(*) FROM exams x WHERE x.course_id=c.id) AS n_exams,
           (SELECT COUNT(*) FROM course_teachers t WHERE t.course_id=c.id) AS n_teachers,
@@ -815,58 +928,6 @@ def course_create():
     return redirect(url_for("courses"))
 
 
-@app.route("/courses/import", methods=["POST"])
-@role_required("teacher")
-def courses_import():
-    """批量建课：CSV 中每门课程一行学生，先预览再确认。"""
-    raw, error = _read_import_file()
-    if error:
-        flash(error)
-        return redirect(url_for("courses"))
-    try:
-        rows, errors = roster.parse_course_csv(raw)
-    except ValueError as e:
-        flash(str(e))
-        return redirect(url_for("courses"))
-    if not rows:
-        flash("没有可导入的数据：" + ("；".join(errors[:3]) if errors else "文件为空"))
-        return redirect(url_for("courses"))
-    groups = _course_groups(g.user["id"], rows)
-    total = {"course_new": sum(1 for g in groups if g["id"] is None),
-             "course_exists": sum(1 for g in groups if g["id"] is not None)}
-    for key in ("create", "join", "skip", "error"):
-        total[key] = sum(g["counts"][key] for g in groups)
-    token = _stash_import(raw)
-    return render_template("course_import_preview.html", groups=groups, errors=errors,
-                           total=total, token=token)
-
-
-@app.route("/courses/import/confirm", methods=["POST"])
-@role_required("teacher")
-def courses_import_confirm():
-    raw = _take_import(request.form.get("token", ""))
-    if raw is None:
-        flash("导入内容已过期，请重新上传")
-        return redirect(url_for("courses"))
-    try:
-        rows, errors = roster.parse_course_csv(raw)
-    except ValueError as e:
-        flash(str(e))
-        return redirect(url_for("courses"))
-    total = _apply_course_groups(g.user["id"], _course_groups(g.user["id"], rows))
-    log.info("批量建课 operator=%s#%s 新课程=%s 已有课程=%s 新建学生=%s 加入=%s 已在课程=%s",
-             g.user["username"], g.user["id"], total["course_new"], total["course_exists"],
-             total["create"], total["join"], total["skip"])
-    msg = (f"导入完成：新课程 {total['course_new']} 门、已有课程 {total['course_exists']} 门；"
-           f"新建学生 {total['create']} 人，加入 {total['join']} 人，已在课程 {total['skip']} 人")
-    if errors:
-        msg += f"；{len(errors)} 行未处理：" + "；".join(errors[:5])
-        if len(errors) > 5:
-            msg += f" 等共 {len(errors)} 条"
-    flash(msg)
-    return redirect(url_for("courses"))
-
-
 @app.route("/course/<oid:cid>")
 @role_required("teacher", "admin")
 def course_detail(cid):
@@ -874,17 +935,19 @@ def course_detail(cid):
     course = own_course(cid)
     students = db.execute("""
         SELECT u.id, u.username, u.display_name, u.real_name, u.student_no FROM enrollments e
-        JOIN users u ON u.id=e.student_id WHERE e.course_id=? ORDER BY u.display_name""",
+        JOIN users u ON u.id=e.student_id
+        WHERE e.course_id=? AND u.active=1 ORDER BY u.display_name""",
         (cid,)).fetchall()
     candidates = db.execute("""
         SELECT u.id, u.username, u.display_name, u.real_name, u.student_no FROM users u
-        WHERE u.role='student' AND u.id NOT IN
+        WHERE u.role='student' AND u.active=1 AND u.id NOT IN
               (SELECT student_id FROM enrollments WHERE course_id=?)
         ORDER BY u.display_name""", (cid,)).fetchall()
     lectures = db.execute("""
         SELECT h.*,
           (SELECT COUNT(*) FROM submissions s WHERE s.lecture_id=h.id) AS n_subs,
-          (SELECT COUNT(*) FROM enrollments e WHERE e.course_id=h.course_id) AS n_students
+          (SELECT COUNT(*) FROM enrollments e JOIN users u ON u.id=e.student_id
+            WHERE e.course_id=h.course_id AND u.active=1) AS n_students
         FROM lectures h WHERE h.course_id=? ORDER BY h.id""", (cid,)).fetchall()
     plans = db.execute("SELECT * FROM lesson_plans WHERE course_id=? ORDER BY updated_at DESC",
                        (cid,)).fetchall()
@@ -900,13 +963,15 @@ def course_detail(cid):
         WHERE ct.course_id=? ORDER BY is_owner DESC, u.display_name""", (cid,)).fetchall()
     teacher_candidates = db.execute("""
         SELECT u.id, u.username, u.display_name FROM users u
-        WHERE u.role='teacher' AND u.id NOT IN
+        WHERE u.role='teacher' AND u.active=1 AND u.id NOT IN
               (SELECT teacher_id FROM course_teachers WHERE course_id=?)
         ORDER BY u.display_name""", (cid,)).fetchall()
     return render_template("course.html", course=course, students=students,
                            candidates=candidates, lectures=lectures, exams=exams,
                            plans=plans, teachers=teachers,
                            teacher_candidates=teacher_candidates,
+                           grade_prompts=_prompt_options(cid, "grade"),
+                           report_prompts=_prompt_options(cid, "report"),
                            can_manage_teachers=is_course_owner(course))
 
 
@@ -976,220 +1041,48 @@ def course_enroll(cid):
     sid = request.form.get("student_id")
     if sid:
         db = get_db()
-        db.execute("INSERT OR IGNORE INTO enrollments(course_id,student_id) VALUES(?,?)", (cid, sid))
-        db.commit()
-    return redirect(url_for("course_detail", cid=cid))
-
-
-IMPORT_TMP_DIR = os.path.join(cfg.DATA_DIR, "tmp_imports")
-
-
-def _read_import_file():
-    """读取上传的 CSV（≤1MB），返回 (raw, error)。"""
-    f = request.files.get("file")
-    if not f or not f.filename:
-        return None, "请选择 CSV 文件"
-    if not f.filename.lower().endswith((".csv", ".txt")):
-        return None, "只支持 .csv 文件（Excel 可另存为 CSV）"
-    raw = f.read(1024 * 1024 + 1)
-    if len(raw) > 1024 * 1024:
-        return None, "文件超过 1MB，请拆分后再导入"
-    return raw, ""
-
-
-def _stash_import(raw):
-    """暂存上传内容供预览确认，返回一次性 token；顺手清理 1 小时前的残留文件。"""
-    os.makedirs(IMPORT_TMP_DIR, exist_ok=True)
-    cutoff = time.time() - 3600
-    for name in os.listdir(IMPORT_TMP_DIR):
-        path = os.path.join(IMPORT_TMP_DIR, name)
-        try:
-            if os.path.getmtime(path) < cutoff:
-                os.remove(path)
-        except OSError:
-            pass
-    token = secrets.token_hex(8)
-    with open(os.path.join(IMPORT_TMP_DIR, f"{g.user['id']}_{token}.csv"), "wb") as f:
-        f.write(raw)
-    return token
-
-
-def _take_import(token):
-    """按 token 取回本人暂存的导入内容；token 仅允许十六进制，避免路径穿越。"""
-    if not re.fullmatch(r"[0-9a-f]{16}", token or ""):
-        abort(400)
-    path = os.path.join(IMPORT_TMP_DIR, f"{g.user['id']}_{token}.csv")
-    if not os.path.exists(path):
-        return None
-    with open(path, "rb") as f:
-        raw = f.read()
-    os.remove(path)
-    return raw
-
-
-def _student_plan(cid, rows):
-    """把解析结果映射成待执行动作：create / join / skip / error。cid 为空表示课程尚未创建。"""
-    db = get_db()
-    plan = []
-    for r in rows:
-        user = db.execute("SELECT id, role FROM users WHERE username=?",
-                          (r["username"],)).fetchone()
-        if user is None:
-            plan.append({"row": r, "action": "create", "detail": "新建学生账号并加入课程"})
-        elif user["role"] != "student":
-            plan.append({"row": r, "action": "error", "detail": "用户名已存在且不是学生账号"})
-        elif cid and db.execute("SELECT 1 FROM enrollments WHERE course_id=? AND student_id=?",
-                                (cid, user["id"])).fetchone():
-            plan.append({"row": r, "action": "skip", "detail": "已在课程中"})
+        target = db.execute(
+            "SELECT display_name FROM users WHERE id=? AND role='student' AND active=1",
+            (sid,)).fetchone()
+        if target:
+            db.execute("INSERT OR IGNORE INTO enrollments(course_id,student_id) VALUES(?,?)",
+                       (cid, sid))
+            db.commit()
+            flash(f"已把 {target['display_name']} 加入课程")
         else:
-            plan.append({"row": r, "action": "join", "detail": "已有学生账号，加入课程"})
-    return plan
-
-
-def _plan_counts(plan):
-    counts = {"create": 0, "join": 0, "skip": 0, "error": 0}
-    for item in plan:
-        counts[item["action"]] += 1
-    return counts
-
-
-def _apply_student_plan(cid, plan):
-    """执行 _student_plan 的结果；返回实际计数（并发下可能与预览略有差异）。"""
-    db = get_db()
-    counts = {"create": 0, "join": 0, "skip": 0, "error": 0}
-    for item in plan:
-        action, r = item["action"], item["row"]
-        if action == "error":
-            counts["error"] += 1
-            continue
-        if action == "create":
-            sid = db.execute(
-                "INSERT INTO users(username,password_hash,display_name,role,"
-                "real_name,student_no,must_change_password) VALUES(?,?,?,?,?,?,?)",
-                (r["username"], generate_password_hash(r["password"]), r["name"], "student",
-                 r["real_name"], r["student_no"],
-                 1 if r["password"] == roster.DEFAULT_PASSWORD else 0)).lastrowid
-            counts["create"] += 1
-        else:
-            found = db.execute("SELECT id FROM users WHERE username=?",
-                               (r["username"],)).fetchone()
-            if found is None:  # 预览与确认之间账号被删除
-                counts["error"] += 1
-                continue
-            sid = found["id"]
-        cur = db.execute("INSERT OR IGNORE INTO enrollments(course_id,student_id) VALUES(?,?)",
-                         (cid, sid))
-        if action == "create":
-            continue
-        counts["join" if cur.rowcount else "skip"] += 1
-    db.commit()
-    return counts
-
-
-def _course_groups(teacher_id, rows):
-    """按课程名分组（保持文件顺序），并为每组生成学生动作。"""
-    db = get_db()
-    groups, order = {}, []
-    for r in rows:
-        name = r["course"]
-        if name not in groups:
-            existing = db.execute(
-                "SELECT c.id FROM courses c JOIN course_teachers ct ON ct.course_id=c.id "
-                "WHERE c.name=? AND ct.teacher_id=?", (name, teacher_id)).fetchone()
-            groups[name] = {"name": name, "id": existing["id"] if existing else None,
-                            "rows": []}
-            order.append(name)
-        groups[name]["rows"].append(r)
-    result = []
-    for name in order:
-        g = groups[name]
-        g["plan"] = _student_plan(g["id"], g["rows"])
-        g["counts"] = _plan_counts(g["plan"])
-        result.append(g)
-    return result
-
-
-def _apply_course_groups(teacher_id, groups):
-    """先建缺失的课程，再逐课执行学生动作。"""
-    db = get_db()
-    total = {"course_new": 0, "course_exists": 0,
-             "create": 0, "join": 0, "skip": 0, "error": 0}
-    for g in groups:
-        cid = g["id"]
-        if cid is None:
-            cid = db.execute("INSERT INTO courses(name,description,teacher_id) VALUES(?,?,?)",
-                             (g["name"], "", teacher_id)).lastrowid
-            db.execute("INSERT OR IGNORE INTO course_teachers(course_id,teacher_id) VALUES(?,?)",
-                       (cid, teacher_id))
-            total["course_new"] += 1
-            plan = _student_plan(None, g["rows"])
-        else:
-            total["course_exists"] += 1
-            plan = _student_plan(cid, g["rows"])
-        counts = _apply_student_plan(cid, plan)
-        for key in ("create", "join", "skip", "error"):
-            total[key] += counts[key]
-    return total
-
-
-@app.route("/course/<oid:cid>/students/import", methods=["POST"])
-@role_required("teacher")
-def course_students_import(cid):
-    """上传名单后先预览动作，确认前不写库。"""
-    own_course(cid)
-    raw, error = _read_import_file()
-    if error:
-        flash(error)
-        return redirect(url_for("course_detail", cid=cid))
-    try:
-        rows, errors = roster.parse_csv(raw)
-    except ValueError as e:
-        flash(str(e))
-        return redirect(url_for("course_detail", cid=cid))
-    if not rows:
-        flash("没有可导入的数据：" + ("；".join(errors[:3]) if errors else "文件为空"))
-        return redirect(url_for("course_detail", cid=cid))
-    plan = _student_plan(cid, rows)
-    token = _stash_import(raw)
-    course = get_db().execute("SELECT * FROM courses WHERE id=?", (cid,)).fetchone()
-    return render_template("roster_preview.html", course=course, plan=plan,
-                           errors=errors, counts=_plan_counts(plan), token=token)
-
-
-@app.route("/course/<oid:cid>/students/import/confirm", methods=["POST"])
-@role_required("teacher")
-def course_students_import_confirm(cid):
-    own_course(cid)
-    raw = _take_import(request.form.get("token", ""))
-    if raw is None:
-        flash("导入内容已过期，请重新上传")
-        return redirect(url_for("course_detail", cid=cid))
-    try:
-        rows, errors = roster.parse_csv(raw)
-    except ValueError as e:
-        flash(str(e))
-        return redirect(url_for("course_detail", cid=cid))
-    counts = _apply_student_plan(cid, _student_plan(cid, rows))
-    log.info("导入学生名单 course=%s operator=%s#%s 新建=%s 加入=%s 已在课程=%s 无法处理=%s",
-             cid, g.user["username"], g.user["id"], counts["create"], counts["join"],
-             counts["skip"], counts["error"])
-    msg = (f"导入完成：新建 {counts['create']} 人，已有学生加入 {counts['join']} 人，"
-           f"已在课程 {counts['skip']} 人")
-    if errors:
-        msg += f"；{len(errors)} 行未处理：" + "；".join(errors[:5])
-        if len(errors) > 5:
-            msg += f" 等共 {len(errors)} 条"
-    flash(msg)
+            flash("只能加入启用中的学生账号；找不到该学生或账号已停用")
     return redirect(url_for("course_detail", cid=cid))
 
 
 @app.route("/course/<oid:cid>/unenroll/<oid:sid>", methods=["POST"])
 @role_required("teacher")
 def course_unenroll(cid, sid):
+    """把学生移出课程：数据库层面删除该生在本课程内的全部记录（不可恢复）。"""
     own_course(cid)
     db = get_db()
+    student = db.execute("SELECT username, display_name FROM users WHERE id=?", (sid,)).fetchone()
+    if not student:
+        abort(404)
+    cur = db.execute("""
+        DELETE FROM questions WHERE submission_id IN (
+          SELECT s.id FROM submissions s JOIN lectures h ON h.id=s.lecture_id
+          WHERE h.course_id=? AND s.student_id=?)""", (cid, sid))
+    n_questions = cur.rowcount
+    cur = db.execute("""
+        DELETE FROM submissions WHERE student_id=? AND lecture_id IN
+          (SELECT id FROM lectures WHERE course_id=?)""", (sid, cid))
+    n_subs = cur.rowcount
+    cur = db.execute("""
+        DELETE FROM exam_scores WHERE student_id=? AND exam_id IN
+          (SELECT id FROM exams WHERE course_id=?)""", (sid, cid))
+    n_scores = cur.rowcount
     db.execute("DELETE FROM enrollments WHERE course_id=? AND student_id=?", (cid, sid))
     db.commit()
+    log.info("移出学生 course=%s operator=%s#%s student=%s#%s 提交=%s 题目=%s 成绩=%s",
+             cid, g.user["username"], g.user["id"], student["username"], sid,
+             n_subs, n_questions, n_scores)
+    flash(f"已把 {student['display_name']} 移出课程，"
+          f"并删除其在本课程的 {n_subs} 份提交、{n_scores} 条考试成绩（不可恢复）")
     return redirect(url_for("course_detail", cid=cid))
 
 
@@ -1255,7 +1148,7 @@ def lecture_detail(hid):
     students = db.execute("""
         SELECT u.id, u.display_name, u.username FROM enrollments e
         JOIN users u ON u.id=e.student_id
-        WHERE e.course_id=? ORDER BY u.display_name""", (course["id"],)).fetchall()
+        WHERE e.course_id=? AND u.active=1 ORDER BY u.display_name""", (course["id"],)).fetchall()
 
     # ---------- 每题统计：对/半对/错/未作答/总人数 ----------
     qstats = db.execute("""
@@ -1594,38 +1487,6 @@ def student_detail(cid, sid):
                            lectures=lectures, exams=exams)
 
 
-@app.route("/course/<oid:cid>/student/<oid:sid>/update", methods=["POST"])
-@role_required("teacher")
-def student_update(cid, sid):
-    own_student(cid, sid)
-    db = get_db()
-    display_name = request.form.get("display_name", "").strip()
-    if not display_name:
-        flash("姓名不能为空")
-        return redirect(url_for("student_detail", cid=cid, sid=sid))
-    db.execute("UPDATE users SET display_name=?, real_name=?, student_no=? WHERE id=?",
-               (display_name, request.form.get("real_name", "").strip(),
-                request.form.get("student_no", "").strip(), sid))
-    db.commit()
-    flash("学生资料已更新")
-    return redirect(url_for("student_detail", cid=cid, sid=sid))
-
-
-@app.route("/course/<oid:cid>/student/<oid:sid>/reset", methods=["POST"])
-@role_required("teacher")
-def student_reset_password(cid, sid):
-    own_student(cid, sid)
-    password = request.form.get("password", "").strip() or "123456"
-    get_db().execute("UPDATE users SET password_hash=?, must_change_password=? WHERE id=?",
-                     (generate_password_hash(password),
-                      1 if password in DEFAULT_PASSWORDS else 0, sid))
-    get_db().commit()
-    log.info("老师重置学生密码 teacher=%s#%s student=%s#%s",
-             g.user["username"], g.user["id"], sid, cid)
-    flash(f"密码已重置为 {password}")
-    return redirect(url_for("student_detail", cid=cid, sid=sid))
-
-
 # ---------- 老师：考试（只录分数，不做 AI 批阅） ----------
 def own_exam(eid):
     exam = get_db().execute("SELECT * FROM exams WHERE id=?", (eid,)).fetchone()
@@ -1721,7 +1582,7 @@ def submission_grade(sid):
     if not sub:
         abort(404)
     hw = db.execute("SELECT * FROM lectures WHERE id=?", (sub["lecture_id"],)).fetchone()
-    own_course(hw["course_id"])
+    course = own_course(hw["course_id"])
     if not hw["answer_pdf"]:
         flash("请先上传教师版标准答案 PDF，再开始批阅。")
         return redirect(url_for("lecture_detail", hid=hw["id"]))
@@ -1742,7 +1603,8 @@ def submission_grade(sid):
     try:
         gen = run_grading(g.user["id"], sub["file_path"], hw["answer_pdf"],
                           scope=_scope_instruction(hw),
-                          answer_pages=_page_list(hw["answer_pages"]))
+                          answer_pages=_page_list(hw["answer_pages"]),
+                          prompt=_prompt_content("grade", course["grade_prompt_id"]))
     finally:
         with _GRADING_LOCK:
             _GRADING.discard(sid)
@@ -1824,6 +1686,12 @@ def submission_review_save(sid):
                 request.form.get("overall", "").strip(),
                 f"{g.user['display_name']} 逐题批改", sid))
     db.commit()
+    if (request.form.get("then") or "") == "report":
+        pending = db.execute("SELECT COUNT(*) c FROM questions WHERE submission_id=? AND reviewed=0",
+                             (sid,)).fetchone()["c"]
+        if pending:
+            flash(f"生成批阅报告前需要人工审核每一道题，还有 {pending} 题未审核")
+            return redirect(url_for("submission_review", sid=sid))
     try:
         generate_report(db, sid, g.user["id"], reuse=True)
     except Exception:  # 报告刷新失败不影响批改保存
@@ -1897,6 +1765,126 @@ def plan_delete(pid):
     return redirect(url_for("course_detail", cid=plan["course_id"]))
 
 
+# ---------- 老师：我的提示词 ----------
+@app.route("/prompts")
+@role_required("teacher")
+def prompts_page():
+    db = get_db()
+    defaults = db.execute("SELECT * FROM prompts WHERE is_default=1 ORDER BY kind").fetchall()
+    mine = db.execute("SELECT * FROM prompts WHERE teacher_id=? ORDER BY kind, id DESC",
+                      (g.user["id"],)).fetchall()
+    return render_template("prompts.html", defaults=defaults, mine=mine,
+                           kind_label=PROMPT_KIND_LABEL)
+
+
+@app.route("/prompts/create", methods=["POST"])
+@role_required("teacher")
+def prompt_create():
+    kind = request.form.get("kind", "")
+    name = request.form.get("name", "").strip()
+    content = request.form.get("content", "").strip()
+    if kind not in PROMPT_KIND_LABEL:
+        flash("提示词类型不合法")
+    elif not name or not content:
+        flash("名称和内容都不能为空")
+    else:
+        db = get_db()
+        db.execute("INSERT INTO prompts(teacher_id,kind,name,content) VALUES(?,?,?,?)",
+                   (g.user["id"], kind, name[:60], content))
+        db.commit()
+        log.info("新建提示词 user=%s#%s kind=%s name=%s",
+                 g.user["username"], g.user["id"], kind, name)
+        flash(f"已新建{PROMPT_KIND_LABEL[kind]}提示词「{name}」")
+    return redirect(url_for("prompts_page"))
+
+
+def _editable_prompt(pid):
+    """系统内置提示词不可改；别人的提示词不可改。"""
+    row = get_db().execute("SELECT * FROM prompts WHERE id=?", (pid,)).fetchone()
+    if not row:
+        abort(404)
+    if row["is_default"]:
+        flash("系统内置提示词不可修改，请先复制一份再改")
+        return None
+    if row["teacher_id"] != g.user["id"]:
+        abort(403)
+    return row
+
+
+@app.route("/prompts/<oid:pid>/save", methods=["POST"])
+@role_required("teacher")
+def prompt_save(pid):
+    row = _editable_prompt(pid)
+    if row is None:
+        return redirect(url_for("prompts_page"))
+    name = request.form.get("name", "").strip()[:60] or row["name"]
+    content = request.form.get("content", "").strip()
+    if not content:
+        flash("提示词内容不能为空")
+        return redirect(url_for("prompts_page"))
+    db = get_db()
+    db.execute("UPDATE prompts SET name=?, content=?, updated_at=CURRENT_TIMESTAMP "
+               "WHERE id=?", (name, content, pid))
+    db.commit()
+    flash(f"提示词「{name}」已保存")
+    return redirect(url_for("prompts_page"))
+
+
+@app.route("/prompts/<oid:pid>/copy", methods=["POST"])
+@role_required("teacher")
+def prompt_copy(pid):
+    """复制成自己的副本，便于在副本上随意修改、测试。"""
+    db = get_db()
+    row = db.execute("SELECT * FROM prompts WHERE id=?", (pid,)).fetchone()
+    if not row:
+        abort(404)
+    if not row["is_default"] and row["teacher_id"] != g.user["id"]:
+        abort(403)
+    name = f"{row['name']}（副本）"[:60]
+    db.execute("INSERT INTO prompts(teacher_id,kind,name,content) VALUES(?,?,?,?)",
+               (g.user["id"], row["kind"], name, row["content"]))
+    db.commit()
+    flash(f"已复制为「{name}」，可以自由修改")
+    return redirect(url_for("prompts_page"))
+
+
+@app.route("/prompts/<oid:pid>/delete", methods=["POST"])
+@role_required("teacher")
+def prompt_delete(pid):
+    row = _editable_prompt(pid)
+    if row is None:
+        return redirect(url_for("prompts_page"))
+    db = get_db()
+    # 引用了这条提示词的课程回落到系统默认提示词
+    db.execute("UPDATE courses SET grade_prompt_id=0 WHERE grade_prompt_id=?", (pid,))
+    db.execute("UPDATE courses SET report_prompt_id=0 WHERE report_prompt_id=?", (pid,))
+    db.execute("DELETE FROM prompts WHERE id=?", (pid,))
+    db.commit()
+    flash(f"提示词「{row['name']}」已删除")
+    return redirect(url_for("prompts_page"))
+
+
+@app.route("/course/<oid:cid>/prompts", methods=["POST"])
+@role_required("teacher")
+def course_prompts_save(cid):
+    """为整门课程选定批改 / 报告提示词。"""
+    course = own_course(cid)
+    db = get_db()
+    picked = {}
+    for field, kind in (("grade_prompt_id", "grade"), ("report_prompt_id", "report")):
+        pid = request.form.get(field, type=int) or 0
+        allowed = {r["id"] for r in _prompt_options(cid, kind)}
+        if pid and pid not in allowed:
+            flash("所选提示词不在本课程可用范围内，已保留原设置")
+            pid = course[field] or 0
+        picked[field] = pid
+    db.execute("UPDATE courses SET grade_prompt_id=?, report_prompt_id=? WHERE id=?",
+               (picked["grade_prompt_id"], picked["report_prompt_id"], cid))
+    db.commit()
+    flash("本课程的提示词配置已更新")
+    return redirect(url_for("course_detail", cid=cid))
+
+
 # ---------- 老师：AI 设置 ----------
 @app.route("/settings", methods=["GET", "POST"])
 @role_required("teacher")
@@ -1905,7 +1893,7 @@ def settings_page():
         if request.form.get("demo_only"):
             save_setting(g.user["id"], "ai_demo", "1" if request.form.get("ai_demo") else "")
         else:
-            for k in ("ai_api_url", "ai_api_key", "ai_model", "ai_prompt"):
+            for k in ("ai_api_url", "ai_api_key", "ai_model"):
                 if ENV_AI_SETTINGS.get(k):
                     continue  # 已由环境变量注入，页面设置不覆盖，也不写库
                 value = request.form.get(k, "").strip()
@@ -1918,7 +1906,7 @@ def settings_page():
         flash("已保存")
         return redirect(url_for("settings_page"))
     cfg = {k: get_setting(g.user["id"], k)
-           for k in ("ai_api_url", "ai_api_key", "ai_model", "ai_prompt", "ai_demo", "ai_offpeak_only")}
+           for k in ("ai_api_url", "ai_api_key", "ai_model", "ai_demo", "ai_offpeak_only")}
     return render_template("settings.html", cfg=cfg, env_keys=[k for k, v in ENV_AI_SETTINGS.items() if v],
                            model_presets=MODEL_PRESETS,
                            est_tokens_input=EST_TOKENS_INPUT,
@@ -2118,8 +2106,12 @@ def _build_summary(questions, weak_points, evaluation, errors):
     }
 
 
-def run_grading(teacher_id, file_name, answer_pdf="", scope="", answer_pages=None):
-    """批阅入口：学生作业与标准答案整份交给支持 PDF 的模型，一次返回逐题结果。"""
+def run_grading(teacher_id, file_name, answer_pdf="", scope="", answer_pages=None,
+                prompt=""):
+    """批阅入口：学生作业与标准答案整份交给支持 PDF 的模型，一次返回逐题结果。
+
+    prompt 为本课程选定的批阅提示词正文；为空时用系统内置默认提示词。
+    """
     if get_setting(teacher_id, "ai_demo") == "1":
         questions = demo_questions()
         return {"questions": questions,
@@ -2133,14 +2125,12 @@ def run_grading(teacher_id, file_name, answer_pdf="", scope="", answer_pages=Non
         return {"questions": [], "summary": {}, "errors": [],
                 "error": "尚未配置 AI 接口。可以先勾选「演示模式」体验完整流程，或到「AI 设置」填写接口地址、密钥与模型。"}
 
-    extra = get_setting(teacher_id, "ai_prompt").strip()
-    if scope:
-        extra = (extra + "\n" if extra else "") + scope
+    extra = scope or ""
     gen = grade_pdf_submission(
         os.path.join(UPLOAD_DIR, file_name),
         os.path.join(UPLOAD_DIR, answer_pdf) if answer_pdf else "",
         api_url, api_key, model,
-        extra=extra, answer_pages=answer_pages)
+        extra=extra, answer_pages=answer_pages, prompt=prompt)
     gen["summary"] = _build_summary(gen["questions"], gen.get("weak_points") or [],
                                     gen.get("evaluation", ""), gen.get("errors") or [])
     return gen
@@ -2325,9 +2315,14 @@ def generate_report(db, sub_id, teacher_id, reuse=False):
             api_url = get_setting(teacher_id, "ai_api_url").rstrip("/")
             api_key = get_setting(teacher_id, "ai_api_key")
             model = get_setting(teacher_id, "ai_model")
+            course = db.execute("SELECT c.report_prompt_id FROM courses c "
+                                "JOIN lectures l ON l.id=c.id WHERE l.id=?",
+                                (sub["lecture_id"],)).fetchone()
             if api_url and api_key and model:
-                detail = ai_report_comment(questions, summary.get("weak_points") or [],
-                                           summary.get("evaluation", ""), api_url, api_key, model)
+                detail = ai_report_comment(
+                    questions, summary.get("weak_points") or [],
+                    summary.get("evaluation", ""), api_url, api_key, model,
+                    prompt=_prompt_content("report", course["report_prompt_id"] if course else 0))
     try:
         stamp = datetime.strptime(str(sub["created_at"])[:10], "%Y-%m-%d")
         date_label = f"{stamp.month}月{stamp.day}日"
@@ -2391,7 +2386,7 @@ def submission_report_publish(sid):
 def submission_report_comment(sid):
     """全部题目复核完成后，用 AI 重写一份总评，回填到逐题核对页的文本框继续人工修改。"""
     db = get_db()
-    sub, hw, _ = own_submission(sid)
+    sub, hw, course = own_submission(sid)
     questions = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
                            (sid,)).fetchall()
     if not questions:
@@ -2406,7 +2401,8 @@ def submission_report_comment(sid):
         return {"ok": False, "error": "尚未配置 AI 接口，无法生成总评"}, 400
     summary = _json_or_none(sub["ai_summary"]) or {}
     detail = ai_report_comment(questions, summary.get("weak_points") or [],
-                               summary.get("evaluation", ""), api_url, api_key, model)
+                               summary.get("evaluation", ""), api_url, api_key, model,
+                               prompt=_prompt_content("report", course["report_prompt_id"]))
     if not detail:
         return {"ok": False, "error": "AI 生成总评失败，请稍后重试"}, 502
     db.execute("UPDATE submissions SET report_detail=? WHERE id=?",

@@ -176,9 +176,6 @@
         实际效果差异更多取决于你愿意花多少钱。
       </p>
     </details>
-    <label>额外要求（可选，会追加到批阅提示词后面）
-      <textarea name="ai_prompt" rows="4" placeholder="如：按题号逐题批阅；有机题要识别结构简式。">{{ cfg.ai_prompt }}</textarea>
-    </label>
     <label class="check-line">
       <input type="checkbox" name="ai_demo" value="1" {% if cfg.ai_demo == '1' %}checked{% endif %}
              style="width:auto">
@@ -200,5 +197,9 @@
     <button class="small">测试连接</button>
     <span class="muted small">保存后点这里，确认 Key 是否可用</span>
   </form>
+  <p class="muted small" style="margin-top:12px">
+    批改作业与生成报告所用的提示词已独立管理：<a href="{{ url_for('prompts_page') }}">我的提示词</a>，
+    可在具体课程页为每门课程选择使用哪一条。
+  </p>
 </div>
 {% endblock %}

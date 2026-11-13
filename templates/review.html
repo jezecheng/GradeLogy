@@ -147,11 +147,22 @@
     </div>
     <div class="save-bar">
       <button type="submit">保存并发布给学生</button>
-      <button type="submit" name="then" value="report" class="ghost">生成批阅报告</button>
+      <button type="submit" name="then" value="report" id="gen-report"
+              class="ghost{% if not all_reviewed %} is-disabled{% endif %}"
+              data-blocked="{{ 0 if all_reviewed else 1 }}">生成批阅报告</button>
       <span class="muted small">分数与评语已按 AI 建议预填，可直接修改。{% if sub.status != '已批改' %}保存前学生看不到本次结果；{% endif %}保存后学生即可看到每题判定、得分、评语与总评。</span>
     </div>
   </form>
 </div>
+
+<dialog id="report-blocked" class="modal">
+  <h2>还不能生成批阅报告</h2>
+  <p class="muted">生成批阅报告前需要人工审核每一道题：请在每题下方点「标记已审核」。
+    当前还有 <strong id="report-blocked-count">{{ n_total - n_reviewed }}</strong> 题未审核。</p>
+  <div class="modal-actions">
+    <button type="button" data-dialog-close>知道了</button>
+  </div>
+</dialog>
 {% endif %}
 
 <aside id="pdf-panel" class="pdf-panel" hidden>
@@ -191,12 +202,17 @@
   var countEl = document.getElementById('reviewed-count');
   var genBtn = document.getElementById('gen-overall');
   var genHint = document.getElementById('gen-overall-hint');
+  var reportBtn = document.getElementById('gen-report');
 
   function syncProgress() {
     var done = document.querySelectorAll('.reviewed-badge[data-reviewed="1"]').length;
     if (countEl) countEl.textContent = done;
     var all = total > 0 && done === total;
     if (genBtn) genBtn.disabled = !all;
+    if (reportBtn) {
+      reportBtn.dataset.blocked = all ? '0' : '1';
+      reportBtn.classList.toggle('is-disabled', !all);
+    }
     if (genHint) {
       genHint.textContent = all
         ? '已全部复核，可用 AI 重写总评（生成后仍可继续修改）'
@@ -267,6 +283,21 @@
   syncProgress();
 })();
 
+// 未全部复核时，「生成批阅报告」呈禁用样式；点击只弹提示，不提交
+(function () {
+  var dlg = document.getElementById('report-blocked');
+  if (!dlg) return;
+  dlg.querySelectorAll('[data-dialog-close]').forEach(function (b) {
+    b.addEventListener('click', function () { dlg.close(); });
+  });
+  dlg.addEventListener('click', function (e) { if (e.target === dlg) dlg.close(); });
+  window.showReportBlocked = function (remain) {
+    var el = document.getElementById('report-blocked-count');
+    if (el && remain != null) el.textContent = remain;
+    if (!dlg.open) dlg.showModal();
+  };
+})();
+
 // 保存/生成报告：生成本身较慢，提交后禁用按钮并显示小圆环；已有报告时确认覆盖
 (function () {
   var grade = document.querySelector('.review-grade-form');
@@ -277,9 +308,16 @@
   }
   var form = document.getElementById('review-form');
   if (!form) return;
+  var total = {{ n_total }};
   form.addEventListener('submit', function (e) {
     var btn = e.submitter;
     if (!btn) return;
+    if (btn.value === 'report' && btn.dataset.blocked === '1') {
+      e.preventDefault();
+      var done = document.querySelectorAll('.reviewed-badge[data-reviewed="1"]').length;
+      showReportBlocked(total - done);
+      return;
+    }
     if (btn.value === 'report' && form.dataset.hasReport === '1' && form.dataset.confirmed !== '1') {
       e.preventDefault();
       confirmDialog('生成批阅报告会覆盖现有报告内容（含手工修改的部分），确定继续吗？',

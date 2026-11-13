@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+{% block title %}我的提示词{% endblock %}
+{% block content %}
+<style>
+.prompt-item { border-bottom: 1px solid #eef0f3; }
+.prompt-item > summary { list-style: none; cursor: pointer; padding: 12px 2px;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.prompt-item > summary::-webkit-details-marker { display: none; }
+.prompt-item > summary::before { content: "▸"; color: #8a8f99; font-size: 12px;
+  transition: transform .15s; }
+.prompt-item[open] > summary::before { transform: rotate(90deg); }
+.prompt-item > summary:hover { background: #fafbfc; }
+.prompt-item[open] > summary { border-bottom: 1px dashed #eef0f3; }
+.prompt-item .prompt-name { font-weight: 600; font-size: 15px; }
+.prompt-body { padding: 12px 2px 16px; }
+.prompt-body textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px; line-height: 1.6; }
+.prompt-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.prompt-actions form { margin: 0; }
+.sys-badge { background: #eef2ff; color: #1456f0; border-radius: 999px; padding: 2px 10px; font-size: 12px; }
+.mine-badge { background: #e6f6ec; color: #18794e; border-radius: 999px; padding: 2px 10px; font-size: 12px; }
+</style>
+
+<h1>我的提示词</h1>
+<p class="muted">
+  这里管理 AI 批改作业与生成批改报告所用的提示词。系统内置两条默认提示词，全局可用、不可删除；
+  建议复制成自己的副本后再修改，改到满意后到具体课程页选择本课程使用哪一条。
+</p>
+<p class="muted small">
+  提示词只写「规则与要求」即可：JSON 输出格式由系统自动追加，保证批阅结果能被程序解析。
+</p>
+
+{% for kind in ['grade', 'report'] %}
+<div class="card">
+  <div class="card-head">
+    <h2>{{ kind_label[kind] }}提示词</h2>
+    <button type="button" class="small" data-dialog-open="prompt-dialog-{{ kind }}">＋ 新建</button>
+  </div>
+
+  <dialog id="prompt-dialog-{{ kind }}" class="modal">
+    <form method="post" action="{{ url_for('prompt_create') }}" class="stack-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <input type="hidden" name="kind" value="{{ kind }}">
+      <h2>新建{{ kind_label[kind] }}提示词</h2>
+      <label>名称
+        <input name="name" placeholder="如：{{ '严格按配平扣分' if kind == 'grade' else '鼓励式评语' }}" required>
+      </label>
+      <label>提示词内容
+        <textarea name="content" rows="12" required
+                  placeholder="写清批阅/评语的规则与要求；不需要写 JSON 输出格式。"></textarea>
+      </label>
+      <p class="muted small">保存后可在「具体课程 → 提示词配置」里选用；建议先在副本上测试效果。</p>
+      <div class="modal-actions">
+        <button type="button" class="ghost" data-dialog-close>取消</button>
+        <button type="submit">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  {% set kind_defaults = defaults|selectattr('kind', 'equalto', kind)|list %}
+  {% set kind_mine = mine|selectattr('kind', 'equalto', kind)|list %}
+  {% if not kind_defaults and not kind_mine %}
+  <p class="muted">还没有提示词，点右上角「＋ 新建」。</p>
+  {% endif %}
+
+  {% for p in kind_defaults %}
+  <details class="prompt-item">
+    <summary>
+      <span class="prompt-name">{{ p.name }}</span>
+      <span class="sys-badge">系统内置</span>
+      <span class="muted small">不可删除、不可修改</span>
+    </summary>
+    <div class="prompt-body">
+      <textarea rows="10" readonly>{{ p.content }}</textarea>
+      <div class="prompt-actions">
+        <form method="post" action="{{ url_for('prompt_copy', pid=p.id) }}">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <button class="small">复制为我的提示词</button>
+        </form>
+        <span class="muted small">复制后可自由修改、测试。</span>
+      </div>
+    </div>
+  </details>
+  {% endfor %}
+
+  {% for p in kind_mine %}
+  <details class="prompt-item">
+    <summary>
+      <span class="prompt-name">{{ p.name }}</span>
+      <span class="mine-badge">我的</span>
+      <span class="muted small">{{ p.updated_at }}</span>
+    </summary>
+    <div class="prompt-body">
+      <form method="post" action="{{ url_for('prompt_save', pid=p.id) }}" class="stack-form">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <label>名称
+          <input name="name" value="{{ p.name }}" required>
+        </label>
+        <label>提示词内容
+          <textarea name="content" rows="12" required>{{ p.content }}</textarea>
+        </label>
+        <div class="prompt-actions">
+          <button type="submit">保存修改</button>
+        </div>
+      </form>
+      <div class="prompt-actions">
+        <form method="post" action="{{ url_for('prompt_copy', pid=p.id) }}">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <button class="small">复制一份</button>
+        </form>
+        <form method="post" action="{{ url_for('prompt_delete', pid=p.id) }}"
+              onsubmit="return confirm('删除提示词「{{ p.name }}」？引用了它的课程会回落到系统默认提示词。')">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <button class="danger small">删除</button>
+        </form>
+      </div>
+    </div>
+  </details>
+  {% endfor %}
+</div>
+{% endfor %}
+
+<script>
+(function () {
+  document.querySelectorAll('[data-dialog-open]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var dlg = document.getElementById(btn.dataset.dialogOpen);
+      if (!dlg) return;
+      dlg.showModal();
+      var first = dlg.querySelector('input:not([type=hidden]), textarea');
+      if (first) first.focus();
+    });
+  });
+  document.querySelectorAll('dialog.modal').forEach(function (dlg) {
+    dlg.querySelectorAll('[data-dialog-close]').forEach(function (btn) {
+      btn.addEventListener('click', function () { dlg.close(); });
+    });
+    dlg.addEventListener('click', function (e) { if (e.target === dlg) dlg.close(); });
+  });
+})();
+</script>
+{% endblock %}

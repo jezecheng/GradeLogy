@@ -99,6 +99,7 @@ button:hover { background: #0e45c8; }
 button.small { padding: 4px 10px; font-size: 13px; }
 button.danger { background: #e5484d; }
 button.danger:hover { background: #c93338; }
+button.is-disabled { opacity: .45; cursor: not-allowed; }
 .btn-link { font-size: 13px; }
 button.btn-link { background: none; border: none; padding: 0; cursor: pointer;
   color: var(--link, #2f6fb5); text-decoration: underline; }
@@ -108,6 +109,10 @@ table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 14px
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eef0f3; vertical-align: top; }
 th { color: #8a8f99; font-weight: 500; font-size: 13px; }
 td.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+th.right, td.right { text-align: right; }
+td.right > * + * { margin-left: 10px; }
+.nowrap { white-space: nowrap; }
+.danger-text { color: #c93338; }
 
 .sub-card { border: 1px solid #eef0f3; border-radius: 8px; padding: 14px; margin-bottom: 14px; }
 .sub-head { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }

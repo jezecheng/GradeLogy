@@ -3,10 +3,11 @@
 
 支持：
 - 编码：UTF-8（含 Excel 导出的 BOM）/ GB18030（中文 Excel 默认）
-- 表头：用户名/账号/登录名、姓名/名字、真实姓名、学籍号/学号、密码/初始密码；
-  无表头时按「用户名,姓名[,密码]」（真实姓名与学籍号需用表头提供）
-- 课程批量格式：课程/课程名称/班级 + 上述列，按「课程,用户名,姓名[,密码]」
-- 校验：用户名 2-32 位字母数字及 _ . -；密码至少 6 位；文件内重复行报错
+- 表头：用户名/账号/登录名、姓名/名字、真实姓名、学籍号/学号；
+  无表头时按「用户名,姓名」（真实姓名与学籍号需用表头提供）
+- 课程批量格式：课程/课程名称/班级 + 上述列，按「课程,用户名,姓名」
+- 校验：用户名 2-32 位字母数字及 _ . -；文件内重复行报错
+- 只负责解析名单，账号统一由管理员创建；解析结果用于把已有账号加入课程
 
 CLI：
     python -m utilities.roster --file students.csv
@@ -19,7 +20,6 @@ import re
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{1,31}$")
 STUDENT_NO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
-DEFAULT_PASSWORD = "123456"
 MAX_ROWS = 1000
 MAX_COURSE_ROWS = 2000
 
@@ -27,7 +27,6 @@ USERNAME_HEADERS = {"用户名", "账号", "登录名", "username", "user", "acc
 NAME_HEADERS = {"姓名", "名字", "学生姓名", "name", "display_name"}
 REALNAME_HEADERS = {"真实姓名", "real_name", "realname"}
 STUDENTNO_HEADERS = {"学籍号", "学号", "student_no", "studentno"}
-PASSWORD_HEADERS = {"密码", "初始密码", "password", "passwd"}
 COURSE_HEADERS = {"课程", "课程名称", "班级", "course"}
 
 
@@ -52,8 +51,8 @@ def _pick(header, names):
 def parse_csv(raw):
     """解析 CSV 字节流，返回 (rows, errors)。
 
-    rows: [{"username","name","real_name","student_no","password","line"}]
-    表头可含 用户名 / 姓名 / 真实姓名 / 学籍号 / 密码；无表头时按「用户名,姓名[,密码]」，
+    rows: [{"username","name","real_name","student_no","line"}]
+    表头可含 用户名 / 姓名 / 真实姓名 / 学籍号；无表头时按「用户名,姓名」，
     真实姓名与学籍号需通过表头提供。
     """
     text = _decode(raw)
@@ -61,7 +60,7 @@ def parse_csv(raw):
     rows, errors = [], []
     seen = set()
     seen_no = set()
-    cols = None  # (username, name, real_name, student_no, password)
+    cols = None  # (username, name, real_name, student_no)
     for line, cells in enumerate(reader, start=1):
         cells = [(c or "").strip() for c in cells]
         if not any(cells):
@@ -70,9 +69,9 @@ def parse_csv(raw):
             u = _pick(cells, USERNAME_HEADERS)
             if u is not None:
                 cols = (u, _pick(cells, NAME_HEADERS), _pick(cells, REALNAME_HEADERS),
-                        _pick(cells, STUDENTNO_HEADERS), _pick(cells, PASSWORD_HEADERS))
+                        _pick(cells, STUDENTNO_HEADERS))
                 continue
-            cols = (0, 1, None, None, 2)
+            cols = (0, 1, None, None)
         if len(rows) >= MAX_ROWS:
             errors.append(f"超过单次导入上限 {MAX_ROWS} 行，请拆分文件")
             break
@@ -84,7 +83,6 @@ def parse_csv(raw):
         name = cell(cols[1]) or username
         real_name = cell(cols[2]) or name
         student_no = cell(cols[3])
-        password = cell(cols[4]) or DEFAULT_PASSWORD
         if not username:
             errors.append(f"第 {line} 行：用户名为空")
             continue
@@ -97,9 +95,6 @@ def parse_csv(raw):
         if student_no and not STUDENT_NO_RE.match(student_no):
             errors.append(f"第 {line} 行：学籍号 {student_no} 不合法（1-32 位字母、数字或 _ . -）")
             continue
-        if password and len(password) < 6:
-            errors.append(f"第 {line} 行：密码至少 6 位")
-            continue
         key = username.lower()
         if key in seen:
             errors.append(f"第 {line} 行：用户名 {username} 在文件中重复")
@@ -111,24 +106,24 @@ def parse_csv(raw):
         if student_no:
             seen_no.add(student_no.lower())
         rows.append({"username": username, "name": name, "real_name": real_name,
-                     "student_no": student_no, "password": password, "line": line})
+                     "student_no": student_no, "line": line})
     if cols is None:
         errors.append("文件为空")
     return rows, errors
 
 
 def parse_course_csv(raw):
-    """解析「课程,用户名,姓名[,密码]」CSV，用于一次创建多门课程并导入学生。
+    """解析「课程,用户名,姓名」CSV，用于一次创建多门课程并加入已有学生账号。
 
     表头还可含「真实姓名」「学籍号」。返回 (rows, errors)，rows 元素为
-    {"course","username","name","real_name","student_no","password","line"}。
+    {"course","username","name","real_name","student_no","line"}。
     """
     text = _decode(raw)
     reader = csv.reader(io.StringIO(text))
     rows, errors = [], []
     seen = set()
     seen_no = set()
-    cols = None  # (course, username, name, real_name, student_no, password)
+    cols = None  # (course, username, name, real_name, student_no)
     for line, cells in enumerate(reader, start=1):
         cells = [(c or "").strip() for c in cells]
         if not any(cells):
@@ -137,10 +132,9 @@ def parse_course_csv(raw):
             c = _pick(cells, COURSE_HEADERS)
             if c is not None:
                 cols = (c, _pick(cells, USERNAME_HEADERS), _pick(cells, NAME_HEADERS),
-                        _pick(cells, REALNAME_HEADERS), _pick(cells, STUDENTNO_HEADERS),
-                        _pick(cells, PASSWORD_HEADERS))
+                        _pick(cells, REALNAME_HEADERS), _pick(cells, STUDENTNO_HEADERS))
                 continue
-            cols = (0, 1, 2, None, None, 3)
+            cols = (0, 1, 2, None, None)
         if len(rows) >= MAX_COURSE_ROWS:
             errors.append(f"超过单次导入上限 {MAX_COURSE_ROWS} 行，请拆分文件")
             break
@@ -153,7 +147,6 @@ def parse_course_csv(raw):
         name = cell(cols[2]) or username
         real_name = cell(cols[3]) or name
         student_no = cell(cols[4])
-        password = cell(cols[5]) or DEFAULT_PASSWORD
         if not course:
             errors.append(f"第 {line} 行：课程名称为空")
             continue
@@ -172,9 +165,6 @@ def parse_course_csv(raw):
         if student_no and not STUDENT_NO_RE.match(student_no):
             errors.append(f"第 {line} 行：学籍号 {student_no} 不合法（1-32 位字母、数字或 _ . -）")
             continue
-        if len(password) < 6:
-            errors.append(f"第 {line} 行：密码至少 6 位")
-            continue
         key = (course.lower(), username.lower())
         if key in seen:
             errors.append(f"第 {line} 行：课程 {course} 中的用户 {username} 重复")
@@ -186,8 +176,7 @@ def parse_course_csv(raw):
         if student_no:
             seen_no.add(student_no.lower())
         rows.append({"course": course, "username": username, "name": name,
-                     "real_name": real_name, "student_no": student_no,
-                     "password": password, "line": line})
+                     "real_name": real_name, "student_no": student_no, "line": line})
     if cols is None:
         errors.append("文件为空")
     return rows, errors
@@ -196,7 +185,7 @@ def parse_course_csv(raw):
 def main():
     ap = argparse.ArgumentParser(description="学生名单 CSV 解析预览（不写数据库）")
     ap.add_argument("--file", required=True, help="CSV 文件路径")
-    ap.add_argument("--courses", action="store_true", help="按「课程,用户名,姓名[,密码]」格式解析")
+    ap.add_argument("--courses", action="store_true", help="按「课程,用户名,姓名」格式解析")
     args = ap.parse_args()
     with open(args.file, "rb") as f:
         rows, errors = parse_course_csv(f.read()) if args.courses else parse_csv(f.read())
@@ -205,8 +194,7 @@ def main():
         prefix = f"{r['course']} | " if args.courses else ""
         no = f" | 学籍号 {r['student_no']}" if r["student_no"] else ""
         print(f"  第 {r['line']} 行 | {prefix}{r['username']} | {r['name']} | "
-              f"真实姓名 {r['real_name']}{no} | "
-              f"{'默认密码' if r['password'] == DEFAULT_PASSWORD else '自定义密码'}")
+              f"真实姓名 {r['real_name']}{no}")
     for e in errors:
         print("  !", e)
     raise SystemExit(1 if errors else 0)

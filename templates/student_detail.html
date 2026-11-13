@@ -55,19 +55,12 @@
 
 <div class="card">
   <h2>学生资料</h2>
-  <form method="post" action="{{ url_for('student_update', cid=course.id, sid=student.id) }}" class="stack-form">
-    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <label>姓名 <input name="display_name" value="{{ student.display_name }}" required></label>
-    <label>真实姓名 <input name="real_name" value="{{ student.real_name or '' }}"></label>
-    <label>学籍号 <input name="student_no" value="{{ student.student_no or '' }}"></label>
-    <button type="submit">保存资料</button>
-  </form>
-  <form method="post" action="{{ url_for('student_reset_password', cid=course.id, sid=student.id) }}"
-        class="inline-form" onsubmit="return confirm('重置该学生的登录密码？')">
-    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <input name="password" placeholder="新密码（留空为 123456）" class="tiny">
-    <button class="small">重置密码</button>
-  </form>
-  <p class="muted small">登录用户名 {{ student.username }} 不可修改。</p>
+  <table>
+    <tr><th>姓名</th><td>{{ student.display_name }}</td></tr>
+    <tr><th>真实姓名</th><td>{{ student.real_name or '—' }}</td></tr>
+    <tr><th>学籍号</th><td>{{ student.student_no or '—' }}</td></tr>
+    <tr><th>登录用户名</th><td>{{ student.username }}</td></tr>
+  </table>
+  <p class="muted small">学生主数据与登录密码由管理员统一维护，如需修改请联系管理员。</p>
 </div>
 {% endblock %}
