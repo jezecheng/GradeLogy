@@ -379,6 +379,54 @@ def close_db(_=None):
         db.close()
 
 
+def _migrate_upload_layout(con):
+    """把旧版平铺在 uploads/ 下的附件迁入分层目录，并更新数据库引用。
+
+    新结构：
+      course_<课程>/lecture_<讲次>/              教师版、学生版讲义
+      course_<课程>/lecture_<讲次>/student_<学号>/ 学生提交的作业
+    已是新结构（含 "/"）或磁盘上找不到的文件保持原样，交给一致性检查报告。
+    该函数幂等：重复执行不会重复移动文件。
+    """
+    def move(name, course_id, lecture_id, student_id=0):
+        rel = str(name or "").replace("\\", "/").strip("/")
+        if not rel or "/" in rel:
+            return name
+        src = os.path.join(UPLOAD_DIR, rel)
+        if not os.path.isfile(src):
+            return name
+        parts = [f"course_{course_id}", f"lecture_{lecture_id}"]
+        if student_id:
+            parts.append(f"student_{student_id}")
+        target_dir = os.path.join(UPLOAD_DIR, *parts)
+        os.makedirs(target_dir, exist_ok=True)
+        stem, ext = os.path.splitext(rel)
+        dst_name, n = rel, 1
+        while os.path.exists(os.path.join(target_dir, dst_name)):
+            dst_name = f"{stem}_{n}{ext}"
+            n += 1
+        shutil.move(src, os.path.join(target_dir, dst_name))
+        return f"{'/'.join(parts)}/{dst_name}"
+
+    moved = 0
+    for r in con.execute("SELECT id, course_id, answer_pdf, student_pdf FROM lectures"):
+        lid, cid = r[0], r[1]
+        answer, student = move(r[2], cid, lid), move(r[3], cid, lid)
+        if answer != r[2] or student != r[3]:
+            con.execute("UPDATE lectures SET answer_pdf=?, student_pdf=? WHERE id=?",
+                        (answer, student, lid))
+            moved += 1
+    for r in con.execute("""
+            SELECT s.id, s.file_path, s.student_id, h.course_id, h.id
+            FROM submissions s JOIN lectures h ON h.id=s.lecture_id"""):
+        path = move(r[1], r[3], r[4], r[2])
+        if path != r[1]:
+            con.execute("UPDATE submissions SET file_path=? WHERE id=?", (path, r[0]))
+            moved += 1
+    if moved:
+        log.info("附件目录结构迁移：更新 %s 条记录", moved)
+
+
 def init_db():
     # 旧版（无账号体系）数据库与本版不兼容，备份后重建；旧库当时仅有测试数据
     con = sqlite3.connect(DB_PATH)
@@ -473,6 +521,11 @@ def init_db():
         con.execute("INSERT INTO users(username,password_hash,display_name,role,must_change_password) "
                     "VALUES(?,?,?,?,1)",
                     ("admin", generate_password_hash("admin123"), "系统管理员", "admin"))
+    # 附件目录结构：把旧版平铺文件迁入 course_<id>/lecture_<id>[/student_<id>]/
+    try:
+        _migrate_upload_layout(con)
+    except OSError:
+        log.exception("附件目录迁移失败，旧路径仍可用")
     con.commit()
     con.close()
     try:
@@ -1067,7 +1120,8 @@ def course_detail(cid):
           (SELECT COUNT(*) FROM submissions s WHERE s.lecture_id=h.id) AS n_subs,
           (SELECT COUNT(*) FROM enrollments e JOIN users u ON u.id=e.student_id
             WHERE e.course_id=h.course_id AND u.active=1) AS n_students
-        FROM lectures h WHERE h.course_id=? ORDER BY h.id""", (cid,)).fetchall()
+        FROM lectures h WHERE h.course_id=?
+        ORDER BY h.title COLLATE NOCASE, h.id""", (cid,)).fetchall()
     plans = db.execute("SELECT * FROM lesson_plans WHERE course_id=? ORDER BY updated_at DESC",
                        (cid,)).fetchall()
     exams = db.execute("""
@@ -1213,21 +1267,27 @@ def lecture_create(cid):
     title = request.form.get("title", "").strip()
     if not title:
         return redirect(url_for("course_detail", cid=cid))
-    def take(field):
-        f = request.files.get(field)
-        return save_upload(f) if f and f.filename and allowed_file(f.filename) else ""
-
+    # 讲次 id 决定附件目录，先校验文件，建好讲次后再落盘
+    pending = {}
     try:
-        answer_pdf, student_pdf = take("answer_pdf"), take("student_pdf")
+        for field in ("answer_pdf", "student_pdf"):
+            f = request.files.get(field)
+            if f and f.filename and allowed_file(f.filename):
+                pending[field] = (f, _validate_upload(f))
     except ValueError as e:
         flash(str(e))
         return redirect(url_for("course_detail", cid=cid))
 
     db = get_db()
-    db.execute("INSERT INTO lectures(course_id,title,description,deadline,answer_pdf,student_pdf) "
-               "VALUES(?,?,?,?,?,?)",
-               (cid, title, request.form.get("description", "").strip(),
-                request.form.get("deadline", ""), answer_pdf, student_pdf))
+    hid = db.execute("INSERT INTO lectures(course_id,title,description,deadline) "
+                     "VALUES(?,?,?,?)",
+                     (cid, title, request.form.get("description", "").strip(),
+                      request.form.get("deadline", ""))).lastrowid
+    paths = {"answer_pdf": "", "student_pdf": ""}
+    for field, (f, fname) in pending.items():
+        paths[field] = save_upload(f, cid, hid, filename=fname)
+    db.execute("UPDATE lectures SET answer_pdf=?, student_pdf=? WHERE id=?",
+               (paths["answer_pdf"], paths["student_pdf"], hid))
     db.commit()
     return redirect(url_for("course_detail", cid=cid))
 
@@ -1320,7 +1380,7 @@ def lecture_upload_for(hid):
         flash("请上传 png / jpg / webp / pdf 文件")
         return redirect(url_for("lecture_detail", hid=hid))
     try:
-        name = save_upload(f)
+        name = save_upload(f, course["id"], hid, student_id)
     except ValueError as e:
         flash(str(e))
         return redirect(url_for("lecture_detail", hid=hid))
@@ -1362,7 +1422,7 @@ def lecture_answer(hid):
     f = request.files.get("answer_pdf")
     if f and f.filename and allowed_file(f.filename):
         try:
-            name = save_upload(f)
+            name = save_upload(f, hw["course_id"], hid)
         except ValueError as e:
             flash(str(e))
             return redirect(url_for("lecture_detail", hid=hid))
@@ -1427,13 +1487,13 @@ def lecture_student_pdf(hid):
     f = request.files.get("student_pdf")
     if f and f.filename and allowed_file(f.filename):
         try:
-            name = save_upload(f)
+            name = save_upload(f, hw["course_id"], hid)
         except ValueError as e:
             flash(str(e))
             return redirect(url_for("lecture_detail", hid=hid))
         db.execute("UPDATE lectures SET student_pdf=? WHERE id=?", (name, hid))
         db.commit()
-        flash("学生版讲义已更新，学生端可下载")
+        flash("学生版讲义已更新，学生端可预览")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
@@ -1596,7 +1656,8 @@ def student_detail(cid, sid):
             ORDER BY s.id DESC LIMIT 1) AS my_status,
           (SELECT s.score FROM submissions s WHERE s.lecture_id=h.id AND s.student_id=?
             ORDER BY s.id DESC LIMIT 1) AS my_score
-        FROM lectures h WHERE h.course_id=? ORDER BY h.id""",
+        FROM lectures h WHERE h.course_id=?
+        ORDER BY h.title COLLATE NOCASE, h.id""",
         (sid, sid, sid, sid, cid)).fetchall()
     exams = db.execute("""
         SELECT x.id, x.title, x.exam_date, x.full_score, s.score, s.comment
@@ -2105,6 +2166,11 @@ def student_lecture(hid):
 @role_required("student")
 def student_home():
     db = get_db()
+    courses = db.execute("""
+        SELECT c.id, c.name, c.created_at
+        FROM courses c
+        JOIN enrollments e ON e.course_id=c.id AND e.student_id=?
+        ORDER BY c.id DESC""", (g.user["id"],)).fetchall()
     lectures = db.execute("""
         SELECT h.*, c.name AS course_name,
           (SELECT COUNT(*) FROM submissions s
@@ -2118,8 +2184,17 @@ def student_home():
         FROM lectures h
         JOIN courses c ON c.id=h.course_id
         JOIN enrollments e ON e.course_id=c.id AND e.student_id=?
-        ORDER BY h.id DESC""",
+        ORDER BY h.title COLLATE NOCASE, h.id""",
         (g.user["id"],) * 4).fetchall()
+    by_course = {}
+    for h in lectures:
+        by_course.setdefault(h["course_id"], []).append(h)
+    # 每个课程一个折叠块：作业未提交数 = 还没有任何一次提交的讲次数
+    course_groups = [{
+        "course": c,
+        "lectures": by_course.get(c["id"], []),
+        "pending": sum(1 for h in by_course.get(c["id"], []) if not h["my_subs"]),
+    } for c in courses]
     exams = db.execute("""
         SELECT x.*, c.name AS course_name, s.score, s.comment
         FROM exams x
@@ -2127,7 +2202,8 @@ def student_home():
         JOIN enrollments e ON e.course_id=c.id AND e.student_id=?
         LEFT JOIN exam_scores s ON s.exam_id=x.id AND s.student_id=?
         ORDER BY x.id DESC""", (g.user["id"], g.user["id"])).fetchall()
-    return render_template("student_home.html", lectures=lectures, exams=exams)
+    return render_template("student_home.html", course_groups=course_groups,
+                           exams=exams)
 
 
 @app.route("/student/lecture/<oid:hid>", methods=["GET", "POST"])
@@ -2141,7 +2217,7 @@ def student_lecture_page(hid):
             flash("请上传 png / jpg / webp / pdf 文件")
         else:
             try:
-                name = save_upload(f)
+                name = save_upload(f, hw["course_id"], hid, g.user["id"])
             except ValueError as e:
                 flash(str(e))
                 return redirect(url_for("student_lecture_page", hid=hid))
@@ -2179,7 +2255,16 @@ MAGIC_HEADS = {
 }
 
 
-def save_upload(file_storage):
+def _upload_rel_dir(course_id, lecture_id, student_id=0):
+    """附件在 uploads/ 下的相对目录：course/lecture[/student]。"""
+    parts = [f"course_{course_id}", f"lecture_{lecture_id}"]
+    if student_id:
+        parts.append(f"student_{student_id}")
+    return "/".join(parts)
+
+
+def _validate_upload(file_storage):
+    """校验扩展名与文件头，返回安全的落盘文件名（此时尚未写入磁盘）。"""
     orig = secure_filename(file_storage.filename or "upload")
     ext = orig.rsplit(".", 1)[1].lower() if "." in orig else "bin"
     if ext not in MAGIC_HEADS:
@@ -2189,9 +2274,17 @@ def save_upload(file_storage):
     if not any(head.startswith(sig) for sig in MAGIC_HEADS[ext]) or \
             (ext == "webp" and head[8:12] != b"WEBP"):
         raise ValueError("文件内容与扩展名不符，请重新导出后再上传")
-    fname = f"{datetime.now():%Y%m%d%H%M%S}_{secrets.token_hex(3)}_{orig or 'file.' + ext}"
-    file_storage.save(os.path.join(UPLOAD_DIR, fname))
-    return fname
+    return f"{datetime.now():%Y%m%d%H%M%S}_{secrets.token_hex(3)}_{orig or 'file.' + ext}"
+
+
+def save_upload(file_storage, course_id, lecture_id, student_id=0, filename=None):
+    """按 course/lecture[/student] 分层保存附件，返回相对路径（用 / 分隔）。"""
+    fname = filename or _validate_upload(file_storage)
+    rel_dir = _upload_rel_dir(course_id, lecture_id, student_id)
+    abs_dir = os.path.join(UPLOAD_DIR, *rel_dir.split("/"))
+    os.makedirs(abs_dir, exist_ok=True)
+    file_storage.save(os.path.join(abs_dir, fname))
+    return f"{rel_dir}/{fname}"
 
 
 def demo_questions(count=6):

@@ -5,29 +5,51 @@
 <p class="muted">{{ g.user.display_name }}（{{ g.user.username }}）</p>
 
 <h2>讲次批阅</h2>
-{% if lectures %}
-<table class="card-table">
-  <tr><th>讲次</th><th>课程</th><th>截止时间</th><th>状态</th><th>得分</th><th></th></tr>
-  {% for h in lectures %}
-  <tr>
-    <td><a href="{{ url_for('student_lecture_page', hid=h.id) }}">{{ h.title }}</a></td>
-    <td class="muted">{{ h.course_name }}</td>
-    <td class="muted">{{ (h.deadline or '').replace('T',' ') or '—' }}</td>
-    <td>
-      {% if h.my_subs %}
-        <span class="tag tag-{{ h.my_status }}">{{ h.my_status }}</span>
-      {% else %}
-        <span class="tag tag-未提交">未提交</span>
-      {% endif %}
-    </td>
-    <td>{% if h.my_status == '已批改' %}{{ h.my_score or '—' }}{% else %}—{% endif %}</td>
-    <td><a class="btn-link" href="{{ url_for('student_lecture_page', hid=h.id) }}">
-      {% if not h.my_subs %}去提交{% elif h.my_status == '已批改' %}查看批改{% else %}查看进度{% endif %}</a></td>
-  </tr>
-  {% endfor %}
-</table>
+{% if course_groups %}
+{% for group in course_groups %}
+<details class="course-frame" {% if loop.first %}open{% endif %}>
+  <summary class="course-frame-head">
+    <span class="course-frame-title">{{ group.course.name }}</span>
+    {% if group.pending %}
+    <span class="tag tag-未提交">{{ group.pending }} 份作业未提交</span>
+    {% else %}
+    <span class="tag tag-已提交">全部已提交</span>
+    {% endif %}
+  </summary>
+  {% if group.lectures %}
+  <table>
+    <tr><th>讲次</th><th>截止时间</th><th>状态</th><th>得分</th><th>讲义</th><th></th></tr>
+    {% for h in group.lectures %}
+    <tr>
+      <td><a href="{{ url_for('student_lecture_page', hid=h.id) }}">{{ h.title }}</a></td>
+      <td class="muted">{{ (h.deadline or '').replace('T',' ') or '—' }}</td>
+      <td>
+        {% if h.my_subs %}
+          <span class="tag tag-{{ h.my_status }}">{{ h.my_status }}</span>
+        {% else %}
+          <span class="tag tag-未提交">未提交</span>
+        {% endif %}
+      </td>
+      <td>{% if h.my_status == '已批改' %}{{ h.my_score or '—' }}{% else %}—{% endif %}</td>
+      <td class="small">
+        {% if h.student_pdf %}
+        <a href="{{ url_for('uploaded_file', filename=h.student_pdf) }}"
+           data-pdf-toggle data-pdf-src="{{ url_for('uploaded_file', filename=h.student_pdf) }}"
+           data-pdf-title="{{ h.title }} · 学生版讲义">预览讲义</a>
+        {% else %}<span class="muted">—</span>{% endif %}
+      </td>
+      <td><a class="btn-link" href="{{ url_for('student_lecture_page', hid=h.id) }}">
+        {% if not h.my_subs %}去提交{% elif h.my_status == '已批改' %}查看批改{% else %}查看进度{% endif %}</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">该课程暂无讲次。</p>
+  {% endif %}
+</details>
+{% endfor %}
 {% else %}
-<p class="muted">老师还没有发布讲次。如果你确实在课程名单里，请联系老师。</p>
+<p class="muted">你还没有加入任何课程。如果你确实在课程名单里，请联系老师。</p>
 {% endif %}
 
 <h2>考试成绩</h2>
@@ -48,4 +70,6 @@
 {% else %}
 <p class="muted">暂无考试成绩。</p>
 {% endif %}
+
+{% include "_pdf_panel.html" %}
 {% endblock %}

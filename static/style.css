@@ -42,6 +42,19 @@ details.scope-card[open] > summary.card-head { margin-bottom: 12px; }
 .scope-summary { margin-left: auto; }
 .scope-actions { display: flex; justify-content: flex-end; margin-bottom: 6px; }
 
+/* 学生首页：按课程折叠的讲次列表，可同时展开多个课程 */
+.course-frame { background: #fff; border-radius: 10px; padding: 0 16px; margin-bottom: 16px;
+                box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+.course-frame > summary.course-frame-head { list-style: none; cursor: pointer;
+                display: flex; align-items: center; gap: 10px; padding: 14px 0; }
+.course-frame > summary::-webkit-details-marker { display: none; }
+.course-frame > summary::before { content: "▸"; color: #8a8f99; font-size: 12px;
+                transition: transform .15s; }
+.course-frame[open] > summary::before { transform: rotate(90deg); }
+.course-frame-title { font-size: 16px; font-weight: 600; color: #1f2530; }
+.course-frame-head .tag { margin-left: auto; }
+.course-frame table { margin-bottom: 12px; }
+
 /* 教师版页码选择：缩略图网格 + 范围输入，作用类似打印时的选页 */
 .page-picker { border-top: 1px dashed #eef0f3; margin-top: 14px; padding-top: 12px; }
 .page-tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
@@ -332,3 +345,54 @@ button.btn-link:hover { text-decoration: underline; }
                      height: min(70vh, 520px); }
   .assistant-fab { right: 16px; bottom: 16px; }
 }
+
+/* ============ 移动端适配（平板 / 手机） ============ */
+/* 宽表格由 ui.js 包一层横向滚动容器，避免撑破页面 */
+.table-scroll { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.table-scroll > table { margin-top: 4px; }
+
+@media (max-width: 900px) {
+  .container { margin: 16px auto; padding: 0 16px; }
+  .nav { flex-wrap: wrap; padding: 10px 16px; gap: 10px 16px; }
+  .nav .brand { margin-right: 0; }
+  .card { padding: 16px; margin-bottom: 16px; }
+  .card-table { padding: 4px 12px; }
+  .grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+  body.pdf-open .container { margin: 16px; }
+  .pdf-panel { border-left: 0; box-shadow: none; }
+}
+
+@media (max-width: 600px) {
+  body { -webkit-text-size-adjust: 100%; }
+  .container { margin: 12px auto; padding: 0 12px; }
+  h1 { font-size: 20px; }
+  h2 { font-size: 16px; }
+  .nav { padding: 10px 12px; gap: 8px 14px; font-size: 14px; }
+  .nav .brand { font-size: 16px; margin-right: 4px; }
+  .nav-right { gap: 10px; }
+  .card { padding: 14px; border-radius: 8px; }
+  .card.narrow { margin: 16px auto; }
+  .card-head { flex-wrap: wrap; }
+  dialog.modal { padding: 16px; width: 94vw; }
+  /* iOS 聚焦输入框会自动放大，字号保持 16px */
+  input, textarea, select { font-size: 16px; }
+  .filter-form, .inline-form { flex-direction: column; align-items: stretch; gap: 8px; }
+  .filter-form input, .filter-form select, .inline-form input:not([type=checkbox]) { width: 100%; }
+  button { padding: 10px 14px; font-size: 15px; }
+  button.small { padding: 6px 10px; font-size: 13px; }
+  td.actions { gap: 6px; }
+  .course-frame { padding: 0 12px; }
+  .course-frame > summary.course-frame-head { flex-wrap: wrap; }
+  .course-frame-title { font-size: 15px; }
+  .stats-kpis { gap: 8px; }
+  .kpi { flex: 1 1 46%; padding: 12px; }
+  .kpi-num { font-size: 22px; }
+  .page-grid { grid-template-columns: repeat(auto-fill, minmax(86px, 1fr)); gap: 8px; }
+  .chips { gap: 6px; }
+  .assistant-panel { border-radius: 10px; }
+  .feedback { padding: 10px 12px; }
+  /* 长链接、学号等不撑破卡片 */
+  td, .feedback, .report-body { overflow-wrap: anywhere; }
+  img { max-width: 100%; height: auto; }
+}
+

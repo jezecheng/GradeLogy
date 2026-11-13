@@ -7,7 +7,9 @@
 <p class="muted">{{ hw.course_name }} · 讲次{% if hw.deadline %} · 截止 {{ hw.deadline.replace('T',' ') }}{% endif %}</p>
 {% if hw.description %}<p>{{ hw.description }}</p>{% endif %}
 {% if hw.student_pdf %}
-<p><a href="{{ url_for('uploaded_file', filename=hw.student_pdf) }}" target="_blank">下载本讲学生版讲义（PDF）</a></p>
+<p><a href="{{ url_for('uploaded_file', filename=hw.student_pdf) }}"
+      data-pdf-toggle data-pdf-src="{{ url_for('uploaded_file', filename=hw.student_pdf) }}"
+      data-pdf-title="{{ hw.title }} · 学生版讲义">预览本讲学生版讲义（PDF）</a></p>
 {% endif %}
 
 <div class="card">
@@ -64,4 +66,6 @@
   <p class="muted">还没有提交记录。</p>
   {% endif %}
 </div>
+
+{% include "_pdf_panel.html" %}
 {% endblock %}

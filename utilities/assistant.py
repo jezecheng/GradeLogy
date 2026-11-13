@@ -164,7 +164,8 @@ def list_lectures(teacher_id, course):
                  WHERE s.lecture_id=h.id) AS submitted,
               (SELECT COUNT(*) FROM submissions s
                  WHERE s.lecture_id=h.id AND s.status='已批改') AS graded
-            FROM lectures h WHERE h.course_id=? ORDER BY h.id""", (c["id"],)))
+            FROM lectures h WHERE h.course_id=?
+            ORDER BY h.title COLLATE NOCASE, h.id""", (c["id"],)))
         for r in rows:
             r["enrolled"] = total
         return {"course": c["name"], "lectures": rows}

@@ -60,3 +60,26 @@
     });
   };
 })();
+
+// 移动端：给列数较多的表格包一层横向滚动容器，避免撑破页面
+(function () {
+  function wrapTables() {
+    var tables = document.querySelectorAll('table');
+    for (var i = 0; i < tables.length; i++) {
+      var table = tables[i];
+      if (table.parentElement && table.parentElement.classList.contains('table-scroll')) continue;
+      var headRow = table.rows[0];
+      var cols = headRow ? headRow.cells.length : 0;
+      var wrap = document.createElement('div');
+      wrap.className = 'table-scroll';
+      table.parentNode.insertBefore(wrap, table);
+      wrap.appendChild(table);
+      if (cols >= 5) table.style.minWidth = Math.max(560, cols * 88) + 'px';
+    }
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', wrapTables);
+  } else {
+    wrapTables();
+  }
+})();
