@@ -157,3 +157,16 @@ docker build --build-arg BASE_IMAGE=docker.m.daocloud.io/library/python:3.12-sli
 - `data.sqlite`（含 API Key 与密码哈希）、`uploads/`、`.secret_key`、`logs/`、`backups/` 均在 `.gitignore` 中
 - 部署到公网前请：修改默认 admin 密码、配置 HTTPS 反向代理、显式设置 `SECRET_KEY`、把 AI Key 改为环境变量注入
 - 备份包含敏感信息，请按机密文件保管
+
+## 许可证
+
+本项目以 [MIT License](LICENSE) 发布，可自由使用、修改与再分发，保留版权声明即可。
+
+### 数据合规
+
+系统会保存学生真实姓名、学籍号、手写作答扫描件，并把这些材料通过图片形式发送给你配置的 AI 服务商。**部署者自行负责学生个人信息的安全与合规**，包括但不限于：
+
+- 访问控制（强制改密、按班级授权、离职教师账号回收）
+- 数据留存期限（毕业或课程结束后清理 `uploads/` 与数据库）
+- 所用 AI 服务商的数据处理与留存条款，以及是否可用于训练
+- 向学生及其监护人告知数据用途，遵守当地教育数据相关规定
