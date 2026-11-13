@@ -3,6 +3,7 @@
 结构：课程 → 讲次（作业 + AI 批阅）/ 考试（只录分数）
 角色：admin（用户管理）/ teacher（课程、讲次、考试、批改、AI 设置）/ student（提交与查看批改）
 """
+import io
 import json
 import logging
 import os
@@ -33,7 +34,9 @@ from werkzeug.utils import secure_filename
 
 import config as cfg
 from utilities import roster, storage
-from utilities.pdfgrade import ai_report_comment, ai_lecture_summary, analyze_answer_pdf, grade_pdf_submission
+from utilities.pdfgrade import (ai_report_comment, ai_lecture_summary,
+                                analyze_answer_pdf, grade_pdf_submission,
+                                pdf_page_count, render_page_jpeg)
 
 cfg.ensure_dirs()
 cfg.setup_logging()
@@ -268,6 +271,7 @@ CREATE TABLE IF NOT EXISTS lectures(
   description TEXT DEFAULT '',
   deadline TEXT DEFAULT '',
   answer_pdf TEXT DEFAULT '',
+  answer_pages TEXT DEFAULT '',
   student_pdf TEXT DEFAULT '',
   scope_candidates TEXT DEFAULT '',
   scope_selected TEXT DEFAULT '',
@@ -394,6 +398,9 @@ def init_db():
     for col in ("scope_candidates", "scope_selected"):
         if col not in lcols:
             con.execute(f"ALTER TABLE lectures ADD COLUMN {col} TEXT DEFAULT ''")
+    # 轻量迁移：教师版 PDF 只发送指定页码（逗号分隔的 1 起页码）
+    if "answer_pages" not in lcols:
+        con.execute("ALTER TABLE lectures ADD COLUMN answer_pages TEXT DEFAULT ''")
     # 轻量迁移：讲次级别的整体统计 summary（每题 AI 评语汇总 + 整体 summary）
     for col in ("summary_md", "summary_at"):
         if col not in lcols:
@@ -1123,6 +1130,23 @@ def lecture_create(cid):
     return redirect(url_for("course_detail", cid=cid))
 
 
+def _page_list(value):
+    """把 "1,3,5-7" 形式的页码串解析成升序页码列表；空值返回 []（表示整份文件）。"""
+    out = set()
+    for part in re.split(r"[,，、\s]+", str(value or "")):
+        if not part:
+            continue
+        m = re.fullmatch(r"(\d+)\s*[-~－]\s*(\d+)", part)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            if a > b:
+                a, b = b, a
+            out.update(range(a, b + 1))
+        elif part.isdigit():
+            out.add(int(part))
+    return sorted(p for p in out if p >= 1)
+
+
 @app.route("/lecture/<oid:hid>")
 @role_required("teacher")
 def lecture_detail(hid):
@@ -1165,8 +1189,13 @@ def lecture_detail(hid):
     n_graded = sum(1 for s in subs if s["n_questions"] and s["n_questions"] > 0)
     n_reviewed = sum(1 for s in subs if s["n_questions"] and s["n_reviewed"] >= s["n_questions"])
 
+    # 教师版 PDF 页数与已选页码：只把这些页发给模型，避免整份答案浪费 token
+    answer_total = pdf_page_count(os.path.join(UPLOAD_DIR, hw["answer_pdf"])) if hw["answer_pdf"] else 0
+    answer_picked = _page_list(hw["answer_pages"])
+
     return render_template("lecture.html", hw=hw, course=course, subs=subs, students=students,
-                           qstats=qstats, n_subs=n_subs, n_graded=n_graded, n_reviewed=n_reviewed)
+                           qstats=qstats, n_subs=n_subs, n_graded=n_graded, n_reviewed=n_reviewed,
+                           answer_total=answer_total, answer_picked=answer_picked)
 
 
 @app.route("/lecture/<oid:hid>/upload-for", methods=["POST"])
@@ -1235,9 +1264,54 @@ def lecture_answer(hid):
         except ValueError as e:
             flash(str(e))
             return redirect(url_for("lecture_detail", hid=hid))
-        db.execute("UPDATE lectures SET answer_pdf=? WHERE id=?", (name, hid))
+        db.execute("UPDATE lectures SET answer_pdf=?, answer_pages='' WHERE id=?", (name, hid))
         db.commit()
     return redirect(url_for("lecture_detail", hid=hid))
+
+
+@app.route("/lecture/<oid:hid>/answer/pages", methods=["POST"])
+@role_required("teacher")
+def lecture_answer_pages(hid):
+    """保存教师版 PDF 要发送给模型的页码；全部不选等于发送整份文件。"""
+    db = get_db()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
+    if not hw:
+        abort(404)
+    own_course(hw["course_id"])
+    total = pdf_page_count(os.path.join(UPLOAD_DIR, hw["answer_pdf"])) if hw["answer_pdf"] else 0
+    if not total:
+        flash("请先上传教师版标准答案 PDF，再选择页码。")
+        return redirect(url_for("lecture_detail", hid=hid))
+    picked = sorted({int(v) for v in request.form.getlist("page")
+                     if v.isdigit() and 1 <= int(v) <= total})
+    db.execute("UPDATE lectures SET answer_pages=? WHERE id=?",
+               (",".join(str(p) for p in picked), hid))
+    db.commit()
+    if not picked:
+        flash("已清除页码限制：批阅时会发送教师版 PDF 的全部页。")
+    elif len(picked) == total:
+        flash(f"已保存页码：全部 {total} 页（与不限制相同）。")
+    else:
+        flash(f"已保存页码：{len(picked)}/{total} 页，批阅时只发送这些页。")
+    return redirect(url_for("lecture_detail", hid=hid))
+
+
+@app.route("/lecture/<oid:hid>/answer/page/<int:no>.jpg")
+@role_required("teacher")
+def lecture_answer_preview(hid, no):
+    """页码选择界面的缩略图：按需渲染教师版 PDF 的某一页。"""
+    db = get_db()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
+    if not hw:
+        abort(404)
+    own_course(hw["course_id"])
+    if not hw["answer_pdf"]:
+        abort(404)
+    data = render_page_jpeg(os.path.join(UPLOAD_DIR, hw["answer_pdf"]), no)
+    if not data:
+        abort(404)
+    resp = send_file(io.BytesIO(data), mimetype="image/jpeg", max_age=3600)
+    return resp
 
 
 @app.route("/lecture/<oid:hid>/student-pdf", methods=["POST"])
@@ -1289,9 +1363,10 @@ def lecture_scope_analyze(hid):
         flash("尚未配置 AI 接口，无法分析标准答案。")
         return redirect(url_for("lecture_detail", hid=hid))
 
-    log.info("分析作业范围 lecture=%s answer=%s", hid, hw["answer_pdf"])
+    log.info("分析作业范围 lecture=%s answer=%s pages=%s", hid, hw["answer_pdf"], hw["answer_pages"])
     questions, err = analyze_answer_pdf(
-        os.path.join(UPLOAD_DIR, hw["answer_pdf"]), api_url, api_key, model)
+        os.path.join(UPLOAD_DIR, hw["answer_pdf"]), api_url, api_key, model,
+        pages=_page_list(hw["answer_pages"]))
     if err:
         flash(err)
         return redirect(url_for("lecture_detail", hid=hid))
@@ -1572,11 +1647,12 @@ def submission_grade(sid):
             return redirect(url_for("lecture_detail", hid=hw["id"]))
         _GRADING.add(sid)
 
-    log.info("开始批阅 submission=%s lecture=%s file=%s answer=%s",
-             sid, hw["id"], sub["file_path"], hw["answer_pdf"])
+    log.info("开始批阅 submission=%s lecture=%s file=%s answer=%s pages=%s",
+             sid, hw["id"], sub["file_path"], hw["answer_pdf"], hw["answer_pages"])
     try:
         gen = run_grading(g.user["id"], sub["file_path"], hw["answer_pdf"],
-                          scope=_scope_instruction(hw))
+                          scope=_scope_instruction(hw),
+                          answer_pages=_page_list(hw["answer_pages"]))
     finally:
         with _GRADING_LOCK:
             _GRADING.discard(sid)
@@ -1931,7 +2007,7 @@ def _build_summary(questions, weak_points, evaluation, errors):
     }
 
 
-def run_grading(teacher_id, file_name, answer_pdf="", scope=""):
+def run_grading(teacher_id, file_name, answer_pdf="", scope="", answer_pages=None):
     """批阅入口：学生作业与标准答案整份交给支持 PDF 的模型，一次返回逐题结果。"""
     if get_setting(teacher_id, "ai_demo") == "1":
         questions = demo_questions()
@@ -1953,7 +2029,7 @@ def run_grading(teacher_id, file_name, answer_pdf="", scope=""):
         os.path.join(UPLOAD_DIR, file_name),
         os.path.join(UPLOAD_DIR, answer_pdf) if answer_pdf else "",
         api_url, api_key, model,
-        extra=extra)
+        extra=extra, answer_pages=answer_pages)
     gen["summary"] = _build_summary(gen["questions"], gen.get("weak_points") or [],
                                     gen.get("evaluation", ""), gen.get("errors") or [])
     return gen

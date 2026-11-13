@@ -42,6 +42,21 @@ details.scope-card[open] > summary.card-head { margin-bottom: 12px; }
 .scope-summary { margin-left: auto; }
 .scope-actions { display: flex; justify-content: flex-end; margin-bottom: 6px; }
 
+/* 教师版页码选择：缩略图网格 + 范围输入，作用类似打印时的选页 */
+.page-picker { border-top: 1px dashed #eef0f3; margin-top: 14px; padding-top: 12px; }
+.page-tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+.page-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+             gap: 10px; margin-bottom: 10px; }
+.page-thumb { display: flex; flex-direction: column; align-items: center; gap: 4px;
+              border: 1px solid #e5e8ee; border-radius: 8px; padding: 6px;
+              background: #fff; cursor: pointer; font-size: 12px; color: #5b6472; }
+.page-thumb img { width: 100%; height: auto; display: block; border-radius: 4px;
+                  border: 1px solid #eef0f3; background: #fafbfc; min-height: 56px; }
+.page-thumb input { width: auto; }
+.page-thumb:has(input:checked) { border-color: #1456f0; box-shadow: 0 0 0 2px rgba(20, 86, 240, .12); }
+.page-thumb:has(input:not(:checked)) img { opacity: .4; }
+.page-thumb:hover { border-color: #b9c6e4; }
+
 /* 卡片标题行：标题与右侧操作按钮 */
 .card-head { display: flex; align-items: center; justify-content: space-between;
              gap: 12px; margin-bottom: 12px; }

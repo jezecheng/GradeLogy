@@ -96,7 +96,7 @@
     <span class="muted small scope-summary">
       {% if chosen %}已选 {{ chosen|length }} 题
       {% elif cands %}未选择，批改全部题目
-      {% else %}未生成题目清单{% endif %}
+      {% else %}未生成题目清单{% endif %}{% if answer_picked %} · 答案 {{ answer_picked|length }}/{{ answer_total }} 页{% endif %}
     </span>
   </summary>
   <div class="scope-actions">
@@ -109,6 +109,42 @@
   <p class="muted small">从教师版标准答案识别题目清单，勾选本讲实际布置的题目，批阅时只处理勾选的题目；
     全部不勾选表示批改全部题目。分析约需 20~60 秒。</p>
   <p class="muted small scope-hint" hidden>正在分析标准答案，请勿重复点击…</p>
+
+  {% if hw.answer_pdf %}
+  <div class="page-picker">
+    <div class="card-head" style="margin-bottom:6px">
+      <h3 style="font-size:15px">教师版页码</h3>
+      <span class="muted small">共 {{ answer_total }} 页 ·
+        将发送 <b id="page-count">{{ answer_picked|length if answer_picked else answer_total }}</b> 页给模型</span>
+    </div>
+    <p class="muted small">学生交的是哪几页，这里就只勾哪几页；未勾选任何页码时发送整份答案。
+      只发送相关页可以明显减少图片数量与 token 消耗（批阅与题目识别都会遵守）。</p>
+    <form method="post" action="{{ url_for('lecture_answer_pages', hid=hw.id) }}" id="page-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <div class="page-tools">
+        <input type="text" id="page-range" placeholder="例如 1-5, 8, 10-12" style="max-width:220px">
+        <button type="button" class="small ghost" id="page-apply">按范围勾选</button>
+        <button type="button" class="small ghost" data-page-all="1">全选</button>
+        <button type="button" class="small ghost" data-page-all="0">全不选</button>
+      </div>
+      <div class="page-grid">
+        {% for n in range(1, answer_total + 1) %}
+        <label class="page-thumb">
+          <input type="checkbox" name="page" value="{{ n }}" style="width:auto"
+                 {% if not answer_picked or n in answer_picked %}checked{% endif %}>
+          <img src="{{ url_for('lecture_answer_preview', hid=hw.id, no=n) }}"
+               alt="第 {{ n }} 页" loading="lazy">
+          <span>第 {{ n }} 页</span>
+        </label>
+        {% endfor %}
+      </div>
+      <div class="save-bar">
+        <button type="submit">保存页码</button>
+        <span class="muted small">全不选并保存＝发送整份教师版 PDF</span>
+      </div>
+    </form>
+  </div>
+  {% endif %}
 
   {% if cands %}
   <form method="post" action="{{ url_for('lecture_scope_save', hid=hw.id) }}" id="scope-form">
@@ -332,6 +368,54 @@
       }
       start();
     });
+  });
+})();
+// 教师版页码：勾选哪些页发给模型，支持「1-5, 8」这样的范围输入
+(function () {
+  var form = document.getElementById('page-form');
+  if (!form) return;
+  var boxes = form.querySelectorAll('input[name="page"]');
+  var counter = document.getElementById('page-count');
+  var range = document.getElementById('page-range');
+
+  function refresh() {
+    var n = 0;
+    boxes.forEach(function (b) { if (b.checked) n += 1; });
+    if (counter) counter.textContent = n;
+  }
+  boxes.forEach(function (b) { b.addEventListener('change', refresh); });
+
+  form.querySelectorAll('[data-page-all]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var on = btn.dataset.pageAll === '1';
+      boxes.forEach(function (b) { b.checked = on; });
+      refresh();
+    });
+  });
+
+  var apply = document.getElementById('page-apply');
+  if (apply && range) {
+    apply.addEventListener('click', function () {
+      // 解析 "1-5, 8, 10-12"，全角逗号/连字符也认
+      var picked = {};
+      range.value.split(/[,，、\s]+/).forEach(function (part) {
+        if (!part) return;
+        var m = part.match(/^(\d+)\s*[-~－]\s*(\d+)$/);
+        if (m) {
+          var a = parseInt(m[1], 10), b = parseInt(m[2], 10);
+          if (a > b) { var t = a; a = b; b = t; }
+          for (var i = a; i <= b; i += 1) picked[i] = 1;
+        } else if (/^\d+$/.test(part)) {
+          picked[parseInt(part, 10)] = 1;
+        }
+      });
+      boxes.forEach(function (b) { b.checked = !!picked[b.value]; });
+      refresh();
+    });
+  }
+
+  form.addEventListener('submit', function () {
+    busyOn(form.querySelector('button[type="submit"]'), '保存中…');
   });
 })();
 // 作业范围：分析标准答案时长约几十秒，提交后给出提示并禁用按钮

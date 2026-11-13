@@ -66,15 +66,26 @@ def _image_part(mime, data):
     return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
 
 
-def _render_pdf_pages(path, label):
-    """把 PDF 整页渲染为 JPEG 图片 part 列表（不做任何切题/裁剪）。"""
+def _render_pdf_pages(path, label, pages=None):
+    """把 PDF 整页渲染为 JPEG 图片 part 列表（不做任何切题/裁剪）。
+
+    pages 为 1 起的页码列表；为空表示整份文件。老师可用它只发送与本讲相关的页，
+    减少发给模型的图片数量与 token 消耗。
+    """
     parts = []
     doc = pdfium.PdfDocument(path)
     try:
-        if len(doc) > MAX_PAGES:
-            return None, f"{label}共 {len(doc)} 页，超过 {MAX_PAGES} 页上限，请拆分后再批阅"
-        for page in doc:
-            bitmap = page.render(scale=RENDER_SCALE)
+        total = len(doc)
+        if pages:
+            picked = sorted({p for p in pages if 1 <= p <= total})
+            if not picked:
+                return None, f"{label}未选择有效页码（共 {total} 页）"
+        else:
+            picked = list(range(1, total + 1))
+        if len(picked) > MAX_PAGES:
+            return None, f"{label}选中的 {len(picked)} 页超过 {MAX_PAGES} 页上限，请减少页数后再批阅"
+        for n in picked:
+            bitmap = doc[n - 1].render(scale=RENDER_SCALE)
             img = bitmap.to_pil().convert("RGB")
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=JPEG_QUALITY)
@@ -85,7 +96,41 @@ def _render_pdf_pages(path, label):
     return parts, ""
 
 
-def _file_parts(path, label):
+def pdf_page_count(path):
+    """返回 PDF 页数；非 PDF 或读取失败返回 0。"""
+    if not path or not os.path.exists(path):
+        return 0
+    if os.path.splitext(path)[1].lower() != ".pdf":
+        return 0
+    try:
+        doc = pdfium.PdfDocument(path)
+        try:
+            return len(doc)
+        finally:
+            doc.close()
+    except Exception:
+        return 0
+
+
+def render_page_jpeg(path, page_no, scale=0.9, quality=65):
+    """渲染单页为 JPEG 字节，供页码选择界面做缩略图预览；页码越界返回 None。"""
+    if not path or not os.path.exists(path) or page_no < 1:
+        return None
+    doc = pdfium.PdfDocument(path)
+    try:
+        if page_no > len(doc):
+            return None
+        bitmap = doc[page_no - 1].render(scale=scale)
+        img = bitmap.to_pil().convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality)
+        bitmap.close()
+        return buf.getvalue()
+    finally:
+        doc.close()
+
+
+def _file_parts(path, label, pages=None):
     """把 PDF/图片读成 OpenAI 兼容的 content part 列表；失败返回 (None, 错误)。"""
     if not path or not os.path.exists(path):
         return None, f"{label}文件不存在：{os.path.basename(path or '')}"
@@ -93,7 +138,7 @@ def _file_parts(path, label):
         return None, f"{label}超过 {MAX_FILE_MB}MB，请压缩后再上传"
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
-        return _render_pdf_pages(path, label)
+        return _render_pdf_pages(path, label, pages)
     mime = _MIME.get(ext)
     if not mime:
         return None, f"{label}格式不支持：{ext or '未知'}"
@@ -159,12 +204,14 @@ def _normalize(raw):
     return questions
 
 
-def analyze_answer_pdf(answer_path, api_url, api_key, model, max_tokens=16384):
+def analyze_answer_pdf(answer_path, api_url, api_key, model, max_tokens=16384,
+                       pages=None):
     """从教师版标准答案里识别题目清单，返回 (questions, error)。
 
     每项为 {no, max, hint}，供老师在讲次页勾选本讲作业范围。
+    pages 为要发送的页码（1 起）；为空表示整份文件。
     """
-    parts, err = _file_parts(answer_path, "标准答案")
+    parts, err = _file_parts(answer_path, "标准答案", pages)
     if err:
         return None, err
     content = [{"type": "text", "text": SCOPE_PROMPT},
@@ -195,11 +242,12 @@ def analyze_answer_pdf(answer_path, api_url, api_key, model, max_tokens=16384):
 
 
 def grade_pdf_submission(student_path, answer_path, api_url, api_key, model,
-                         extra="", max_tokens=32768):
+                         extra="", max_tokens=32768, answer_pages=None):
     """批阅一份作业，返回 {questions, weak_points, evaluation, total_score, errors, error}。
 
     student_path / answer_path 为本地绝对路径。模型必须是支持图片输入的多模态模型；
     接口按 OpenAI 兼容的 chat/completions 协议传 image_url content part。
+    answer_pages 为教师版 PDF 中要发送的页码（1 起），为空表示整份文件。
     """
     if not answer_path:
         return {"questions": [], "weak_points": [], "evaluation": "", "total_score": "",
@@ -208,7 +256,7 @@ def grade_pdf_submission(student_path, answer_path, api_url, api_key, model,
     if err:
         return {"questions": [], "weak_points": [], "evaluation": "", "total_score": "",
                 "errors": [], "error": err}
-    answer_parts, err = _file_parts(answer_path, "标准答案")
+    answer_parts, err = _file_parts(answer_path, "标准答案", answer_pages)
     if err:
         return {"questions": [], "weak_points": [], "evaluation": "", "total_score": "",
                 "errors": [], "error": err}
