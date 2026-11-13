@@ -1,6 +1,31 @@
 {% extends "base.html" %}
 {% block title %}AI 设置{% endblock %}
 {% block content %}
+<style>
+.model-select-row { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 6px; }
+.model-select-row label { flex: 1; }
+.model-select-row input { width: auto; flex: 0 0 200px; margin-top: 1px; }
+.model-help { margin-top: 6px; }
+.model-cost { display: inline-block; padding: 2px 8px; border-radius: 999px;
+              font-size: 12px; background: #eef1f5; color: #5b6472; margin-top: 4px; }
+.model-cost.ok { background: #e6f6ec; color: #18794e; }
+.model-cost.warn { background: #fff4e0; color: #b25e09; }
+.model-cost.bad { background: #fdecec; color: #c93338; }
+.model-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+.model-table th, .model-table td { border-bottom: 1px solid #eef0f3; padding: 6px 8px; vertical-align: top; }
+.model-table th { color: #8a8f99; font-weight: 500; text-align: left; }
+.model-table td code { background: #f4f6f8; padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+.model-table .tags { margin-top: 2px; }
+.model-table .tag-chip { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 999px;
+                         background: #eef2ff; color: #1456f0; margin-right: 3px; }
+.model-table .cur-row { background: #fff9e0; }
+.cost-est { background: #f8f9fb; border-radius: 8px; padding: 12px 14px; margin-top: 10px; font-size: 13px; }
+.cost-est b { color: #1456f0; }
+.cost-est .per-submit { font-size: 16px; font-weight: 700; color: #1456f0; }
+.cost-est details { margin-top: 4px; }
+.cost-est summary { cursor: pointer; color: #8a8f99; font-size: 12px; }
+.cost-est ul { margin-left: 18px; }
+</style>
 <h1>AI 批阅设置</h1>
 
 <div class="card narrow">
@@ -45,9 +70,112 @@
       <input name="ai_api_key" type="password" value=""
              placeholder="{% if cfg.ai_api_key %}已保存（留空则不修改）{% else %}粘贴 API Key{% endif %}">
     </label>
-    <label>模型
-      <input name="ai_model" value="{{ cfg.ai_model }}" placeholder="glm-4.6v-flash">
-    </label>
+    <div class="model-select-row">
+      <label>模型
+        <select name="ai_model_select" id="modelSelect" style="flex:1">
+          <option value="">—— 从腾讯云 TokenHub 选一个模型 ——</option>
+          {% for m in model_presets %}
+          <option value="{{ m.model }}" {% if cfg.ai_model == m.model %}selected{% endif %}>
+            {{ m.vendor }} · {{ m.model }}（入 {{ "%.1f"|format(m.price_in) }} / 出 {{ "%.1f"|format(m.price_out) }} 元/百万）
+          </option>
+          {% endfor %}
+          <option value="__custom__" {% if cfg.ai_model and cfg.ai_model not in model_presets|map(attribute='model') %}selected{% endif %}>
+            手动输入其它模型…
+          </option>
+        </select>
+      </label>
+      <input name="ai_model" id="modelCustom" value="{{ cfg.ai_model }}"
+             placeholder="例如 glm-4.6v-flash"
+             style="display:none" {% if cfg.ai_model and cfg.ai_model not in model_presets|map(attribute='model') %}data-force-show{% endif %}>
+    </div>
+    <div class="cost-est" id="costEst" style="display:none">
+      <div><b>单次作业批阅成本估算</b>（按典型 26 页学生卷 + 20 页答案算）</div>
+      <div>
+        一份约 <b>{{ est_tokens_input/1000|round|int }}k 输入</b> + <b>{{ est_tokens_output/1000|round|int }}k 输出</b> token
+        → <span class="per-submit" id="costPerSubmit">—</span> / 份
+      </div>
+      <details>
+        <summary>计算依据（点击展开）</summary>
+        <ul>
+          <li>输入：每页 144dpi A4 经视觉切块 ≈ 1300 token，合计 46 页 ≈ {{ est_tokens_input }}</li>
+          <li>输出：逐题 JSON + 每题评语 ≈ {{ est_tokens_output }} token</li>
+          <li>价格来源：腾讯云 TokenHub 公开价目（2025.11），高峰时段约翻倍</li>
+        </ul>
+      </details>
+    </div>
+    <script>
+    (function(){
+      var presets = {{ model_presets|tojson }};
+      var select = document.getElementById('modelSelect');
+      var custom = document.getElementById('modelCustom');
+      var costEst = document.getElementById('costEst');
+      var costPer = document.getElementById('costPerSubmit');
+      var estIn = {{ est_tokens_input }}, estOut = {{ est_tokens_output }};
+
+      function findPreset(name) { return presets.find(function(m){ return m.model === name; }); }
+
+      function apply() {
+        var v = select.value;
+        if (v === '__custom__') {
+          custom.style.display = 'block';
+          costEst.style.display = 'none';
+          custom.focus();
+        } else if (v) {
+          custom.style.display = 'none';
+          custom.value = v;   // 把选中的值同步到真正提交的 input
+          var m = findPreset(v);
+          costEst.style.display = 'block';
+          var yuan = (m.price_in * est_in + m.price_out * est_out) / 1000000;
+          costPer.textContent = '约 ' + yuan.toFixed(3) + ' 元';
+        } else {
+          custom.style.display = 'none';
+          costEst.style.display = 'none';
+        }
+      }
+      select.addEventListener('change', apply);
+      // 如果当前值不在下拉里，强制展示 custom input
+      if (custom.dataset.forceShow !== undefined) {
+        select.value = '__custom__';
+      }
+      apply();
+    })();
+    </script>
+
+    <details class="model-help">
+      <summary>查看所有可选模型对比（含价格与特点）</summary>
+      <table class="model-table">
+        <thead>
+          <tr>
+            <th style="width:110px">厂商</th>
+            <th>model 参数（复制填入）</th>
+            <th style="width:70px">输入价</th>
+            <th style="width:70px">输出价</th>
+            <th>特点 / 备注</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for m in model_presets %}
+        <tr class="{% if cfg.ai_model == m.model %}cur-row{% endif %}">
+          <td><strong>{{ m.vendor }}</strong></td>
+          <td><code>{{ m.model }}</code></td>
+          <td>{{ m.price_in }} 元/百万</td>
+          <td>{{ m.price_out }} 元/百万</td>
+          <td>
+            <div class="tags">
+              {% for t in m.tags %}<span class="tag-chip">{{ t }}</span>{% endfor %}
+            </div>
+            <div class="muted small">{{ m.note }}</div>
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <p class="muted small">
+        以上模型均为腾讯云 TokenHub 上**支持图片理解**的多模态模型，直接把 model 参数填入即可调用。
+        价格为公开价目，高峰时段（通常工作日白天）约翻倍。选哪个都能完成作业批阅，
+        实际效果差异更多取决于你愿意花多少钱。
+      </p>
+    </details>
     <label>额外要求（可选，会追加到批阅提示词后面）
       <textarea name="ai_prompt" rows="4" placeholder="如：按题号逐题批阅；有机题要识别结构简式。">{{ cfg.ai_prompt }}</textarea>
     </label>

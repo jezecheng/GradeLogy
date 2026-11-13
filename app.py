@@ -54,7 +54,57 @@ except ImportError:
     pass
 
 ROLE_LABEL = {"admin": "管理员", "teacher": "老师", "student": "学生"}
-# 系统初始密码：使用这些密码的账号会被要求登录后立即修改
+
+# 腾讯云 TokenHub 常用的、支持图片理解的模型（价格为 2025.11 公开价目，单位：元/百万 token；
+# 高峰时段（通常 9:00-12:00 / 14:00-18:00）大约翻倍，仅供参考）
+MODEL_PRESETS = [
+    {
+        "model": "deepseek-v4.1-flash",
+        "vendor": "DeepSeek",
+        "tags": ["图片理解", "1M 上下文", "性价比高"],
+        "price_in": 1.0,
+        "price_out": 4.0,
+        "note": "vision-exp 的继任者，与旧版同价，能力全面升级",
+    },
+    {
+        "model": "glm-5.3-flash",
+        "vendor": "智谱",
+        "tags": ["图片理解", "最便宜", "128k 上下文"],
+        "price_in": 0.8,
+        "price_out": 2.8,
+        "note": "TokenHub 上价格最低的多模态模型",
+    },
+    {
+        "model": "minimax-m3.1-flash",
+        "vendor": "MiniMax",
+        "tags": ["图片理解", "1M 上下文"],
+        "price_in": 1.0,
+        "price_out": 4.0,
+        "note": "与 DeepSeek-V4.1-Flash 同价，1M 上下文",
+    },
+    {
+        "model": "deepseek-v4-pro",
+        "vendor": "DeepSeek",
+        "tags": ["图片理解", "旗舰", "1M 上下文"],
+        "price_in": 4.5,
+        "price_out": 13.5,
+        "note": "贵 4.5 倍，推理能力更强，但批阅速度相近",
+    },
+    {
+        "model": "kimi-k3.1-pro",
+        "vendor": "Kimi (月之暗面)",
+        "tags": ["图片+视频", "旗舰", "1M 上下文"],
+        "price_in": 13.0,
+        "price_out": 68.0,
+        "note": "最贵，支持视频输入，一般作业批阅用不上",
+    },
+]
+
+# 一份典型作业（约 26 页图片 + 答案）的估算 token 量
+# 144dpi 的 A4 页经视觉模型切块后每页约 2000-2500 token
+EST_TOKENS_INPUT = 60000   # 输入：学生卷 + 答案约 46 页 × 约 1300 token/页
+EST_TOKENS_OUTPUT = 4000   # 输出：逐题 JSON + 评语
+
 DEFAULT_PASSWORDS = ("admin123", "123456")
 
 def load_secret_key():
@@ -1653,7 +1703,10 @@ def settings_page():
         return redirect(url_for("settings_page"))
     cfg = {k: get_setting(g.user["id"], k)
            for k in ("ai_api_url", "ai_api_key", "ai_model", "ai_prompt", "ai_demo")}
-    return render_template("settings.html", cfg=cfg, env_keys=[k for k, v in ENV_AI_SETTINGS.items() if v])
+    return render_template("settings.html", cfg=cfg, env_keys=[k for k, v in ENV_AI_SETTINGS.items() if v],
+                           model_presets=MODEL_PRESETS,
+                           est_tokens_input=EST_TOKENS_INPUT,
+                           est_tokens_output=EST_TOKENS_OUTPUT)
 
 
 @app.route("/settings/test", methods=["POST"])
