@@ -1,4 +1,5 @@
-{# 通用 PDF 旁侧预览面板：页面里任何 <a data-pdf-src="..." data-pdf-title="..."> 点击后在此 iframe 打开 #}
+{# 通用 PDF 旁侧预览面板：页面里任何 <a data-pdf-src="..." data-pdf-title="..."> 点击后在此打开。
+   桌面用 iframe；手机 / 平板（iOS 的 iframe 只能显示第一页）改用服务端逐页渲染的图片 + 翻页。 #}
 <aside id="pdf-panel" class="pdf-panel" hidden>
   <div class="pdf-panel-bar">
     <strong id="pdf-panel-title">PDF 预览</strong>
@@ -8,6 +9,16 @@
     </span>
   </div>
   <iframe title="PDF 预览"></iframe>
+  <div id="pdf-mobile" class="pdf-mobile" hidden>
+    <div class="pdf-mobile-scroll">
+      <img id="pdf-mobile-img" alt="PDF 页面">
+    </div>
+    <div class="pdf-mobile-bar">
+      <button type="button" id="pdf-prev" class="small">上一页</button>
+      <span id="pdf-mobile-page">第 1 页</span>
+      <button type="button" id="pdf-next" class="small">下一页</button>
+    </div>
+  </div>
 </aside>
 
 <script>
@@ -17,23 +28,116 @@
   var frame = panel.querySelector('iframe');
   var title = document.getElementById('pdf-panel-title');
   var external = document.getElementById('pdf-panel-external');
+  var mobileBox = document.getElementById('pdf-mobile');
+  var mobileImg = document.getElementById('pdf-mobile-img');
+  var pageLabel = document.getElementById('pdf-mobile-page');
+  var prevBtn = document.getElementById('pdf-prev');
+  var nextBtn = document.getElementById('pdf-next');
+  var current = '';
+  var state = { src: '', pages: 0, page: 1 };
+
+  function isMobile() {
+    return window.matchMedia('(max-width: 1100px)').matches;
+  }
+
+  // iOS / iPadOS 的 iframe 内嵌 PDF 体验差，直接交给系统新标签页打开
+  function prefersNewTab() {
+    var ua = navigator.userAgent || '';
+    if (/iPad|iPhone|iPod/.test(ua)) return true;
+    // iPadOS 13+ 默认请求桌面版，UA 与 Mac 相同，靠触点数区分
+    return navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
+  }
+
+  function showMobile(show) {
+    mobileBox.hidden = !show;
+    frame.style.display = show ? 'none' : '';
+  }
+
+  function loadPage(n) {
+    if (!state.pages) return;
+    state.page = Math.min(Math.max(1, n), state.pages);
+    mobileImg.src = state.src + '?page=' + state.page;
+    pageLabel.textContent = '第 ' + state.page + ' / ' + state.pages + ' 页';
+    prevBtn.disabled = state.page <= 1;
+    nextBtn.disabled = state.page >= state.pages;
+  }
+
+  function openMobile(src) {
+    var clean = src.split('#')[0].split('?')[0];
+    var isPdf = /\.pdf$/i.test(clean);
+    showMobile(true);
+    state = { src: clean, pages: 0, page: 1 };
+    if (!isPdf) {
+      mobileImg.src = clean;
+      pageLabel.textContent = '图片预览';
+      prevBtn.hidden = true;
+      nextBtn.hidden = true;
+      return;
+    }
+    prevBtn.hidden = false;
+    nextBtn.hidden = false;
+    prevBtn.disabled = true;
+    nextBtn.disabled = true;
+    pageLabel.textContent = '加载中…';
+    mobileImg.src = clean + '?page=1';
+    fetch(clean + '?meta=1', { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (state.src !== clean) return;
+        state.pages = data.pages || 0;
+        if (!state.pages) { pageLabel.textContent = '无法预览，请点新标签打开'; return; }
+        loadPage(1);
+      })
+      .catch(function () { pageLabel.textContent = '预览失败，请点新标签打开'; });
+  }
+
   function toggle(show, src, label) {
     var open = show === undefined ? panel.hidden : show;
-    if (open && src && frame.getAttribute('src') !== src) {
-      frame.src = src;
-      external.href = src;
-      if (label) title.textContent = label;
+    if (open && src) {
+      if (src !== current) {
+        current = src;
+        frame.src = src;
+        external.href = src;
+        if (label) title.textContent = label;
+      }
+      if (isMobile()) openMobile(src);
+      else showMobile(false);
     }
+    if (!open) showMobile(false);
     panel.hidden = !open;
     document.body.classList.toggle('pdf-open', open);
   }
+
   document.querySelectorAll('[data-pdf-toggle]').forEach(function (a) {
     a.addEventListener('click', function (e) {
+      var src = a.dataset.pdfSrc || a.getAttribute('href');
+      if (prefersNewTab() && src) {
+        e.preventDefault();
+        var win = window.open(src, '_blank');
+        if (!win) window.location.href = src;  // 弹窗被拦截时当前页兜底
+        return;
+      }
       e.preventDefault();
-      toggle(true, a.dataset.pdfSrc || a.getAttribute('href'), a.dataset.pdfTitle);
+      toggle(true, src, a.dataset.pdfTitle);
     });
   });
   document.getElementById('pdf-close').addEventListener('click', function () { toggle(false); });
-  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') toggle(false); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') toggle(false);
+    if (panel.hidden || mobileBox.hidden || !state.pages) return;
+    if (e.key === 'ArrowLeft') loadPage(state.page - 1);
+    if (e.key === 'ArrowRight') loadPage(state.page + 1);
+  });
+  prevBtn.addEventListener('click', function () { loadPage(state.page - 1); });
+  nextBtn.addEventListener('click', function () { loadPage(state.page + 1); });
+  var lastMobile = isMobile();
+  window.addEventListener('resize', function () {
+    var now = isMobile();
+    if (now === lastMobile) return;
+    lastMobile = now;
+    if (panel.hidden || !current) return;
+    if (now) openMobile(current);
+    else showMobile(false);
+  });
 })();
 </script>

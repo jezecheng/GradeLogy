@@ -9,7 +9,7 @@
   <h2>讲次进度（{{ lectures|length }}）</h2>
   {% if lectures %}
   <table>
-    <tr><th>讲次</th><th>截止时间</th><th>提交</th><th>状态</th><th>得分</th><th></th></tr>
+    <tr><th>讲次</th><th>截止时间</th><th>提交</th><th>状态</th><th>正确率</th><th></th></tr>
     {% for h in lectures %}
     <tr>
       <td><a href="{{ url_for('lecture_detail', hid=h.id) }}">{{ h.title }}</a></td>
@@ -19,7 +19,7 @@
         {% if h.my_status %}<span class="tag tag-{{ h.my_status }}">{{ h.my_status }}</span>
         {% else %}<span class="tag tag-未提交">未提交</span>{% endif %}
       </td>
-      <td>{% if h.my_score %}<span class="score">{{ h.my_score }}</span>{% else %}—{% endif %}</td>
+      <td>{% set acc = acc_by.get(h.last_sub_id) if h.last_sub_id else '' %}{% if acc %}<span class="score">{{ acc }}</span>{% else %}—{% endif %}</td>
       <td>
         {% if h.last_sub_id %}
         <a class="btn-link" href="{{ url_for('submission_review', sid=h.last_sub_id) }}">查看批改</a>

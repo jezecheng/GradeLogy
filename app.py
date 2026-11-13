@@ -219,6 +219,50 @@ def _json_or_none(value):
 app.jinja_env.filters["fromjson"] = _json_or_none
 
 
+def file_list(value):
+    """submissions.file_path 兼容单文件与 JSON 数组（一次提交多张图片/多页）。"""
+    if not value:
+        return []
+    text = str(value)
+    if text.startswith("["):
+        try:
+            data = json.loads(text)
+        except (TypeError, ValueError):
+            return [text]
+        return [str(p) for p in data if p] if isinstance(data, list) else [text]
+    return [text]
+
+
+app.jinja_env.filters["file_list"] = file_list
+
+
+def accuracy_text(n_right, n_partial, n_wrong):
+    """作业正确率 = 完全答对题数 / 已判定题数；半对、无法判定不计为正确。"""
+    judged = (n_right or 0) + (n_partial or 0) + (n_wrong or 0)
+    if not judged:
+        return ""
+    return f"{round(n_right * 100 / judged)}%"
+
+
+app.jinja_env.globals["accuracy"] = accuracy_text
+
+
+def _accuracy_by_submission(db, sub_ids):
+    """按提交 ID 批量计算正确率，返回 {submission_id: '75%'}。"""
+    ids = [int(i) for i in sub_ids if i]
+    if not ids:
+        return {}
+    rows = db.execute(
+        "SELECT submission_id, "
+        "SUM(CASE WHEN verdict='对' THEN 1 ELSE 0 END) AS n_right, "
+        "SUM(CASE WHEN verdict='半对' THEN 1 ELSE 0 END) AS n_partial, "
+        "SUM(CASE WHEN verdict='错' THEN 1 ELSE 0 END) AS n_wrong "
+        f"FROM questions WHERE submission_id IN ({','.join('?' * len(ids))}) "
+        "GROUP BY submission_id", ids).fetchall()
+    return {r["submission_id"]: accuracy_text(r["n_right"], r["n_partial"], r["n_wrong"])
+            for r in rows}
+
+
 def _md_safe(md):
     """模板里直接用 {{ hw.summary_md|markdown_safe }} 渲染 Markdown 片段。"""
     if not md:
@@ -419,9 +463,12 @@ def _migrate_upload_layout(con):
     for r in con.execute("""
             SELECT s.id, s.file_path, s.student_id, h.course_id, h.id
             FROM submissions s JOIN lectures h ON h.id=s.lecture_id"""):
-        path = move(r[1], r[3], r[4], r[2])
-        if path != r[1]:
-            con.execute("UPDATE submissions SET file_path=? WHERE id=?", (path, r[0]))
+        paths = file_list(r[1])
+        new_paths = [move(p, r[3], r[4], r[2]) for p in paths]
+        if new_paths != paths:
+            stored = (new_paths[0] if len(new_paths) == 1
+                      else json.dumps(new_paths, ensure_ascii=False))
+            con.execute("UPDATE submissions SET file_path=? WHERE id=?", (stored, r[0]))
             moved += 1
     if moved:
         log.info("附件目录结构迁移：更新 %s 条记录", moved)
@@ -1355,9 +1402,11 @@ def lecture_detail(hid):
     answer_total = pdf_page_count(os.path.join(UPLOAD_DIR, hw["answer_pdf"])) if hw["answer_pdf"] else 0
     answer_picked = _page_list(hw["answer_pages"])
 
+    acc_by = _accuracy_by_submission(db, [s["id"] for s in subs])
     return render_template("lecture.html", hw=hw, course=course, subs=subs, students=students,
                            qstats=qstats, n_subs=n_subs, n_graded=n_graded, n_reviewed=n_reviewed,
-                           answer_total=answer_total, answer_picked=answer_picked)
+                           answer_total=answer_total, answer_picked=answer_picked,
+                           acc_by=acc_by)
 
 
 @app.route("/lecture/<oid:hid>/upload-for", methods=["POST"])
@@ -1375,21 +1424,29 @@ def lecture_upload_for(hid):
     if not student_id or not enrolled:
         flash("请选择本课程的学生")
         return redirect(url_for("lecture_detail", hid=hid))
-    f = request.files.get("file")
-    if not (f and f.filename and allowed_file(f.filename)):
-        flash("请上传 png / jpg / webp / pdf 文件")
+    files = [f for f in (request.files.getlist("files") or request.files.getlist("file"))
+             if f and f.filename]
+    if not files:
+        flash("请选择要上传的作业图片或 PDF")
+        return redirect(url_for("lecture_detail", hid=hid))
+    if len(files) > 20:
+        flash("一次最多上传 20 个文件，请合并或分次上传")
         return redirect(url_for("lecture_detail", hid=hid))
     try:
-        name = save_upload(f, course["id"], hid, student_id)
+        prepared = [(f, _validate_upload(f)) for f in files]
     except ValueError as e:
         flash(str(e))
         return redirect(url_for("lecture_detail", hid=hid))
+    names = [save_upload(f, course["id"], hid, student_id, filename=fname)
+             for f, fname in prepared]
+    stored = names[0] if len(names) == 1 else json.dumps(names, ensure_ascii=False)
     db.execute("INSERT INTO submissions(lecture_id,student_id,file_path) VALUES(?,?,?)",
-               (hid, student_id, name))
+               (hid, student_id, stored))
     db.commit()
     student = db.execute("SELECT display_name FROM users WHERE id=?", (student_id,)).fetchone()
-    log.info("老师代传作业 lecture=%s student=%s operator=%s", hid, student_id, g.user["username"])
-    flash(f"已替 {student['display_name']} 上传作业，可点「AI 批阅」开始批改")
+    log.info("老师代传作业 lecture=%s student=%s files=%s operator=%s",
+             hid, student_id, len(names), g.user["username"])
+    flash(f"已替 {student['display_name']} 上传 {len(names)} 个文件，可点「AI 批阅」开始批改")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
@@ -1653,18 +1710,17 @@ def student_detail(cid, sid):
             ORDER BY s.id DESC LIMIT 1) AS last_sub_id,
           (SELECT COUNT(*) FROM submissions s WHERE s.lecture_id=h.id AND s.student_id=?) AS n_subs,
           (SELECT s.status FROM submissions s WHERE s.lecture_id=h.id AND s.student_id=?
-            ORDER BY s.id DESC LIMIT 1) AS my_status,
-          (SELECT s.score FROM submissions s WHERE s.lecture_id=h.id AND s.student_id=?
-            ORDER BY s.id DESC LIMIT 1) AS my_score
+            ORDER BY s.id DESC LIMIT 1) AS my_status
         FROM lectures h WHERE h.course_id=?
         ORDER BY h.title COLLATE NOCASE, h.id""",
-        (sid, sid, sid, sid, cid)).fetchall()
+        (sid, sid, sid, cid)).fetchall()
     exams = db.execute("""
         SELECT x.id, x.title, x.exam_date, x.full_score, s.score, s.comment
         FROM exams x LEFT JOIN exam_scores s ON s.exam_id=x.id AND s.student_id=?
         WHERE x.course_id=? ORDER BY x.id DESC""", (sid, cid)).fetchall()
+    acc_by = _accuracy_by_submission(db, [h["last_sub_id"] for h in lectures])
     return render_template("student_detail.html", course=course, student=student,
-                           lectures=lectures, exams=exams)
+                           lectures=lectures, exams=exams, acc_by=acc_by)
 
 
 # ---------- 老师：考试（只录分数，不做 AI 批阅） ----------
@@ -1781,7 +1837,7 @@ def submission_grade(sid):
     log.info("开始批阅 submission=%s lecture=%s file=%s answer=%s pages=%s",
              sid, hw["id"], sub["file_path"], hw["answer_pdf"], hw["answer_pages"])
     try:
-        gen = run_grading(g.user["id"], sub["file_path"], hw["answer_pdf"],
+        gen = run_grading(g.user["id"], file_list(sub["file_path"]), hw["answer_pdf"],
                           scope=_scope_instruction(hw),
                           answer_pages=_page_list(hw["answer_pages"]),
                           prompt=_prompt_content("grade", course["grade_prompt_id"]))
@@ -1796,13 +1852,11 @@ def submission_grade(sid):
     db.execute("DELETE FROM questions WHERE submission_id=?", (sid,))
     for i, q in enumerate(gen["questions"], 1):
         comment = (q.get("comment") or "").strip()
-        score = q.get("score")
         db.execute("INSERT INTO questions(submission_id,no,page_no,image_path,ocr_text,"
-                   "standard_answer,score,note,max_score,verdict,ai_comment) "
-                   "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                   "standard_answer,note,verdict,ai_comment) "
+                   "VALUES(?,?,?,?,?,?,?,?,?)",
                    (sid, q.get("no") or str(i), 1, "", q.get("ocr", ""),
-                    q.get("standard_answer", ""), "" if score is None else str(score),
-                    comment, _as_num(q.get("max_score")),
+                    q.get("standard_answer", ""), comment,
                     q.get("verdict", ""), comment))
     summary = gen.get("summary") or {}
     db.execute("UPDATE submissions SET status='待批改', ai_summary=?, "
@@ -1841,7 +1895,7 @@ def submission_review(sid):
 @app.route("/submission/<oid:sid>/review/save", methods=["POST"])
 @role_required("teacher")
 def submission_review_save(sid):
-    """保存逐题的 OCR 文本、得分、评语，以及总评。"""
+    """保存逐题的 OCR 文本、判定、评语，以及总评；作业不再单独赋分。"""
     db = get_db()
     sub = db.execute("SELECT * FROM submissions WHERE id=?", (sid,)).fetchone()
     if not sub:
@@ -1852,7 +1906,6 @@ def submission_review_save(sid):
         qid = q["id"]
         fields = {"ocr_text": request.form.get(f"ocr_{qid}", "").strip(),
                   "standard_answer": request.form.get(f"standard_{qid}", "").strip(),
-                  "score": request.form.get(f"score_{qid}", "").strip(),
                   "note": request.form.get(f"note_{qid}", "").strip()}
         # 判定可人工修正；旧页面没有该字段时保持原值不动
         if f"verdict_{qid}" in request.form:
@@ -1860,10 +1913,10 @@ def submission_review_save(sid):
             fields["verdict"] = v if v in ("", "对", "半对", "错", "无法判定") else ""
         sets = ", ".join(f"{k}=?" for k in fields)
         db.execute(f"UPDATE questions SET {sets} WHERE id=?", (*fields.values(), qid))
-    db.execute("UPDATE submissions SET score=?, feedback=?, status='已批改', grader=?, "
+    # 作业只统计正确率，不再保存总分；清空历史遗留的分数串
+    db.execute("UPDATE submissions SET score='', feedback=?, status='已批改', grader=?, "
                "updated_at=CURRENT_TIMESTAMP WHERE id=?",
-               (request.form.get("total_score", "").strip(),
-                request.form.get("overall", "").strip(),
+               (request.form.get("overall", "").strip(),
                 f"{g.user['display_name']} 逐题批改", sid))
     db.commit()
     if (request.form.get("then") or "") == "report":
@@ -2175,17 +2228,18 @@ def student_home():
         SELECT h.*, c.name AS course_name,
           (SELECT COUNT(*) FROM submissions s
             WHERE s.lecture_id=h.id AND s.student_id=?) AS my_subs,
+          (SELECT s.id FROM submissions s
+            WHERE s.lecture_id=h.id AND s.student_id=?
+            ORDER BY s.id DESC LIMIT 1) AS last_sub_id,
           (SELECT s.status FROM submissions s
             WHERE s.lecture_id=h.id AND s.student_id=?
-            ORDER BY s.id DESC LIMIT 1) AS my_status,
-          (SELECT s.score FROM submissions s
-            WHERE s.lecture_id=h.id AND s.student_id=?
-            ORDER BY s.id DESC LIMIT 1) AS my_score
+            ORDER BY s.id DESC LIMIT 1) AS my_status
         FROM lectures h
         JOIN courses c ON c.id=h.course_id
         JOIN enrollments e ON e.course_id=c.id AND e.student_id=?
         ORDER BY h.title COLLATE NOCASE, h.id""",
         (g.user["id"],) * 4).fetchall()
+    acc_by = _accuracy_by_submission(db, [h["last_sub_id"] for h in lectures])
     by_course = {}
     for h in lectures:
         by_course.setdefault(h["course_id"], []).append(h)
@@ -2203,7 +2257,7 @@ def student_home():
         LEFT JOIN exam_scores s ON s.exam_id=x.id AND s.student_id=?
         ORDER BY x.id DESC""", (g.user["id"], g.user["id"])).fetchall()
     return render_template("student_home.html", course_groups=course_groups,
-                           exams=exams)
+                           exams=exams, acc_by=acc_by)
 
 
 @app.route("/student/lecture/<oid:hid>", methods=["GET", "POST"])
@@ -2212,19 +2266,26 @@ def student_lecture_page(hid):
     hw = student_lecture(hid)
     db = get_db()
     if request.method == "POST":
-        f = request.files.get("file")
-        if not (f and f.filename and allowed_file(f.filename)):
-            flash("请上传 png / jpg / webp / pdf 文件")
+        files = [f for f in (request.files.getlist("files") or request.files.getlist("file"))
+                 if f and f.filename]
+        if not files:
+            flash("请选择要提交的作业图片或 PDF")
+        elif len(files) > 20:
+            flash("一次最多提交 20 个文件，请合并或分次提交")
         else:
+            # 先统一校验，避免部分文件已落盘后才发现格式不对
             try:
-                name = save_upload(f, hw["course_id"], hid, g.user["id"])
+                prepared = [(f, _validate_upload(f)) for f in files]
             except ValueError as e:
                 flash(str(e))
                 return redirect(url_for("student_lecture_page", hid=hid))
+            names = [save_upload(f, hw["course_id"], hid, g.user["id"], filename=fname)
+                     for f, fname in prepared]
+            stored = names[0] if len(names) == 1 else json.dumps(names, ensure_ascii=False)
             db.execute("INSERT INTO submissions(lecture_id,student_id,file_path) VALUES(?,?,?)",
-                       (hid, g.user["id"], name))
+                       (hid, g.user["id"], stored))
             db.commit()
-            flash("提交成功，等待老师批改")
+            flash(f"提交成功（{len(names)} 个文件），等待老师批改")
         return redirect(url_for("student_lecture_page", hid=hid))
     subs = db.execute("SELECT * FROM submissions WHERE lecture_id=? AND student_id=? "
                       "ORDER BY id DESC", (hid, g.user["id"])).fetchall()
@@ -2274,6 +2335,13 @@ def _validate_upload(file_storage):
     if not any(head.startswith(sig) for sig in MAGIC_HEADS[ext]) or \
             (ext == "webp" and head[8:12] != b"WEBP"):
         raise ValueError("文件内容与扩展名不符，请重新导出后再上传")
+    size = file_storage.content_length
+    if size is None:
+        file_storage.stream.seek(0, os.SEEK_END)
+        size = file_storage.stream.tell()
+        file_storage.stream.seek(0)
+    if size > cfg.MAX_UPLOAD_MB * 1024 * 1024:
+        raise ValueError(f"单个文件不能超过 {cfg.MAX_UPLOAD_MB}MB")
     return f"{datetime.now():%Y%m%d%H%M%S}_{secrets.token_hex(3)}_{orig or 'file.' + ext}"
 
 
@@ -2291,27 +2359,23 @@ def demo_questions(count=6):
     """演示模式：生成占位批阅结果，用于没有 AI 接口时体验流程。"""
     return [{"no": str(i), "ocr": f"（演示模式）第 {i} 题 OCR 占位文本，请手动修改成学生实际作答。",
              "standard_answer": f"（演示模式）请在此填写第 {i} 题的标准答案。",
-             "verdict": "半对", "score": 0.0, "max_score": 0.0,
+             "verdict": "半对",
              "comment": "（演示模式）请手动核对并修改。"}
             for i in range(1, count + 1)]
 
 
-def _as_num(value, default=0.0):
-    try:
-        return float(str(value).strip())
-    except (TypeError, ValueError):
-        return default
-
-
 def _build_summary(questions, weak_points, evaluation, errors):
-    """总分/满分/判定分布一律由后端按题汇总，不依赖模型跨批统计。"""
+    """判定分布与正确率一律由后端按题汇总，不依赖模型跨批统计。"""
+    right = [q["no"] for q in questions if q.get("verdict") == "对"]
+    partial = [q["no"] for q in questions if q.get("verdict") == "半对"]
+    wrong = [q["no"] for q in questions if q.get("verdict") == "错"]
+    unknown = [q["no"] for q in questions if q.get("verdict") == "无法判定"]
     return {
-        "total": sum(_as_num(q.get("score")) for q in questions),
-        "max_total": sum(_as_num(q.get("max_score")) for q in questions),
-        "right": [q["no"] for q in questions if q.get("verdict") == "对"],
-        "partial": [q["no"] for q in questions if q.get("verdict") == "半对"],
-        "wrong": [q["no"] for q in questions if q.get("verdict") == "错"],
-        "unknown": [q["no"] for q in questions if q.get("verdict") == "无法判定"],
+        "accuracy": accuracy_text(len(right), len(partial), len(wrong)),
+        "right": right,
+        "partial": partial,
+        "wrong": wrong,
+        "unknown": unknown,
         "weak_points": weak_points,
         "evaluation": evaluation,
         "errors": errors,
@@ -2338,8 +2402,10 @@ def run_grading(teacher_id, file_name, answer_pdf="", scope="", answer_pages=Non
                 "error": "尚未配置 AI 接口。可以先勾选「演示模式」体验完整流程，或到「AI 设置」填写接口地址、密钥与模型。"}
 
     extra = scope or ""
+    student_paths = [os.path.join(UPLOAD_DIR, p) for p in
+                     (file_name if isinstance(file_name, (list, tuple)) else [file_name])]
     gen = grade_pdf_submission(
-        os.path.join(UPLOAD_DIR, file_name),
+        student_paths,
         os.path.join(UPLOAD_DIR, answer_pdf) if answer_pdf else "",
         api_url, api_key, model,
         extra=extra, answer_pages=answer_pages, prompt=prompt)
@@ -2684,8 +2750,10 @@ def _consistency_issues():
             "WHERE s.id IS NULL")], fixable=True, detail="可安全删除")
 
     add("missing_submission_file", "error", "提交记录对应的学生文件已丢失",
-        [(r["id"],) for r in missing(
-            db.execute("SELECT id, file_path FROM submissions").fetchall(), "file_path")],
+        [(r["id"],) for r in db.execute("SELECT id, file_path FROM submissions").fetchall()
+         if file_list(r["file_path"])
+         and not all(os.path.exists(os.path.join(UPLOAD_DIR, p))
+                     for p in file_list(r["file_path"]))],
         detail="原文件不可下载，批改结果仍在")
 
     add("missing_answer_pdf", "warn", "讲次的教师版 PDF 丢失",
@@ -3143,8 +3211,8 @@ def _student_files(uid):
     db = get_db()
     paths = set()
     for r in db.execute("SELECT file_path FROM submissions WHERE student_id=?", (uid,)):
-        if r["file_path"]:
-            paths.add(os.path.normpath(r["file_path"]).replace("\\", "/"))
+        for p in file_list(r["file_path"]):
+            paths.add(os.path.normpath(p).replace("\\", "/"))
     for r in db.execute("SELECT q.image_path FROM questions q "
                         "JOIN submissions s ON s.id=q.submission_id "
                         "WHERE s.student_id=? AND q.image_path != ''", (uid,)):
@@ -3165,6 +3233,18 @@ def uploaded_file(filename):
         if wanted not in _student_files(g.user["id"]):
             log.warning("越权访问文件 student=%s path=%s", g.user["id"], wanted)
             abort(403)
+    full = os.path.abspath(os.path.join(UPLOAD_DIR, filename))
+    if not full.startswith(os.path.abspath(UPLOAD_DIR) + os.sep):
+        abort(404)
+    # 手机端 PDF 预览：iframe 在 iOS 上只能显示第一页，改由服务端逐页渲染成图片
+    if request.args.get("meta"):
+        return jsonify(pages=pdf_page_count(full))
+    page = request.args.get("page", type=int)
+    if page:
+        data = render_page_jpeg(full, page, scale=1.8, quality=80)
+        if not data:
+            abort(404)
+        return send_file(io.BytesIO(data), mimetype="image/jpeg", max_age=3600)
     return send_from_directory(UPLOAD_DIR, filename)
 
 

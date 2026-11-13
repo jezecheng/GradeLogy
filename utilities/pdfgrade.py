@@ -254,7 +254,8 @@ def grade_pdf_submission(student_path, answer_path, api_url, api_key, model,
                          extra="", max_tokens=32768, answer_pages=None, prompt=""):
     """批阅一份作业，返回 {questions, weak_points, evaluation, total_score, errors, error}。
 
-    student_path / answer_path 为本地绝对路径。模型必须是支持图片输入的多模态模型；
+    student_path 为本地绝对路径或路径列表（一次提交多张图片/多页时按顺序合并）；
+    answer_path 为本地绝对路径。模型必须是支持图片输入的多模态模型；
     接口按 OpenAI 兼容的 chat/completions 协议传 image_url content part。
     answer_pages 为教师版 PDF 中要发送的页码（1 起），为空表示整份文件。
     prompt 为老师自选的批阅提示词正文，输出格式由系统统一追加；为空用内置默认提示词。
@@ -262,10 +263,14 @@ def grade_pdf_submission(student_path, answer_path, api_url, api_key, model,
     if not answer_path:
         return {"questions": [], "weak_points": [], "evaluation": "", "total_score": "",
                 "errors": [], "error": "请先上传教师版标准答案 PDF，再开始批阅。"}
-    student_parts, err = _file_parts(student_path, "学生作业")
-    if err:
-        return {"questions": [], "weak_points": [], "evaluation": "", "total_score": "",
-                "errors": [], "error": err}
+    student_paths = list(student_path) if isinstance(student_path, (list, tuple)) else [student_path]
+    student_parts = []
+    for path in student_paths:
+        parts, err = _file_parts(path, "学生作业")
+        if err:
+            return {"questions": [], "weak_points": [], "evaluation": "", "total_score": "",
+                    "errors": [], "error": err}
+        student_parts += parts
     answer_parts, err = _file_parts(answer_path, "标准答案", answer_pages)
     if err:
         return {"questions": [], "weak_points": [], "evaluation": "", "total_score": "",

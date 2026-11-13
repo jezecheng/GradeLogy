@@ -8,15 +8,18 @@
 {% set n_partial = questions|selectattr('verdict', 'equalto', '半对')|list|length %}
 {% set n_wrong = questions|selectattr('verdict', 'equalto', '错')|list|length %}
 {% set n_unknown = questions|selectattr('verdict', 'equalto', '无法判定')|list|length %}
-{% set auto_total = (n_right|string) ~ '/' ~ (n_total|string) if n_total else '' %}
 {% set n_reviewed = questions|selectattr('reviewed')|list|length %}
 {% set all_reviewed = n_total > 0 and n_reviewed == n_total %}
-{% set pdf_url = url_for('uploaded_file', filename=sub.file_path) %}
+{% set pdf_files = sub.file_path|file_list %}
+{% set pdf_url = url_for('uploaded_file', filename=pdf_files[0]) %}
 <p><a href="{{ url_for('lecture_detail', hid=hw.id) }}">← 返回 {{ hw.title }}</a></p>
 <h1>逐题批改：{{ sub.display_name }}</h1>
 <p class="muted">
   {{ sub.username }} · {{ hw.title }} · 提交于 {{ sub.created_at }}
-  · <a href="{{ pdf_url }}" target="_blank" data-pdf-toggle>查看原始扫描件</a>
+  · <a href="{{ pdf_url }}" target="_blank" data-pdf-toggle>查看原始扫描件{% if pdf_files|length > 1 %}（1/{{ pdf_files|length }}）{% endif %}</a>
+  {% for f in pdf_files[1:] %}
+  · <a href="{{ url_for('uploaded_file', filename=f) }}" target="_blank">扫描件 {{ loop.index + 1 }}</a>
+  {% endfor %}
   {% if n_total %}
   · 已复核 <strong id="reviewed-count">{{ n_reviewed }}</strong>/{{ n_total }} 题
   {% endif %}
@@ -35,16 +38,10 @@
 {% if summary %}
 <div class="card ai-summary">
   <h2>AI 汇总</h2>
-  {% if summary.max_total %}
-  <p>总分 <span class="score">{{ '%g'|format(summary.total|float) }}/{{ '%g'|format(summary.max_total|float) }}</span>
-  {% else %}
-  <p>本次为定性批改（教师版未提供每题分值，AI 不编造分数，请老师手动给分）
-  {% endif %}
+  <p>正确率 <span class="score">{{ accuracy(n_right, n_partial, n_wrong)|default('—', true) }}</span>
     <span class="muted small">
-      对 {{ summary.right|length }} 题{% if summary.right %}（{{ summary.right|join('、') }}）{% endif %}
-      · 半对 {{ summary.partial|length }} 题{% if summary.partial %}（{{ summary.partial|join('、') }}）{% endif %}
-      · 错 {{ summary.wrong|length }} 题{% if summary.wrong %}（{{ summary.wrong|join('、') }}）{% endif %}
-      {% if summary.unknown %}· 无法判定 {{ summary.unknown|length }} 题（{{ summary.unknown|join('、') }}）{% endif %}
+      对 {{ n_right }} 题 · 半对 {{ n_partial }} 题 · 错 {{ n_wrong }} 题
+      {% if n_unknown %}· 无法判定 {{ n_unknown }} 题{% endif %}
     </span>
   </p>
   {% if summary.weak_points %}
@@ -63,7 +60,7 @@
 
 {% if not questions %}
 <div class="card">
-  <p class="muted">还没有批阅结果。点「AI 批阅」后，AI 会把整份学生作业与标准答案对照，逐题给出判定、评语与建议分数。</p>
+  <p class="muted">还没有批阅结果。点「AI 批阅」后，AI 会把整份学生作业与标准答案对照，逐题给出判定与评语。</p>
   <form method="post" action="{{ url_for('submission_grade', sid=sub.id) }}" class="review-grade-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <button>AI 批阅</button>
@@ -83,9 +80,6 @@
         {% endif %}
         <span class="reviewed-badge{% if not q.reviewed %} is-pending{% endif %}"
               data-reviewed="{{ 1 if q.reviewed else 0 }}">{{ '✓ 已复核' if q.reviewed else '待复核' }}</span>
-        {% if q.score != '' %}
-        <span class="q-score-hint">{{ q.score }}{% if q.max_score %}/{{ '%g'|format(q.max_score|float) }}{% endif %} 分</span>
-        {% endif %}
       </summary>
       <div class="review-row">
         <div class="review-col">
@@ -100,12 +94,6 @@
                 {% endfor %}
               </select>
             </label>
-            <label>本题得分{% if q.max_score %}（满分 {{ '%g'|format(q.max_score|float) }}）{% endif %}
-              <input name="score_{{ q.id }}" value="{{ q.score }}" placeholder="如 4">
-            </label>
-            {% if q.verdict and q.max_score %}
-            <span class="ai-hint">AI 建议 {{ q.score if q.score != '' else '—' }}/{{ '%g'|format(q.max_score|float) }}</span>
-            {% endif %}
           </div>
           <label>本题评语 <textarea name="note_{{ q.id }}" rows="2">{{ q.note }}</textarea></label>
         </div>
@@ -126,10 +114,14 @@
 
     <div class="review-row total-row">
       <div class="review-col">
-        <div class="col-title">总分（默认按小问统计）</div>
-        <input name="total_score" value="{{ sub.score or auto_total }}" placeholder="{{ auto_total or '如 18/25' }}">
+        <div class="col-title">正确率统计</div>
+        <p>正确率 <strong>{{ accuracy(n_right, n_partial, n_wrong)|default('—', true) }}</strong>
+          <span class="muted small">
+            （对 {{ n_right }} · 半对 {{ n_partial }} · 错 {{ n_wrong }}{% if n_unknown %} · 无法判定 {{ n_unknown }}{% endif %}，共 {{ n_total }} 个小问）
+          </span>
+        </p>
         <p class="muted small" style="margin-top:6px">
-          共 {{ n_total }} 个小问：正确 {{ n_right }} · 半对 {{ n_partial }} · 错 {{ n_wrong }}{% if n_unknown %} · 无法判定 {{ n_unknown }}{% endif %}
+          按「完全答对的题数 ÷ 已判定题数」计算；半对与无法判定不计为正确。保存后学生即可看到每题判定与评语。
         </p>
       </div>
       <div class="review-col wide">
@@ -150,7 +142,7 @@
       <button type="submit" name="then" value="report" id="gen-report"
               class="ghost{% if not all_reviewed %} is-disabled{% endif %}"
               data-blocked="{{ 0 if all_reviewed else 1 }}">生成批阅报告</button>
-      <span class="muted small">分数与评语已按 AI 建议预填，可直接修改。{% if sub.status != '已批改' %}保存前学生看不到本次结果；{% endif %}保存后学生即可看到每题判定、得分、评语与总评。</span>
+      <span class="muted small">判定与评语已按 AI 建议预填，可直接修改。{% if sub.status != '已批改' %}保存前学生看不到本次结果；{% endif %}保存后学生即可看到每题判定、评语与总评。</span>
     </div>
   </form>
 </div>

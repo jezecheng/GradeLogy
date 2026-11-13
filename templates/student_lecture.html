@@ -13,15 +13,30 @@
 {% endif %}
 
 <div class="card">
-  <h2>上传作业扫描件</h2>
-  <form method="post" enctype="multipart/form-data" class="stack-form">
+  <h2>提交作业</h2>
+  <form method="post" enctype="multipart/form-data" class="stack-form" data-draft-upload>
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <label>文件（png / jpg / webp / pdf，≤20MB）
-      <input type="file" name="file" accept=".png,.jpg,.jpeg,.webp,.pdf" required>
-    </label>
-    <button type="submit">提交</button>
+    <input type="file" data-draft-picker accept=".png,.jpg,.jpeg,.webp,.pdf" multiple hidden>
+    <input type="file" data-draft-camera accept="image/*" capture="environment" hidden>
+    <div class="submit-actions">
+      <button type="button" class="small" data-draft-open="picker">选择图片 / PDF（可多选）</button>
+      <button type="button" class="small" data-draft-open="camera">拍照提交</button>
+    </div>
+    <p class="muted small">可一次选择多张图片或 PDF；手机上点「拍照提交」会直接打开相机。单个文件 ≤20MB，一次最多 20 个。</p>
+    <div class="draft-box" data-draft-box hidden>
+      <div class="draft-head">
+        <strong>草稿箱</strong>
+        <span class="muted small" data-draft-count></span>
+      </div>
+      <div class="draft-grid" data-draft-grid></div>
+      <div class="draft-foot">
+        <button type="button" class="small" data-draft-clear>清空</button>
+        <button type="submit">确认提交</button>
+      </div>
+    </div>
+    <input type="file" name="files" data-draft-final multiple hidden>
   </form>
-  <p class="muted small">可以重复提交，老师以最新一次为准批阅。</p>
+  <p class="muted small">提交前可先在草稿箱里预览、删除不满意的图片，确认后再最终上传。可以重复提交，老师以最新一次为准批阅。</p>
 </div>
 
 <div class="card">
@@ -29,17 +44,23 @@
   {% if subs %}
   {% for s in subs %}
   {% set sm = s.ai_summary|fromjson %}
+  {% set sm_acc = accuracy(sm.right|length, sm.partial|length, sm.wrong|length) if sm else '' %}
   <div class="sub-card">
+    {% set sfiles = s.file_path|file_list %}
+    {% set sn = subs|length - loop.index0 %}
     <div class="sub-head">
-      <a href="{{ url_for('uploaded_file', filename=s.file_path) }}" target="_blank">第 {{ subs|length - loop.index0 }} 次提交</a>
+      <span>
+      {% for f in sfiles %}
+        <a href="{{ url_for('uploaded_file', filename=f) }}" target="_blank">第 {{ sn }} 次提交{% if sfiles|length > 1 %} · {{ loop.index }}/{{ sfiles|length }}{% endif %}</a>{% if not loop.last %} · {% endif %}
+      {% endfor %}
+      </span>
       <span class="muted">{{ s.created_at }}</span>
       <span class="tag tag-{{ s.status }}">{{ s.status }}</span>
-      {% if s.score %}<span class="score">{{ s.score }}</span>{% endif %}
+      {% if revealed and sm_acc %}<span class="score" title="正确率">{{ sm_acc }}</span>{% endif %}
       {% if s.report_published %}<a class="btn-link" href="{{ url_for('student_report', sid=s.id) }}">查看批改报告</a>{% endif %}
     </div>
     {% if sm and revealed %}
-    <p class="small">AI 汇总：
-      {% if sm.max_total %}总分 <span class="score">{{ '%g'|format(sm.total|float) }}/{{ '%g'|format(sm.max_total|float) }}</span> · {% endif %}
+    <p class="small">AI 汇总：正确率 <span class="score">{{ sm_acc or '—' }}</span> ·
       <span class="muted">对 {{ sm.right|length }} 题 · 半对 {{ sm.partial|length }} 题 · 错 {{ sm.wrong|length }} 题{% if sm.unknown %} · 无法判定 {{ sm.unknown|length }} 题{% endif %}</span>
     </p>
     {% endif %}
@@ -57,7 +78,6 @@
     {% if q.verdict %}
     <span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">{{ q.verdict }}</span>
     {% endif %}
-    {% if q.score or q.max_score %}<span class="score">{{ q.score }}{% if q.max_score %} / {{ '%g'|format(q.max_score|float) }}{% endif %}</span>{% endif %}
     {% if q.note %} — {{ q.note }}{% endif %}
   </div>
   {% endfor %}

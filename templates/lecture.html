@@ -182,7 +182,7 @@
     <h2>代学生上传作业</h2>
     <p class="muted small">适用于学生把纸质作业交给老师的情况；上传后同样可以走 AI 批阅与报告。</p>
     <form method="post" action="{{ url_for('lecture_upload_for', hid=hw.id) }}"
-          enctype="multipart/form-data" class="stack-form">
+          enctype="multipart/form-data" class="stack-form" data-draft-upload>
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
       <label>选择学生
         <select name="student_id" required>
@@ -192,9 +192,24 @@
           {% endfor %}
         </select>
       </label>
-      <label>选择文件（png / jpg / webp / pdf）
-        <input type="file" name="file" accept=".png,.jpg,.jpeg,.webp,.pdf" required>
-      </label>
+      <input type="file" data-draft-picker accept=".png,.jpg,.jpeg,.webp,.pdf" multiple hidden>
+      <input type="file" data-draft-camera accept="image/*" capture="environment" hidden>
+      <div class="submit-actions">
+        <button type="button" class="small" data-draft-open="picker">选择图片 / PDF（可多选）</button>
+        <button type="button" class="small" data-draft-open="camera">拍照上传</button>
+      </div>
+      <p class="muted small">可一次选择多张图片或 PDF；手机上点「拍照上传」会直接打开相机。单个文件 ≤20MB，一次最多 20 个。</p>
+      <div class="draft-box" data-draft-box hidden>
+        <div class="draft-head">
+          <strong>草稿箱</strong>
+          <span class="muted small" data-draft-count></span>
+        </div>
+        <div class="draft-grid" data-draft-grid></div>
+        <div class="draft-foot">
+          <button type="button" class="small" data-draft-clear>清空</button>
+        </div>
+      </div>
+      <input type="file" name="files" data-draft-final multiple hidden>
       <div class="modal-actions">
         <button type="button" class="ghost" data-dialog-close>取消</button>
         <button type="submit">确认上传</button>
@@ -217,10 +232,14 @@
               title="还有 {{ s.n_questions - s.n_reviewed }} 道题未审核">⚠ 待审核 {{ s.n_reviewed }}/{{ s.n_questions }}</span>
         {% endif %}
       {% endif %}
-      {% if s.score %}<span class="score">{{ s.score }}</span>{% endif %}
-      <a class="btn-link" href="{{ url_for('uploaded_file', filename=s.file_path) }}"
-         data-pdf-toggle data-pdf-src="{{ url_for('uploaded_file', filename=s.file_path) }}"
-         data-pdf-title="{{ s.display_name }} · 扫描件">查看扫描件</a>
+      {% set acc = acc_by.get(s.id) %}
+      {% if acc %}<span class="score" title="正确率">{{ acc }}</span>{% endif %}
+      {% set sfiles = s.file_path|file_list %}
+      {% for f in sfiles %}
+      <a class="btn-link" href="{{ url_for('uploaded_file', filename=f) }}"
+         data-pdf-toggle data-pdf-src="{{ url_for('uploaded_file', filename=f) }}"
+         data-pdf-title="{{ s.display_name }} · 扫描件{% if sfiles|length > 1 %} {{ loop.index }}{% endif %}">查看扫描件{% if sfiles|length > 1 %} {{ loop.index }}{% endif %}</a>
+      {% endfor %}
       <a class="btn-link" href="{{ url_for('submission_review', sid=s.id) }}">逐题核对</a>
       <a class="btn-link" href="{{ url_for('submission_report', sid=s.id) }}">批改报告</a>
       {% if s.report_published %}
@@ -357,7 +376,7 @@
       // 已有 AI 结果时，重新批阅会覆盖现有逐题结果与报告，先确认
       if (form.dataset.hasResult === '1' && form.dataset.confirmed !== '1') {
         e.preventDefault();
-        confirmDialog('重新批阅会覆盖这份作业现有的逐题判定、得分与批改报告，确定要重新生成吗？',
+        confirmDialog('重新批阅会覆盖这份作业现有的逐题判定与批改报告，确定要重新生成吗？',
                       '重新批阅').then(function (ok) {
           if (!ok) return;
           form.dataset.confirmed = '1';

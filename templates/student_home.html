@@ -18,7 +18,7 @@
   </summary>
   {% if group.lectures %}
   <table>
-    <tr><th>讲次</th><th>截止时间</th><th>状态</th><th>得分</th><th>讲义</th><th></th></tr>
+    <tr><th>讲次</th><th>截止时间</th><th>状态</th><th>正确率</th><th>讲义</th><th></th></tr>
     {% for h in group.lectures %}
     <tr>
       <td><a href="{{ url_for('student_lecture_page', hid=h.id) }}">{{ h.title }}</a></td>
@@ -30,7 +30,7 @@
           <span class="tag tag-未提交">未提交</span>
         {% endif %}
       </td>
-      <td>{% if h.my_status == '已批改' %}{{ h.my_score or '—' }}{% else %}—{% endif %}</td>
+      <td>{% set acc = acc_by.get(h.last_sub_id) if h.last_sub_id else '' %}{% if h.my_status == '已批改' %}{{ acc or '—' }}{% else %}—{% endif %}</td>
       <td class="small">
         {% if h.student_pdf %}
         <a href="{{ url_for('uploaded_file', filename=h.student_pdf) }}"
