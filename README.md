@@ -72,20 +72,10 @@ GradeLogy/
 └── uploads/             # 学生提交与教师版 PDF（已 gitignore）
 ```
 
-## 快速开始
+## 部署指南
 
-```bash
-# 1. 安装依赖（Python 3.10+）
-pip install -r requirements.txt
-
-# 2. 启动（首次启动自动建库、写入 admin 账号）
-python app.py
-
-# 3. 访问 http://127.0.0.1:5000
-#    默认管理员：admin / admin123（登录后必须修改）
-```
-
-> macOS 系统 Python 若缺少 CA 证书，项目会自动用 `certifi` 兜底，避免调用 HTTPS AI 接口时报 SSL 错误。
+- [单机简易部署（Windows / macOS）](docs/deploy-standalone.md)：无需技术背景，使用 Docker Desktop 在自己的电脑上运行。
+- [腾讯云部署与自动发布](docs/deploy-tencent.md)：面向 Fork 用户，包含服务器初始化、GitHub Actions 自动部署、数据持久化与常见报错处理。
 
 ## 文件存储
 
@@ -104,50 +94,6 @@ uploads/
 旧版本平铺在 `uploads/` 根目录的附件会在启动（或从旧备份恢复）时自动迁入上述结构并更新数据库引用；迁移是幂等的，可反复启动。
 
 OCR 文本、逐题判定与评语保存在数据库 `questions` 表；`questions.image_path` 留空。
-
-## 部署与配置
-
-```bash
-docker compose up -d --build
-```
-
-国内网络拉不到 Docker Hub 时，取消 `docker-compose.yml` 里 `args.BASE_IMAGE` 的注释，或：
-
-```bash
-docker build --build-arg BASE_IMAGE=docker.m.daocloud.io/library/python:3.12-slim -t gradelogy .
-```
-
-- 数据统一落在 `./data`（容器内 `/data`），备份即拷走该目录
-- 健康检查：`GET /healthz`（数据库与存储状态，异常返回 503）
-- gunicorn 单进程 8 线程：SQLite 不适合多进程写入；批改长请求 `--timeout 1800`
-
-所有部署参数集中在 `config.py`，均可用环境变量覆盖：
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `DATA_DIR` | 项目目录 | 数据根目录，数据库/附件/日志默认都在其下 |
-| `DB_PATH` | `$DATA_DIR/data.sqlite` | SQLite 文件路径 |
-| `STORAGE_DIR` | `$DATA_DIR/uploads` | 上传件目录（学生作业与标准答案） |
-| `LOG_DIR` | `$DATA_DIR/logs` | 日志目录（`app.log`，5MB 轮转 5 份） |
-| `HOST` / `PORT` | `0.0.0.0` / `5000` | 监听地址与端口 |
-| `MAX_UPLOAD_MB` | `20` | 单次上传上限 |
-| `MAX_RESTORE_MB` | `2048` | 从备份恢复时解压总量上限 |
-| `BACKUP_DIR` | `$DATA_DIR/backups` | 自动备份、手动备份与恢复前快照目录 |
-| `BACKUP_KEEP` | `7` | 保留最近几份备份，超出的自动清理 |
-| `AUTO_BACKUP` | `1` | 是否启用每日自动备份（`0` 关闭） |
-| `SECRET_KEY` | 自动生成并存入 `$DATA_DIR/.secret_key` | 生产环境建议显式设置 |
-| `AI_API_URL` / `AI_API_KEY` / `AI_MODEL` | 空 | 设置后优先于页面 AI 设置，容器部署不必把 Key 存库 |
-| `LOG_LEVEL` | `INFO` | 日志级别；设为 `WARNING` 可关闭访问日志 |
-
-## 版本与发布
-
-- `main` 是发布分支：新功能在 `feature/xxx` 等分支开发，测试通过后合并进 `main`；合并即自动部署（需先在仓库 Secrets 配置 `SERVER_HOST` / `SERVER_USER` / `SERVER_SSH_KEY` / `APP_DIR`）。普通分支的 push 不会触发部署。
-- 版本号写在仓库根目录 `VERSION`，发布时修改该文件，并按需打 tag：
-  ```bash
-  git tag v1.0.0
-  git push --tags
-  ```
-- 页面右上角「帮助 → 关于」会显示当前版本、提交号、分支、Python 版本与启动时间，并链接到站内使用文档（`docs/*.md`）。
 
 ## 数据备份与迁移
 
@@ -173,8 +119,8 @@ docker build --build-arg BASE_IMAGE=docker.m.daocloud.io/library/python:3.12-sli
 
 ## 安全提示
 
-- `data.sqlite`（含 API Key 与密码哈希）、`uploads/`、`.secret_key`、`logs/`、`backups/` 均在 `.gitignore` 中
-- 部署到公网前请：修改默认 admin 密码、配置 HTTPS 反向代理、显式设置 `SECRET_KEY`、把 AI Key 改为环境变量注入
+- `.env`、`data.sqlite`（含 API Key 与密码哈希）、`uploads/`、`.secret_key`、`logs/`、`backups/` 均在 `.gitignore` 中
+- 首次登录后必须修改默认 admin 密码
 - 备份包含敏感信息，请按机密文件保管
 
 ## 许可证

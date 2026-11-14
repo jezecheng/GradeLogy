@@ -15,13 +15,14 @@ services:
     environment:
       TZ: Asia/Shanghai
       DATA_DIR: /data
-      # 生产部署建议用随机长串，避免重启后所有人被登出
-      # SECRET_KEY: "请替换为 openssl rand -hex 32 的输出"
+      # Compose 自动读取同目录 .env；空值不会覆盖网页配置或 data/.secret_key
+      SECRET_KEY: ${SECRET_KEY:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-0}
       # AI Key 走环境变量注入，不写进数据库；设置后优先于页面上的 AI 设置
-      # AI_API_URL: https://tokenhub.tencentmaas.com/v1
-      # AI_API_KEY: sk-xxxx
-      # AI_MODEL: deepseek-v4.1-flash
-      LOG_LEVEL: INFO
+      AI_API_URL: ${AI_API_URL:-}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       # 数据库、附件、日志全部落在 /data，备份时整目录拷走即可
       - ./data:/data

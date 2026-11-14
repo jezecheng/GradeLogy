@@ -11,5 +11,6 @@
     <button type="submit">登录</button>
   </form>
   <p class="muted small">忘记密码请联系管理员重置。</p>
+  <p class="muted small center">v{{ app_version }}{% if app_commit %}+{{ app_commit }}{% endif %}</p>
 </div>
 {% endblock %}

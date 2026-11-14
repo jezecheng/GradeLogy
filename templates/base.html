@@ -38,10 +38,9 @@
 
 <dialog id="about-dialog" class="modal about-modal">
   <h2>关于 GradeLogy</h2>
-  <p class="muted">化学竞赛作业管理平台</p>
   <dl class="about-meta">
     <dt>版本</dt>
-    <dd>v{{ app_version }}</dd>
+    <dd>v{{ app_version }}{% if app_commit %}+{{ app_commit }}{% endif %}</dd>
     {% if app_commit %}
     <dt>提交</dt>
     <dd><code>{{ app_commit }}</code>{% if app_branch %} · {{ app_branch }}{% endif %}</dd>
