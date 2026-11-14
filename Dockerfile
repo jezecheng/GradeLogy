@@ -8,6 +8,11 @@ FROM ${BASE_IMAGE}
 ARG GIT_COMMIT=""
 ARG GIT_BRANCH=""
 
+# 国内构建加速：默认走腾讯云镜像；构建时传空值可切回官方源
+#   docker build --build-arg APT_MIRROR= --build-arg PIP_INDEX_URL= ...
+ARG APT_MIRROR=mirrors.cloud.tencent.com
+ARG PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     TZ=Asia/Shanghai \
@@ -20,12 +25,26 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # 只补时区数据；pypdfium2 与 pillow 用 manylinux wheel，无需额外系统库
-RUN apt-get update \
+# trixie 起用 deb822 格式（debian.sources），旧版则是 sources.list，两种都兼容
+RUN if [ -n "$APT_MIRROR" ]; then \
+      if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i "s|deb.debian.org|$APT_MIRROR|g; s|security.debian.org|$APT_MIRROR|g" \
+          /etc/apt/sources.list.d/debian.sources; \
+      elif [ -f /etc/apt/sources.list ]; then \
+        sed -i "s|deb.debian.org|$APT_MIRROR|g; s|security.debian.org|$APT_MIRROR|g" \
+          /etc/apt/sources.list; \
+      fi; \
+    fi \
+    && apt-get update \
     && apt-get install -y --no-install-recommends tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN if [ -n "$PIP_INDEX_URL" ]; then \
+      pip install --no-cache-dir --index-url "$PIP_INDEX_URL" -r requirements.txt; \
+    else \
+      pip install --no-cache-dir -r requirements.txt; \
+    fi
 
 COPY . .
 
