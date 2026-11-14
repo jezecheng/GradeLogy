@@ -252,10 +252,10 @@
         }).then(function (r) { return r.json().then(function (d) { return [r.ok, d]; }); })
           .then(function (res) {
             var ok = res[0], data = res[1];
-            if (!ok || !data.ok) throw new Error(data.error || '生成失败');
+            if (!ok || !data.ok) throw new Error((data.error || '生成失败') + (data.usage ? '\n' + data.usage : ''));
             document.getElementById('overall').value = data.text;
             genBtn.dataset.hasResult = '1';
-            genHint.textContent = '已生成新的总评，可继续修改后保存';
+            genHint.textContent = '已生成新的总评，可继续修改后保存' + (data.usage ? '；' + data.usage : '');
           }).catch(function (e) {
             alert(e.message || '生成总评失败，请稍后重试');
           }).then(function () {

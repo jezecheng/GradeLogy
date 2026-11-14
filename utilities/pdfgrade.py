@@ -214,7 +214,7 @@ def _normalize(raw):
 
 
 def analyze_answer_pdf(answer_path, api_url, api_key, model, max_tokens=16384,
-                       pages=None):
+                       pages=None, usage_hook=None):
     """从教师版标准答案里识别题目清单，返回 (questions, error)。
 
     每项为 {no, max, hint}，供老师在讲次页勾选本讲作业范围。
@@ -227,7 +227,8 @@ def analyze_answer_pdf(answer_path, api_url, api_key, model, max_tokens=16384,
                {"type": "text", "text": f"教师版标准答案，共 {len(parts)} 页："}]
     content += parts
     reply, finish, err = llm.chat(api_url, api_key, model, content,
-                                  max_tokens=max_tokens, timeout=180, retries=1)
+                                  max_tokens=max_tokens, timeout=180, retries=1,
+                                  usage_hook=usage_hook)
     if err:
         return None, f"AI 分析失败：{err}"
 
@@ -251,7 +252,8 @@ def analyze_answer_pdf(answer_path, api_url, api_key, model, max_tokens=16384,
 
 
 def grade_pdf_submission(student_path, answer_path, api_url, api_key, model,
-                         extra="", max_tokens=32768, answer_pages=None, prompt=""):
+                         extra="", max_tokens=32768, answer_pages=None, prompt="",
+                         usage_hook=None):
     """批阅一份作业，返回 {questions, weak_points, evaluation, total_score, errors, error}。
 
     student_path 为本地绝对路径或路径列表（一次提交多张图片/多页时按顺序合并）；
@@ -286,7 +288,7 @@ def grade_pdf_submission(student_path, answer_path, api_url, api_key, model,
 
     reply, finish, err = llm.chat(api_url, api_key, model, content,
                                   max_tokens=max_tokens, timeout=GRADE_TIMEOUT,
-                                  retries=GRADE_RETRIES)
+                                  retries=GRADE_RETRIES, usage_hook=usage_hook)
     if err:
         return {"questions": [], "weak_points": [], "evaluation": "", "total_score": "",
                 "errors": [], "error": f"AI 批阅失败：{err}"}
@@ -333,7 +335,7 @@ REPORT_PROMPT = DEFAULT_REPORT_PROMPT + "\n" + REPORT_OUTPUT_CONTRACT
 
 
 def ai_report_comment(questions, weak_points, evaluation, api_url, api_key, model,
-                      max_tokens=2048, prompt=""):
+                      max_tokens=2048, prompt="", usage_hook=None):
     """根据逐题结果生成报告里的「评价」部分；失败返回 {}，不影响报告其余内容。"""
     def _field(q, *names):
         for name in names:
@@ -353,7 +355,8 @@ def ai_report_comment(questions, weak_points, evaluation, api_url, api_key, mode
     base = (prompt.strip() + "\n" + REPORT_OUTPUT_CONTRACT) if prompt.strip() else REPORT_PROMPT
     content = [{"type": "text", "text": base + "\n\n数据：\n" + payload}]
     reply, finish, err = llm.chat(api_url, api_key, model, content,
-                                  max_tokens=max_tokens, timeout=120, retries=1)
+                                  max_tokens=max_tokens, timeout=120, retries=1,
+                                  usage_hook=usage_hook)
     if err:
         return {}
     data = llm.extract_json(reply)
@@ -383,7 +386,7 @@ LECTURE_SUMMARY_PROMPT = (
 )
 
 
-def ai_lecture_summary(qstats, api_url, api_key, model, max_tokens=4096):
+def ai_lecture_summary(qstats, api_url, api_key, model, max_tokens=4096, usage_hook=None):
     """根据全班逐题判定与评语，生成讲次汇总。失败返回 {}。"""
     payload = []
     for row in qstats or []:
@@ -401,7 +404,8 @@ def ai_lecture_summary(qstats, api_url, api_key, model, max_tokens=4096):
     content = [{"type": "text", "text": LECTURE_SUMMARY_PROMPT + "\n\n数据：\n" +
                 json.dumps(payload, ensure_ascii=False)}]
     reply, finish, err = llm.chat(api_url, api_key, model, content,
-                                  max_tokens=max_tokens, timeout=180, retries=1)
+                                  max_tokens=max_tokens, timeout=180, retries=1,
+                                  usage_hook=usage_hook)
     if err:
         return {}
     data = llm.extract_json(reply)

@@ -308,6 +308,12 @@ def accuracy_text(n_right, n_partial, n_wrong):
 app.jinja_env.globals["accuracy"] = accuracy_text
 
 
+def _question_no_key(value):
+    """题号按自然顺序排序，让例2排在例10前，同时兼容小问与文字前缀。"""
+    return [int(part) if part.isdigit() else part.casefold()
+            for part in re.split(r"(\d+)", str(value or ""))]
+
+
 def _accuracy_by_submission(db, sub_ids):
     """按提交 ID 批量计算正确率，返回 {submission_id: '75%'}。"""
     ids = [int(i) for i in sub_ids if i]
@@ -467,6 +473,41 @@ CREATE TABLE IF NOT EXISTS settings(
   key TEXT NOT NULL,
   value TEXT DEFAULT '',
   PRIMARY KEY(teacher_id, key));
+CREATE TABLE IF NOT EXISTS ai_operations(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  teacher_id INTEGER NOT NULL REFERENCES users(id),
+  operation_type TEXT NOT NULL,
+  course_id INTEGER,
+  lecture_id INTEGER,
+  submission_id INTEGER,
+  model TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'running',
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  error TEXT DEFAULT '');
+CREATE TABLE IF NOT EXISTS ai_usage_events(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  operation_id INTEGER NOT NULL REFERENCES ai_operations(id),
+  attempt INTEGER NOT NULL,
+  provider_request_id TEXT,
+  model TEXT DEFAULT '',
+  prompt_tokens INTEGER,
+  completion_tokens INTEGER,
+  total_tokens INTEGER,
+  cached_tokens INTEGER,
+  reasoning_tokens INTEGER,
+  latency_ms INTEGER,
+  finish_reason TEXT DEFAULT '',
+  estimated_cost REAL,
+  pricing_json TEXT DEFAULT '',
+  usage_json TEXT DEFAULT '',
+  status TEXT NOT NULL,
+  error TEXT DEFAULT '',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS idx_ai_operations_teacher ON ai_operations(teacher_id, id);
+CREATE INDEX IF NOT EXISTS idx_ai_operations_lecture ON ai_operations(lecture_id, id);
+CREATE INDEX IF NOT EXISTS idx_ai_operations_submission ON ai_operations(submission_id, id);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_operation ON ai_usage_events(operation_id, attempt);
 """
 
 # ---------- 数据库 ----------
@@ -663,6 +704,152 @@ def save_setting(teacher_id, key, value):
         "INSERT INTO settings(teacher_id,key,value) VALUES(?,?,?) "
         "ON CONFLICT(teacher_id,key) DO UPDATE SET value=excluded.value",
         (teacher_id, key, value))
+
+
+# ---------- AI 操作与逐次调用用量 ----------
+AI_OPERATION_LABEL = {
+    "scope_analyze": "作业范围分析",
+    "grade": "作业批阅",
+    "lecture_summary": "讲次汇总",
+    "report_generate": "批改报告评价",
+    "report_comment": "重新生成总评",
+}
+AI_STATUS_LABEL = {"running": "进行中", "success": "成功", "failed": "失败"}
+
+
+def _start_ai_operation(teacher_id, operation_type, model, course_id=None,
+                        lecture_id=None, submission_id=None):
+    """创建一次用户操作；每次点击/重试都使用新的 operation_id。"""
+    preset = next((m for m in MODEL_PRESETS if m["model"] == model), None)
+    peak = _now_in_peak()[0]
+    pricing = {
+        "price_in": preset["price_in"] if preset else None,
+        "price_out": preset["price_out"] if preset else None,
+        "peak_multiplier": 2 if peak else 1,
+        "currency": "CNY",
+        "unit": "元/百万 token",
+        "source": "MODEL_PRESETS",
+    }
+    started_at = datetime.now().isoformat(sep=" ", timespec="milliseconds")
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO ai_operations(teacher_id,operation_type,course_id,lecture_id,"
+        "submission_id,model,status,started_at) VALUES(?,?,?,?,?,?,'running',?)",
+        (teacher_id, operation_type, course_id, lecture_id, submission_id, model, started_at))
+    db.commit()
+    operation = {"id": cur.lastrowid, "pricing": pricing, "finished": False}
+    operation["usage_hook"] = lambda event: _record_ai_usage(operation, event)
+    return operation
+
+
+def _record_ai_usage(operation, event):
+    """记录单次模型请求；价格和高峰倍率取操作开始时的快照。"""
+    pricing = operation["pricing"]
+    prompt = event.get("prompt_tokens")
+    completion = event.get("completion_tokens")
+    cost = None
+    if (prompt is not None and completion is not None and
+            pricing["price_in"] is not None and pricing["price_out"] is not None):
+        cost = ((prompt * pricing["price_in"] + completion * pricing["price_out"])
+                * pricing["peak_multiplier"] / 1000000)
+    usage = event.get("usage")
+    db = get_db()
+    db.execute(
+        "INSERT INTO ai_usage_events(operation_id,attempt,provider_request_id,model,"
+        "prompt_tokens,completion_tokens,total_tokens,cached_tokens,reasoning_tokens,"
+        "latency_ms,finish_reason,estimated_cost,pricing_json,usage_json,status,error) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (operation["id"], event.get("attempt"), event.get("provider_request_id"),
+         event.get("model") or "", prompt, completion, event.get("total_tokens"),
+         event.get("cached_tokens"), event.get("reasoning_tokens"), event.get("latency_ms"),
+         event.get("finish_reason") or "", cost,
+         json.dumps(pricing, ensure_ascii=False),
+         json.dumps(usage, ensure_ascii=False) if usage is not None else "",
+         event.get("status") or "error", str(event.get("error") or "")[:1000]))
+    db.commit()
+
+
+def _finish_ai_operation(operation, status, error=""):
+    if not operation or operation["finished"]:
+        return
+    get_db().execute(
+        "UPDATE ai_operations SET status=?,finished_at=?,error=? WHERE id=?",
+        (status, datetime.now().isoformat(sep=" ", timespec="milliseconds"),
+         str(error or "")[:1000], operation["id"]))
+    get_db().commit()
+    operation["finished"] = True
+
+
+def _ai_operation_history(teacher_id=None, lecture_id=None, submission_id=None,
+                          operation_id=None, limit=5):
+    """操作级聚合供页面与后续 report 复用；部分请求缺 usage 时显式保留未知次数。"""
+    where, params = [], []
+    if operation_id is not None:
+        where.append("o.id=?")
+        params.append(operation_id)
+    if teacher_id is not None:
+        where.append("o.teacher_id=?")
+        params.append(teacher_id)
+    if lecture_id is not None:
+        where.append("o.lecture_id=?")
+        params.append(lecture_id)
+    if submission_id is not None:
+        where.append("o.submission_id=?")
+        params.append(submission_id)
+    sql = """
+        SELECT o.*, COUNT(e.id) AS request_count,
+          CASE WHEN COUNT(e.prompt_tokens)>0 THEN SUM(e.prompt_tokens) END AS prompt_tokens,
+          CASE WHEN COUNT(e.completion_tokens)>0 THEN SUM(e.completion_tokens) END AS completion_tokens,
+          CASE WHEN COUNT(e.total_tokens)>0 THEN SUM(e.total_tokens) END AS total_tokens,
+          SUM(CASE WHEN e.id IS NOT NULL AND e.total_tokens IS NULL THEN 1 ELSE 0 END)
+            AS unknown_usage_count,
+          CASE WHEN COUNT(e.estimated_cost)>0 THEN SUM(e.estimated_cost) END AS estimated_cost,
+          SUM(CASE WHEN e.id IS NOT NULL AND e.estimated_cost IS NULL THEN 1 ELSE 0 END)
+            AS unknown_cost_count,
+          ROUND((julianday(o.finished_at)-julianday(o.started_at))*86400,1) AS elapsed_s
+        FROM ai_operations o LEFT JOIN ai_usage_events e ON e.operation_id=o.id
+    """
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " GROUP BY o.id ORDER BY o.id DESC LIMIT ?"
+    params.append(limit)
+    return get_db().execute(sql, params).fetchall()
+
+
+def _ai_usage_text(operation):
+    """把一次操作的 token、整体耗时和预估费用变成可展示文本。"""
+    if not operation:
+        return ""
+    parts = []
+    if operation["request_count"]:
+        if operation["total_tokens"] is not None:
+            prompt = (f"{operation['prompt_tokens']:,}"
+                      if operation["prompt_tokens"] is not None else "未知")
+            completion = (f"{operation['completion_tokens']:,}"
+                          if operation["completion_tokens"] is not None else "未知")
+            parts.append(f"输入 {prompt} / 输出 {completion} / 合计 "
+                         f"{operation['total_tokens']:,} token")
+            if operation["unknown_usage_count"]:
+                parts.append(f"另有 {operation['unknown_usage_count']} 次请求用量未知")
+        else:
+            parts.append("token 用量未知（服务商未返回 usage）")
+    else:
+        parts.append("未发起模型请求")
+    if operation["elapsed_s"] is not None:
+        parts.append(f"耗时 {operation['elapsed_s']:.1f} 秒")
+    if operation["estimated_cost"] is not None:
+        cost = f"预估费用 ¥{operation['estimated_cost']:.4f}"
+        if operation["unknown_cost_count"]:
+            cost += f"，另有 {operation['unknown_cost_count']} 次请求费用未知"
+        parts.append(cost)
+    elif operation["request_count"]:
+        parts.append("预估费用未知（缺少价格或 token 用量）")
+    return "本次 AI 消耗：" + "；".join(parts)
+
+
+app.jinja_env.globals["ai_operation_label"] = AI_OPERATION_LABEL.get
+app.jinja_env.globals["ai_status_label"] = AI_STATUS_LABEL.get
+app.jinja_env.globals["ai_usage_text"] = _ai_usage_text
 
 
 # ---------- 提示词（批改 / 报告）----------
@@ -1485,8 +1672,8 @@ def lecture_detail(hid):
         JOIN submissions s ON s.id=q.submission_id
         WHERE s.lecture_id=?
         GROUP BY q.no
-        ORDER BY CAST(q.no AS TEXT)
     """, (hid, hid)).fetchall()
+    qstats.sort(key=lambda row: _question_no_key(row["no"]))
 
     # 顶层汇总
     n_subs = len(subs)
@@ -1501,7 +1688,7 @@ def lecture_detail(hid):
     return render_template("lecture.html", hw=hw, course=course, subs=subs, students=students,
                            qstats=qstats, n_subs=n_subs, n_graded=n_graded, n_reviewed=n_reviewed,
                            answer_total=answer_total, answer_picked=answer_picked,
-                           acc_by=acc_by)
+                           acc_by=acc_by, ai_operations=_ai_operation_history(lecture_id=hid, limit=8))
 
 
 @app.route("/lecture/<oid:hid>/upload-for", methods=["POST"])
@@ -1680,16 +1867,24 @@ def lecture_scope_analyze(hid):
     answer_pages = _page_list(hw["answer_pages"])
     log.info("分析作业范围 lecture=%s answer_pdf=%s pages=%s",
              hid, hw["answer_pdf"], answer_pages)
-    questions, err = analyze_answer_pdf(
-        os.path.join(UPLOAD_DIR, hw["answer_pdf"]), api_url, api_key, model,
-        pages=answer_pages)
+    operation = _start_ai_operation(
+        teacher_id, "scope_analyze", model, course_id=hw["course_id"], lecture_id=hid)
+    try:
+        questions, err = analyze_answer_pdf(
+            os.path.join(UPLOAD_DIR, hw["answer_pdf"]), api_url, api_key, model,
+            pages=answer_pages, usage_hook=operation["usage_hook"])
+    except Exception as e:
+        _finish_ai_operation(operation, "failed", str(e))
+        raise
+    _finish_ai_operation(operation, "failed" if err else "success", err)
+    usage_text = _ai_usage_text(_ai_operation_history(operation_id=operation["id"], limit=1)[0])
     if err:
-        flash(err)
+        flash(f"{err}；{usage_text}")
         return redirect(url_for("lecture_detail", hid=hid))
     db.execute("UPDATE lectures SET scope_candidates=?, scope_selected='' WHERE id=?",
                (json.dumps(questions, ensure_ascii=False), hid))
     db.commit()
-    flash(f"已识别 {len(questions)} 道题，请勾选本讲需要批阅的题目。")
+    flash(f"已识别 {len(questions)} 道题，请勾选本讲需要批阅的题目。{usage_text}")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
@@ -1741,9 +1936,12 @@ def lecture_summary_generate(hid):
         FROM questions q
         JOIN submissions s ON s.id=q.submission_id
         WHERE s.lecture_id=?
-        GROUP BY q.no
-        ORDER BY CAST(q.no AS TEXT)""", (hid,)).fetchall()
+        GROUP BY q.no""", (hid,)).fetchall()
+    qstats.sort(key=lambda row: _question_no_key(row["no"]))
 
+    if get_setting(g.user["id"], "ai_demo") == "1":
+        flash("演示模式不会调用 AI，无法生成讲次汇总。")
+        return redirect(url_for("lecture_detail", hid=hid))
     block = _offpeak_block_if_enabled(g.user["id"])
     if block:
         flash(block)
@@ -1752,9 +1950,19 @@ def lecture_summary_generate(hid):
     api_url = get_setting(g.user["id"], "ai_api_url")
     api_key = get_setting(g.user["id"], "ai_api_key")
     model = get_setting(g.user["id"], "ai_model")
-    result = ai_lecture_summary(qstats, api_url, api_key, model, max_tokens=4096)
+    operation = _start_ai_operation(
+        g.user["id"], "lecture_summary", model, course_id=hw["course_id"], lecture_id=hid)
+    try:
+        result = ai_lecture_summary(qstats, api_url, api_key, model, max_tokens=4096,
+                                    usage_hook=operation["usage_hook"])
+    except Exception as e:
+        _finish_ai_operation(operation, "failed", str(e))
+        raise
+    error = "" if result else "讲次汇总生成失败，请稍后重试或检查 AI 设置"
+    _finish_ai_operation(operation, "success" if result else "failed", error)
+    usage_text = _ai_usage_text(_ai_operation_history(operation_id=operation["id"], limit=1)[0])
     if not result:
-        flash("讲次汇总生成失败，请稍后重试或检查 AI 设置")
+        flash(f"{error}；{usage_text}")
         return redirect(url_for("lecture_detail", hid=hid))
     # 渲染成 Markdown 存库（per_question 字典按题号展开 + overall）
     per_q = result.get("per_question") or {}
@@ -1768,7 +1976,7 @@ def lecture_summary_generate(hid):
     db.execute("UPDATE lectures SET summary_md=?, summary_at=? WHERE id=?", (md, now, hid))
     db.commit()
     log.info("讲次 summary 生成成功 lecture=%s by=%s", hid, g.user["username"])
-    flash("讲次汇总已更新")
+    flash(f"讲次汇总已更新。{usage_text}")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
@@ -1939,17 +2147,32 @@ def submission_grade(sid):
 
     log.info("开始批阅 submission=%s lecture=%s file=%s answer=%s pages=%s",
              sid, hw["id"], sub["file_path"], hw["answer_pdf"], hw["answer_pages"])
+    operation = None
+    usage_text = ""
     try:
+        if get_setting(g.user["id"], "ai_demo") != "1":
+            model = get_setting(g.user["id"], "ai_model")
+            operation = _start_ai_operation(
+                g.user["id"], "grade", model, course_id=hw["course_id"],
+                lecture_id=hw["id"], submission_id=sid)
         gen = run_grading(g.user["id"], file_list(sub["file_path"]), hw["answer_pdf"],
                           scope=_scope_instruction(hw),
                           answer_pages=_page_list(hw["answer_pages"]),
-                          prompt=_prompt_content("grade", course["grade_prompt_id"]))
+                          prompt=_prompt_content("grade", course["grade_prompt_id"]),
+                          usage_hook=operation["usage_hook"] if operation else None)
+    except Exception as e:
+        _finish_ai_operation(operation, "failed", str(e))
+        raise
     finally:
         with _GRADING_LOCK:
             _GRADING.discard(sid)
+    if operation:
+        _finish_ai_operation(operation, "failed" if gen["error"] else "success", gen["error"])
+        usage_text = _ai_usage_text(
+            _ai_operation_history(operation_id=operation["id"], limit=1)[0])
     if gen["error"]:
         log.warning("批阅失败 submission=%s 原因=%s", sid, gen["error"])
-        flash(gen["error"])
+        flash(gen["error"] + ("；" + usage_text if usage_text else ""))
         return redirect(url_for("lecture_detail", hid=hw["id"]))
 
     db.execute("DELETE FROM questions WHERE submission_id=?", (sid,))
@@ -1974,7 +2197,7 @@ def submission_grade(sid):
     if gen.get("demo"):
         msg = f"演示模式：未调用 AI，已生成 {count} 道题，请逐题修正内容"
     else:
-        msg = f"AI 已批阅 {count} 道题，请逐题核对 OCR、判定与评语"
+        msg = f"AI 已批阅 {count} 道题，请逐题核对 OCR、判定与评语。{usage_text}"
     flash(msg)
     return redirect(url_for("submission_review", sid=sid))
 
@@ -1992,7 +2215,8 @@ def submission_review(sid):
     course = own_course(hw["course_id"])
     questions = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
                            (sid,)).fetchall()
-    return render_template("review.html", sub=sub, hw=hw, course=course, questions=questions)
+    return render_template("review.html", sub=sub, hw=hw, course=course, questions=questions,
+                           ai_operations=_ai_operation_history(submission_id=sid, limit=5))
 
 
 @app.route("/submission/<oid:sid>/review/save", methods=["POST"])
@@ -2486,7 +2710,7 @@ def _build_summary(questions, weak_points, evaluation, errors):
 
 
 def run_grading(teacher_id, file_name, answer_pdf="", scope="", answer_pages=None,
-                prompt=""):
+                prompt="", usage_hook=None):
     """批阅入口：学生作业与标准答案整份交给支持 PDF 的模型，一次返回逐题结果。
 
     prompt 为本课程选定的批阅提示词正文；为空时用系统内置默认提示词。
@@ -2511,7 +2735,7 @@ def run_grading(teacher_id, file_name, answer_pdf="", scope="", answer_pages=Non
         student_paths,
         os.path.join(UPLOAD_DIR, answer_pdf) if answer_pdf else "",
         api_url, api_key, model,
-        extra=extra, answer_pages=answer_pages, prompt=prompt)
+        extra=extra, answer_pages=answer_pages, prompt=prompt, usage_hook=usage_hook)
     gen["summary"] = _build_summary(gen["questions"], gen.get("weak_points") or [],
                                     gen.get("evaluation", ""), gen.get("errors") or [])
     return gen
@@ -2706,7 +2930,7 @@ def generate_report(db, sub_id, teacher_id, reuse=False):
     reuse=True 时沿用上次由 AI 生成的评价段落，只重算表格与统计（保存批改时不额外调模型）。
     """
     sub = db.execute("""
-        SELECT s.*, u.display_name, l.title AS lecture_title
+        SELECT s.*, u.display_name, l.title AS lecture_title, l.course_id
         FROM submissions s JOIN users u ON u.id=s.student_id
         JOIN lectures l ON l.id=s.lecture_id WHERE s.id=?""", (sub_id,)).fetchone()
     if not sub:
@@ -2726,10 +2950,20 @@ def generate_report(db, sub_id, teacher_id, reuse=False):
                                 "JOIN lectures l ON l.id=c.id WHERE l.id=?",
                                 (sub["lecture_id"],)).fetchone()
             if api_url and api_key and model:
-                detail = ai_report_comment(
-                    questions, summary.get("weak_points") or [],
-                    summary.get("evaluation", ""), api_url, api_key, model,
-                    prompt=_prompt_content("report", course["report_prompt_id"] if course else 0))
+                operation = _start_ai_operation(
+                    teacher_id, "report_generate", model, course_id=sub["course_id"],
+                    lecture_id=sub["lecture_id"], submission_id=sub_id)
+                try:
+                    detail = ai_report_comment(
+                        questions, summary.get("weak_points") or [],
+                        summary.get("evaluation", ""), api_url, api_key, model,
+                        prompt=_prompt_content("report", course["report_prompt_id"] if course else 0),
+                        usage_hook=operation["usage_hook"])
+                except Exception as e:
+                    _finish_ai_operation(operation, "failed", str(e))
+                    raise
+                error = "" if detail else "AI 未返回可用的报告评价"
+                _finish_ai_operation(operation, "success" if detail else "failed", error)
     try:
         stamp = datetime.strptime(str(sub["created_at"])[:10], "%Y-%m-%d")
         date_label = f"{stamp.month}月{stamp.day}日"
@@ -2762,7 +2996,8 @@ def submission_report(sid):
     stu = db.execute("SELECT display_name FROM users WHERE id=?", (sub["student_id"],)).fetchone()
     return render_template("report.html", sub=sub, hw=hw, course=course, md=md,
                            body=render_markdown(md), student_name=stu["display_name"],
-                           is_teacher=True)
+                           is_teacher=True,
+                           ai_operations=_ai_operation_history(submission_id=sid, limit=5))
 
 
 @app.route("/submission/<oid:sid>/report/build", methods=["POST"])
@@ -2806,16 +3041,30 @@ def submission_report_comment(sid):
     model = get_setting(g.user["id"], "ai_model")
     if not (api_url and api_key and model):
         return {"ok": False, "error": "尚未配置 AI 接口，无法生成总评"}, 400
+    if get_setting(g.user["id"], "ai_demo") == "1":
+        return {"ok": False, "error": "演示模式不会调用 AI，无法生成总评"}, 400
     summary = _json_or_none(sub["ai_summary"]) or {}
-    detail = ai_report_comment(questions, summary.get("weak_points") or [],
-                               summary.get("evaluation", ""), api_url, api_key, model,
-                               prompt=_prompt_content("report", course["report_prompt_id"]))
+    operation = _start_ai_operation(
+        g.user["id"], "report_comment", model, course_id=course["id"],
+        lecture_id=hw["id"], submission_id=sid)
+    try:
+        detail = ai_report_comment(questions, summary.get("weak_points") or [],
+                                   summary.get("evaluation", ""), api_url, api_key, model,
+                                   prompt=_prompt_content("report", course["report_prompt_id"]),
+                                   usage_hook=operation["usage_hook"])
+    except Exception as e:
+        _finish_ai_operation(operation, "failed", str(e))
+        raise
+    error = "" if detail else "AI 生成总评失败，请稍后重试"
+    _finish_ai_operation(operation, "success" if detail else "failed", error)
+    usage_text = _ai_usage_text(_ai_operation_history(operation_id=operation["id"], limit=1)[0])
     if not detail:
-        return {"ok": False, "error": "AI 生成总评失败，请稍后重试"}, 502
+        return {"ok": False, "error": error, "usage": usage_text}, 502
     db.execute("UPDATE submissions SET report_detail=? WHERE id=?",
                (json.dumps(detail, ensure_ascii=False), sid))
     db.commit()
-    return {"ok": True, "text": _overall_text(detail, summary.get("evaluation", ""))}
+    return {"ok": True, "text": _overall_text(detail, summary.get("evaluation", "")),
+            "usage": usage_text}
 
 
 @app.route("/submission/<oid:sid>/report/save", methods=["POST"])

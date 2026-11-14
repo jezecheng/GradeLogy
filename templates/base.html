@@ -38,6 +38,21 @@
     {% for m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}
   {% endwith %}
   {% block content %}{% endblock %}
+  {% if ai_operations is defined and ai_operations and g.user and g.user.role == 'teacher' %}
+  <details class="card" id="ai-usage-history" open>
+    <summary class="card-head"><h2>AI 消耗记录</h2><span class="muted small">最近 {{ ai_operations|length }} 次操作</span></summary>
+    {% for op in ai_operations %}
+    <div style="padding:10px 0;{% if not loop.last %}border-bottom:1px solid #eef0f3{% endif %}">
+      <strong>{{ ai_operation_label(op.operation_type) }}</strong>
+      <span class="muted small">{{ op.started_at }} · {{ op.model or '未指定模型' }} · {{ ai_status_label(op.status) }}</span>
+      <div class="muted small">{{ ai_usage_text(op) }}</div>
+      {% if op.request_count > 1 %}<div class="muted small">共 {{ op.request_count }} 次模型请求（含重试），以上 token 与费用为合计。</div>{% endif %}
+      {% if op.error %}<div class="muted small">失败原因：{{ op.error }}</div>{% endif %}
+    </div>
+    {% endfor %}
+    <p class="muted small">token 来自服务商返回的 usage；缺失时显示未知。费用按调用时的模型价格与高峰倍率快照估算，仅供成本参考。</p>
+  </details>
+  {% endif %}
 </main>
 
 <dialog id="about-dialog" class="modal about-modal">

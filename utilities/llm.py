@@ -25,10 +25,64 @@ except ImportError:
     pass
 
 
-def chat(api_url, api_key, model, content, max_tokens=1500, timeout=180, retries=3):
+def _usage_int(value):
+    """token 字段缺失或不是数字时保持未知（None），不能误记成 0。"""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _emit_usage(hook, event):
+    """用量落库失败不应触发模型请求重试，也不应覆盖原始调用结果。"""
+    if not hook:
+        return
+    try:
+        hook(event)
+    except Exception:
+        _log.exception("AI 用量记录失败 model=%s attempt=%s",
+                       event.get("model"), event.get("attempt"))
+
+
+def _usage_event(usage, model, attempt, latency_ms, finish_reason="", status="success",
+                 error="", provider_request_id=None, response_model=""):
+    """把 OpenAI 兼容 usage 整理为稳定的内部结构，同时保留原始 usage 供后续对账。"""
+    usage = usage if isinstance(usage, dict) else None
+    prompt = _usage_int(usage.get("prompt_tokens")) if usage else None
+    completion = _usage_int(usage.get("completion_tokens")) if usage else None
+    total = _usage_int(usage.get("total_tokens")) if usage else None
+    if total is None and prompt is not None and completion is not None:
+        total = prompt + completion
+    prompt_details = usage.get("prompt_tokens_details") if usage else None
+    completion_details = usage.get("completion_tokens_details") if usage else None
+    if not isinstance(prompt_details, dict):
+        prompt_details = {}
+    if not isinstance(completion_details, dict):
+        completion_details = {}
+    return {
+        "attempt": attempt,
+        "provider_request_id": provider_request_id,
+        "model": response_model or model,
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
+        "cached_tokens": _usage_int(prompt_details.get("cached_tokens")),
+        "reasoning_tokens": _usage_int(completion_details.get("reasoning_tokens")),
+        "latency_ms": latency_ms,
+        "finish_reason": finish_reason,
+        "usage": usage,
+        "status": status,
+        "error": error,
+    }
+
+
+def chat(api_url, api_key, model, content, max_tokens=1500, timeout=180, retries=3,
+         usage_hook=None):
     """通用 OpenAI 兼容调用，返回 (reply, finish_reason, error)。失败自动重试（含 429 退避）。
 
-    每次调用记录模型、耗时与结束原因；限流、失败、输出截断记 warning，便于排查额度与 max_tokens 问题。
+    usage_hook 在每次请求后收到一条用量事件；重试的各次请求也分别记录，缺省 usage 保留为 None。
     timeout: 单次请求超时秒数；整份 PDF 批阅耗时较长，调用方可调大。
     retries: 总尝试次数。批阅这类长请求应传 1，避免超时后反复重试把线程占满。
     """
@@ -40,11 +94,18 @@ def chat(api_url, api_key, model, content, max_tokens=1500, timeout=180, retries
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"})
     started = time.perf_counter()
     for attempt in range(retries):
+        attempt_started = time.perf_counter()
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read())
+                header_request_id = resp.headers.get("x-request-id")
             choice = data["choices"][0]
             finish = (choice.get("finish_reason") or "").lower()
+            latency_ms = round((time.perf_counter() - attempt_started) * 1000)
+            _emit_usage(usage_hook, _usage_event(
+                data.get("usage"), model, attempt + 1, latency_ms, finish,
+                provider_request_id=data.get("id") or header_request_id,
+                response_model=data.get("model") or ""))
             _log.info("AI 调用 model=%s %.1fs finish=%s",
                       model, time.perf_counter() - started, finish or "-")
             if finish == "length":
@@ -52,13 +113,23 @@ def chat(api_url, api_key, model, content, max_tokens=1500, timeout=180, retries
             return (choice["message"].get("content") or ""), finish, ""
         except urllib.error.HTTPError as e:
             detail = e.read().decode()[:200]
+            error = f"HTTP {e.code} {detail}"
+            _emit_usage(usage_hook, _usage_event(
+                None, model, attempt + 1,
+                round((time.perf_counter() - attempt_started) * 1000),
+                status="error", error=error,
+                provider_request_id=e.headers.get("x-request-id") if e.headers else None))
             if e.code == 429 and attempt < retries - 1:
                 _log.warning("AI 限流 429 model=%s，第 %s 次重试", model, attempt + 1)
                 time.sleep(5 * (attempt + 1))
                 continue
             _log.warning("AI 请求失败 model=%s HTTP %s %s", model, e.code, detail[:120])
-            return "", "", f"HTTP {e.code} {detail}"
+            return "", "", error
         except Exception as e:
+            _emit_usage(usage_hook, _usage_event(
+                None, model, attempt + 1,
+                round((time.perf_counter() - attempt_started) * 1000),
+                status="error", error=str(e)))
             if attempt < retries - 1:
                 _log.warning("AI 请求异常 model=%s %s，重试", model, str(e)[:120])
                 time.sleep(2)
