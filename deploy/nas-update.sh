@@ -70,6 +70,7 @@ fi
 
 export GIT_COMMIT="$(git rev-parse --short HEAD)"
 export GIT_BRANCH="$BRANCH"
+export GIT_COMMIT_DATE="$(git log -1 --format=%cd --date=format:'%Y-%m-%d %H:%M')"
 "${DC[@]}" build
 "${DC[@]}" up -d
 

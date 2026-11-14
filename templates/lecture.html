@@ -77,7 +77,7 @@
     需要在「AI 设置」里选择支持图片输入的多模态模型。</p>
   <dialog id="answer-pdf-dialog" class="modal">
     <h2>{{ '更换标准答案' if hw.answer_pdf else '上传标准答案' }}</h2>
-    <p class="muted small">答案只用于 AI 批阅对照与作业范围分析，学生端不可见。</p>
+    <p class="muted small">答案只用于 AI 批阅对照，学生端不可见。</p>
     <form method="post" action="{{ url_for('lecture_answer', hid=hw.id) }}"
           enctype="multipart/form-data" class="stack-form">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
@@ -103,12 +103,13 @@
     <form method="post" action="{{ url_for('lecture_scope_analyze', hid=hw.id) }}" class="scope-analyze-form"
           data-has-result="{{ '1' if cands else '0' }}">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-      <button type="submit" class="small">{{ '重新分析标准答案' if cands else '分析标准答案生成题目列表' }}</button>
+      <button type="submit" class="small" {% if not hw.student_pdf %}disabled{% endif %}>
+        {{ '重新分析学生版讲义' if cands else '分析学生版讲义生成题目列表' }}</button>
     </form>
   </div>
-  <p class="muted small">从教师版标准答案识别题目清单，勾选本讲实际布置的题目，批阅时只处理勾选的题目；
-    全部不勾选表示批改全部题目。分析约需 20~60 秒。</p>
-  <p class="muted small scope-hint" hidden>正在分析标准答案，请勿重复点击…</p>
+  <p class="muted small">上传学生版讲义后即可识别题目清单，无需先上传教师版答案。勾选本讲实际布置的题目，
+    批阅时只处理勾选的题目；全部不勾选表示批改全部题目。分析约需 20~60 秒。</p>
+  <p class="muted small scope-hint" hidden>正在分析学生版讲义，请勿重复点击…</p>
 
   {% if hw.answer_pdf %}
   <div class="page-picker">
@@ -118,7 +119,7 @@
         将发送 <b id="page-count">{{ answer_picked|length if answer_picked else answer_total }}</b> 页给模型</span>
     </div>
     <p class="muted small">学生交的是哪几页，这里就只勾哪几页；未勾选任何页码时发送整份答案。
-      只发送相关页可以明显减少图片数量与 token 消耗（批阅与题目识别都会遵守）。</p>
+      只发送相关页可以明显减少批阅的图片数量与 token 消耗；这里的选择不影响学生版讲义的题目识别。</p>
     <form method="post" action="{{ url_for('lecture_answer_pages', hid=hw.id) }}" id="page-form">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
       <div class="page-tools">
@@ -169,7 +170,7 @@
     </div>
   </form>
   {% else %}
-  <p class="muted">还没有题目清单。先点上方按钮，让 AI 读一遍标准答案。</p>
+  <p class="muted">{% if hw.student_pdf %}还没有题目清单。先点上方按钮，让 AI 读一遍学生版讲义。{% else %}请先上传学生版讲义，再生成题目清单。{% endif %}</p>
   {% endif %}
 </details>
 
@@ -437,7 +438,7 @@
     busyOn(form.querySelector('button[type="submit"]'), '保存中…');
   });
 })();
-// 作业范围：分析标准答案时长约几十秒，提交后给出提示并禁用按钮
+// 作业范围：分析学生版讲义约需几十秒，提交后给出提示并禁用按钮
 (function () {
   var analyze = document.querySelector('.scope-analyze-form');
   if (analyze) {

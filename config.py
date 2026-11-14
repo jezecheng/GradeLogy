@@ -30,6 +30,7 @@ APP_VERSION = _env("APP_VERSION", _read_version())
 # 容器里没有 .git，构建时通过 build arg 注入；本地开发则由 app.py 直接读 .git
 GIT_COMMIT = _env("GIT_COMMIT", "")
 GIT_BRANCH = _env("GIT_BRANCH", "")
+GIT_COMMIT_DATE = _env("GIT_COMMIT_DATE", "")
 
 # 数据根目录：数据库、附件、日志默认都放在这里，容器里挂一个卷即可整体迁移
 DATA_DIR = os.path.abspath(_env("DATA_DIR", BASE_DIR))

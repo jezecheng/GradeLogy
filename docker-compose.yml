@@ -5,6 +5,7 @@ services:
       args:
         GIT_COMMIT: ${GIT_COMMIT:-}
         GIT_BRANCH: ${GIT_BRANCH:-}
+        GIT_COMMIT_DATE: ${GIT_COMMIT_DATE:-}
         # 国内网络拉不到 Docker Hub 时取消注释：
         # BASE_IMAGE: docker.m.daocloud.io/library/python:3.12-slim
     image: gradelogy:latest

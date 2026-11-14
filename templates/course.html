@@ -2,8 +2,28 @@
 {% block title %}{{ course.name }}{% endblock %}
 {% block content %}
 <p><a href="{{ url_for('courses') }}">← 返回课程列表</a></p>
-<h1>{{ course.name }}</h1>
+<div class="card-head">
+  <h1>{{ course.name }}</h1>
+  {% if can_manage_teachers %}
+  <button type="button" class="small" data-dialog-open="course-edit-dialog">编辑课程</button>
+  {% endif %}
+</div>
 <p class="muted">{{ course.description }}</p>
+
+{% if can_manage_teachers %}
+<dialog id="course-edit-dialog" class="modal">
+  <h2>编辑课程信息</h2>
+  <form method="post" action="{{ url_for('course_edit', cid=course.id) }}" class="stack-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <label>课程名称 <input name="name" value="{{ course.name }}" required autofocus></label>
+    <label>课程简介 <textarea name="description" rows="3">{{ course.description or '' }}</textarea></label>
+    <div class="modal-actions">
+      <button type="button" class="ghost" data-dialog-close>取消</button>
+      <button type="submit">保存修改</button>
+    </div>
+  </form>
+</dialog>
+{% endif %}
 
 <div class="card">
   <div class="card-head">

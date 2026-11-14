@@ -2,6 +2,7 @@
 {% block title %}登录 - 作业管理平台{% endblock %}
 {% block content %}
 <div class="card narrow login-card">
+  <img class="login-logo" src="{{ url_for('static', filename='gradelogy-logo.png') }}" alt="GradeLogy · Smart Grading & Logic">
   <h1>作业管理平台</h1>
   <p class="muted">老师请使用管理员分配的账号登录</p>
   <form method="post" class="stack-form">
@@ -11,6 +12,9 @@
     <button type="submit">登录</button>
   </form>
   <p class="muted small">忘记密码请联系管理员重置。</p>
-  <p class="muted small center">v{{ app_version }}{% if app_commit %}+{{ app_commit }}{% endif %}</p>
+  <p class="muted small center">v{{ app_version }}{% if app_commit %}_{{ app_commit }}{% endif %}</p>
+  {% if app_version_updated %}
+  <p class="muted small center">版本更新于 {{ app_version_updated }}</p>
+  {% endif %}
 </div>
 {% endblock %}

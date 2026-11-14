@@ -36,11 +36,28 @@
     } catch (e) { /* 隐私模式忽略 */ }
   }
 
+  function avatar() {
+    const img = document.createElement('img');
+    img.className = 'assistant-avatar';
+    img.src = root.dataset.avatar;
+    img.alt = '';
+    img.setAttribute('aria-hidden', 'true');
+    return img;
+  }
+
   function bubble(role, text) {
     const div = document.createElement('div');
     div.className = 'assistant-msg assistant-' + role;
     div.textContent = text;
-    body.appendChild(div);
+    if (role === 'assistant') {
+      const row = document.createElement('div');
+      row.className = 'assistant-msg-row';
+      row.appendChild(avatar());
+      row.appendChild(div);
+      body.appendChild(row);
+    } else {
+      body.appendChild(div);
+    }
     body.scrollTop = body.scrollHeight;
     return div;
   }
@@ -71,12 +88,16 @@
   }
 
   function pending() {
+    const row = document.createElement('div');
+    row.className = 'assistant-msg-row';
+    row.appendChild(avatar());
     const div = document.createElement('div');
     div.className = 'assistant-msg assistant-assistant assistant-pending';
     div.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
-    body.appendChild(div);
+    row.appendChild(div);
+    body.appendChild(row);
     body.scrollTop = body.scrollHeight;
-    return div;
+    return row;
   }
 
   async function send() {

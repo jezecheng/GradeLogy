@@ -238,7 +238,7 @@ sudo sshd -t && sudo systemctl reload ssh
 
 不要把初始化脚本当作日常更新命令，也不要删除 `data/`。日常无需登录服务器，Push 到 `main` 即可。
 
-版本号保存在仓库根目录 `VERSION`；页面会显示 `VERSION + 当前提交短哈希`，例如 `v1.0.0+a3fcc50`。正式提升版本时修改 `VERSION`，需要时可打 tag：
+版本号保存在仓库根目录 `VERSION`；页面会显示 `VERSION_当前提交短哈希` 和提交时间，例如 `v1.0.0_a3fcc50`。正式提升版本时修改 `VERSION`，需要时可打 tag：
 
 ```bash
 git tag v1.0.0

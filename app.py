@@ -12,6 +12,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import time
@@ -37,7 +38,7 @@ import config as cfg
 from utilities import assistant, llm, roster, storage
 from utilities.pdfgrade import (DEFAULT_GRADE_PROMPT, DEFAULT_REPORT_PROMPT,
                                 ai_lecture_summary, ai_report_comment,
-                                analyze_answer_pdf, grade_pdf_submission,
+                                analyze_scope_pdf, grade_pdf_submission,
                                 pdf_page_count, render_page_jpeg)
 
 cfg.ensure_dirs()
@@ -212,10 +213,11 @@ APP_STARTED_AT = datetime.now()
 
 
 def _read_git_info():
-    """读取版本库信息：容器里没有 .git 时依赖构建参数，本地开发直接读 .git。"""
+    """读取版本库信息：容器依赖构建参数，本地开发直接读 .git 和提交时间。"""
     commit, branch = cfg.GIT_COMMIT, cfg.GIT_BRANCH
+    commit_date = cfg.GIT_COMMIT_DATE
     if commit:
-        return commit[:7], branch
+        return commit[:7], branch, commit_date
     try:
         git_dir = os.path.join(BASE_DIR, ".git")
         with open(os.path.join(git_dir, "HEAD"), encoding="utf-8") as f:
@@ -227,12 +229,21 @@ def _read_git_info():
                 commit = f.read().strip()
         else:
             commit = head
+        if commit and not commit_date:
+            try:
+                commit_date = subprocess.check_output(
+                    ["git", "-C", BASE_DIR, "show", "-s", "--format=%cd",
+                     "--date=format:%Y-%m-%d %H:%M", "HEAD"],
+                    text=True, stderr=subprocess.DEVNULL, timeout=3,
+                ).strip()
+            except (OSError, subprocess.SubprocessError):
+                pass
     except OSError:
         pass
-    return commit[:7], branch
+    return commit[:7], branch, commit_date
 
 
-APP_GIT_COMMIT, APP_GIT_BRANCH = _read_git_info()
+APP_GIT_COMMIT, APP_GIT_BRANCH, APP_GIT_DATE = _read_git_info()
 
 # 「帮助」弹窗里的本地文档：按角色控制可见范围，避免学生看到管理员操作说明
 HELP_DOCS = {
@@ -250,6 +261,7 @@ def _inject_app_meta():
         "app_version": cfg.APP_VERSION,
         "app_commit": APP_GIT_COMMIT,
         "app_branch": APP_GIT_BRANCH,
+        "app_version_updated": APP_GIT_DATE,
         "app_python": platform.python_version(),
         "app_started": APP_STARTED_AT.strftime("%Y-%m-%d %H:%M"),
         "help_docs": [{"slug": slug, "title": title}
@@ -1212,6 +1224,24 @@ def course_create():
     return redirect(url_for("courses"))
 
 
+@app.route("/course/<oid:cid>/edit", methods=["POST"])
+@role_required("teacher", "admin")
+def course_edit(cid):
+    course = own_course(cid)
+    if not is_course_owner(course):
+        abort(403)
+    name = request.form.get("name", "").strip()
+    if not name:
+        flash("课程名称不能为空")
+        return redirect(url_for("course_detail", cid=cid))
+    db = get_db()
+    db.execute("UPDATE courses SET name=?, description=? WHERE id=?",
+               (name, request.form.get("description", "").strip(), cid))
+    db.commit()
+    flash("课程信息已更新")
+    return redirect(url_for("course_detail", cid=cid))
+
+
 @app.route("/course/<oid:cid>")
 @role_required("teacher", "admin")
 def course_detail(cid):
@@ -1613,23 +1643,24 @@ def lecture_student_pdf(hid):
         except ValueError as e:
             flash(str(e))
             return redirect(url_for("lecture_detail", hid=hid))
-        db.execute("UPDATE lectures SET student_pdf=? WHERE id=?", (name, hid))
+        db.execute("UPDATE lectures SET student_pdf=?, scope_candidates='', scope_selected='' WHERE id=?",
+                   (name, hid))
         db.commit()
-        flash("学生版讲义已更新，学生端可预览")
+        flash("学生版讲义已更新，学生端可预览；原作业范围已清空，请重新分析并确认。")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
 @app.route("/lecture/<oid:hid>/scope/analyze", methods=["POST"])
 @role_required("teacher")
 def lecture_scope_analyze(hid):
-    """用 AI 读教师版标准答案，生成可勾选的题目清单。"""
+    """用 AI 读学生版讲义，生成可勾选的题目清单。"""
     db = get_db()
     hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
     if not hw:
         abort(404)
     own_course(hw["course_id"])
-    if not hw["answer_pdf"]:
-        flash("请先上传教师版标准答案 PDF，再分析题目清单。")
+    if not hw["student_pdf"]:
+        flash("请先上传学生版讲义 PDF，再分析题目清单。")
         return redirect(url_for("lecture_detail", hid=hid))
 
     teacher_id = g.user["id"]
@@ -1644,17 +1675,16 @@ def lecture_scope_analyze(hid):
     api_key = get_setting(teacher_id, "ai_api_key")
     model = get_setting(teacher_id, "ai_model")
     if not api_url or not api_key or not model:
-        flash("尚未配置 AI 接口，无法分析标准答案。")
+        flash("尚未配置 AI 接口，无法分析学生版讲义。")
         return redirect(url_for("lecture_detail", hid=hid))
 
-    log.info("分析作业范围 lecture=%s answer=%s pages=%s", hid, hw["answer_pdf"], hw["answer_pages"])
-    questions, err = analyze_answer_pdf(
-        os.path.join(UPLOAD_DIR, hw["answer_pdf"]), api_url, api_key, model,
-        pages=_page_list(hw["answer_pages"]))
+    log.info("分析作业范围 lecture=%s student_pdf=%s", hid, hw["student_pdf"])
+    questions, err = analyze_scope_pdf(
+        os.path.join(UPLOAD_DIR, hw["student_pdf"]), api_url, api_key, model)
     if err:
         flash(err)
         return redirect(url_for("lecture_detail", hid=hid))
-    db.execute("UPDATE lectures SET scope_candidates=? WHERE id=?",
+    db.execute("UPDATE lectures SET scope_candidates=?, scope_selected='' WHERE id=?",
                (json.dumps(questions, ensure_ascii=False), hid))
     db.commit()
     flash(f"已识别 {len(questions)} 道题，请勾选本讲需要批阅的题目。")

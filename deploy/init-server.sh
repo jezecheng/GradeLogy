@@ -84,6 +84,7 @@ chmod 600 .env
 echo "[4/5] docker compose build + up ..."
 export GIT_COMMIT="$(git rev-parse --short HEAD)"
 export GIT_BRANCH="$BRANCH"
+export GIT_COMMIT_DATE="$(git log -1 --format=%cd --date=format:'%Y-%m-%d %H:%M')"
 docker compose build --no-cache
 docker compose up -d
 

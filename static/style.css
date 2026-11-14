@@ -7,6 +7,8 @@ a:hover { text-decoration: underline; }
 .nav { background: #1456f0; padding: 12px 24px; display: flex; gap: 20px; align-items: center; }
 .nav a { color: #fff; font-weight: 500; }
 .nav .brand { font-size: 18px; font-weight: 700; margin-right: 16px; }
+.brand-home { display: inline-flex; align-items: center; gap: 9px; }
+.nav-logo { width: 32px; height: 32px; border-radius: 7px; background: #fff; }
 .nav-right { margin-left: auto; display: flex; gap: 12px; align-items: center; }
 .nav-help { background: rgba(255,255,255,.14); color: #fff; font: inherit; font-size: 14px;
             border: 1px solid rgba(255,255,255,.45); border-radius: 6px;
@@ -33,6 +35,7 @@ h2 { font-size: 17px; margin-bottom: 10px; }
 .card-table { background: #fff; border-radius: 10px; padding: 6px 16px;
               box-shadow: 0 1px 3px rgba(0,0,0,.08); }
 .login-card h1 { font-size: 22px; margin-bottom: 6px; }
+.login-logo { display: block; width: min(290px, 100%); height: auto; margin: 0 auto 18px; }
 .score-input { width: 96px; }
 
 /* 讲次页：作业范围卡片可折叠，默认收起 */
@@ -77,7 +80,7 @@ details.scope-card[open] > summary.card-head { margin-bottom: 12px; }
 /* 卡片标题行：标题与右侧操作按钮 */
 .card-head { display: flex; align-items: center; justify-content: space-between;
              gap: 12px; margin-bottom: 12px; }
-.card-head h2 { margin-bottom: 0; }
+.card-head h1, .card-head h2 { margin-bottom: 0; }
 
 /* 弹窗（原生 dialog） */
 dialog.modal { border: none; border-radius: 12px; padding: 22px 22px 18px;
@@ -361,6 +364,10 @@ button.btn-link:hover { text-decoration: underline; }
 .assistant-body { flex: 1; overflow-y: auto; padding: 14px; display: flex;
                   flex-direction: column; gap: 10px; background: #f7f8fa; }
 .assistant-hint { font-size: 13px; color: #8a8f99; line-height: 1.6; }
+.assistant-msg-row { display: flex; align-items: flex-start; gap: 8px; width: 100%; }
+.assistant-msg-row .assistant-msg { max-width: calc(100% - 38px); }
+.assistant-avatar { width: 30px; height: 30px; flex: 0 0 30px; border-radius: 8px;
+                    border: 1px solid #e9ecf1; background: #fff; }
 .assistant-msg { max-width: 88%; padding: 9px 12px; border-radius: 10px; font-size: 14px;
                  line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
 .assistant-user { align-self: flex-end; background: #1456f0; color: #fff;

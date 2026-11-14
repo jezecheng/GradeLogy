@@ -5,12 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>{% block title %}教学管理平台{% endblock %}</title>
+  <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" sizes="any">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
 {% if g.user %}
 <nav class="nav">
-  <a class="brand" href="{{ url_for('index') }}">教学管理平台</a>
+  <a class="brand brand-home" href="{{ url_for('index') }}">
+    <img class="nav-logo" src="{{ url_for('static', filename='gradelogy-mark.png') }}" alt="">
+    <span>教学管理平台</span>
+  </a>
   {% if g.user.role == 'admin' %}
     <a href="{{ url_for('admin_users') }}">用户管理</a>
     <a href="{{ url_for('consistency_page') }}">系统维护</a>
@@ -40,10 +44,14 @@
   <h2>关于 GradeLogy</h2>
   <dl class="about-meta">
     <dt>版本</dt>
-    <dd>v{{ app_version }}{% if app_commit %}+{{ app_commit }}{% endif %}</dd>
+    <dd>v{{ app_version }}{% if app_commit %}_{{ app_commit }}{% endif %}</dd>
     {% if app_commit %}
     <dt>提交</dt>
     <dd><code>{{ app_commit }}</code>{% if app_branch %} · {{ app_branch }}{% endif %}</dd>
+    {% endif %}
+    {% if app_version_updated %}
+    <dt>版本更新于</dt>
+    <dd>{{ app_version_updated }}</dd>
     {% endif %}
     <dt>运行环境</dt>
     <dd>Python {{ app_python }}</dd>

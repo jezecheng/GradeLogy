@@ -7,6 +7,7 @@ FROM ${BASE_IMAGE}
 # 构建时注入版本库信息，供「帮助 → 关于」显示；不传也能正常启动
 ARG GIT_COMMIT=""
 ARG GIT_BRANCH=""
+ARG GIT_COMMIT_DATE=""
 
 # 国内构建加速：默认走腾讯云镜像；构建时传空值可切回官方源
 #   docker build --build-arg APT_MIRROR= --build-arg PIP_INDEX_URL= ...
@@ -20,7 +21,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOST=0.0.0.0 \
     PORT=5000 \
     GIT_COMMIT=${GIT_COMMIT} \
-    GIT_BRANCH=${GIT_BRANCH}
+    GIT_BRANCH=${GIT_BRANCH} \
+    GIT_COMMIT_DATE=${GIT_COMMIT_DATE}
 
 WORKDIR /app
 
