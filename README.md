@@ -139,6 +139,16 @@ docker build --build-arg BASE_IMAGE=docker.m.daocloud.io/library/python:3.12-sli
 | `AI_API_URL` / `AI_API_KEY` / `AI_MODEL` | 空 | 设置后优先于页面 AI 设置，容器部署不必把 Key 存库 |
 | `LOG_LEVEL` | `INFO` | 日志级别；设为 `WARNING` 可关闭访问日志 |
 
+## 版本与发布
+
+- `main` 是发布分支：新功能在 `feature/xxx` 等分支开发，测试通过后合并进 `main`；合并即自动部署（需先在仓库 Secrets 配置 `SERVER_HOST` / `SERVER_USER` / `SERVER_SSH_KEY` / `APP_DIR`）。普通分支的 push 不会触发部署。
+- 版本号写在仓库根目录 `VERSION`，发布时修改该文件，并按需打 tag：
+  ```bash
+  git tag v1.0.0
+  git push --tags
+  ```
+- 页面右上角「帮助 → 关于」会显示当前版本、提交号、分支、Python 版本与启动时间，并链接到站内使用文档（`docs/*.md`）。
+
 ## 数据备份与迁移
 
 管理员「系统维护」提供完整备份与恢复：导出 zip（数据库在线快照 + 全部附件），在新系统上传即可整体还原。恢复前自动备份当前数据，恢复后重新登录；旧版本备份会自动执行数据库迁移。

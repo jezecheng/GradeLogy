@@ -1,27 +1,45 @@
-# GitHub Actions：push main 后自动部署到腾讯云轻量
+# GitHub Actions：main 分支自动部署（新功能在分支开发，合并进 main 后自动发布）
 #
 # 需要在仓库 Settings → Secrets and variables → Actions → New repository secret 中配置：
 #   SERVER_HOST       服务器公网 IP（如 43.xxx.xxx.xxx）
 #   SERVER_USER       SSH 用户名（腾讯云默认 ubuntu 或 root）
 #   SERVER_SSH_KEY    私钥完整内容（---BEGIN OPENSSH PRIVATE KEY--- 到 ---END---）
-#   APP_DIR           服务器上的项目目录（如 /srv/gradelogy）
+#   APP_DIR           服务器上的项目目录（如 /srv/gradelogy，不配则默认 /srv/gradelogy）
 #
-# 可选 Secrets（不设则走 docker-compose.yml 里的默认值）：
-#   AI_API_URL / AI_API_KEY / AI_MODEL / SECRET_KEY
+# 未配置 SERVER_HOST / SERVER_SSH_KEY 时，工作流会跳过部署而不是报错。
 name: Deploy to server
 
 on:
-  # 自动部署暂时停用：恢复时把下面的 workflow_dispatch 换回
-  #   push:
-  #     branches: [main]
-  workflow_dispatch:   # 临时改为只能手动触发
+  push:
+    branches: [main]
+  workflow_dispatch:   # 也可以在 Actions 页面手动触发
 
 concurrency:
   group: deploy-main
   cancel-in-progress: false   # 上一次部署未完成时，新 push 排队等待
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: 检查部署密钥是否已配置
+        id: check
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+        run: |
+          if [ -n "$SERVER_HOST" ] && [ -n "$SERVER_SSH_KEY" ]; then
+            echo "enabled=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=0" >> "$GITHUB_OUTPUT"
+            echo "未配置 SERVER_HOST 或 SERVER_SSH_KEY，跳过自动部署。"
+          fi
+
   deploy:
+    needs: check
+    if: needs.check.outputs.enabled == '1'
     runs-on: ubuntu-latest
     steps:
       - name: 连接服务器并拉取 + 重建容器
@@ -33,21 +51,23 @@ jobs:
           port: 22
           script: |
             set -e
-            cd ${{ secrets.APP_DIR }}
+            APP_DIR="${{ secrets.APP_DIR }}"
+            APP_DIR="${APP_DIR:-/srv/gradelogy}"
+            cd "$APP_DIR"
             echo "=== git pull ==="
             git fetch --depth=1 origin main
             git reset --hard origin/main
-            echo "=== docker compose up ==="
-            docker compose build --no-cache
+            export GIT_COMMIT="$(git rev-parse --short HEAD)"
+            export GIT_BRANCH="main"
+            echo "=== docker compose up ($GIT_COMMIT) ==="
+            docker compose build
             docker compose up -d
             echo "=== health check ==="
             sleep 8
-            curl -sf http://127.0.0.1:5000/healthz || { echo "health check FAILED"; exit 1; }
+            curl -sf http://127.0.0.1:5000/healthz || {
+              echo "health check FAILED"
+              docker compose logs --tail=80
+              exit 1
+            }
             echo "=== deploy ok ==="
             docker compose ps
-        # 传递可选的环境变量覆盖，docker compose 会自动注入
-        env: |
-          ${{ secrets.SECRET_KEY && format('SECRET_KEY={0}', secrets.SECRET_KEY) || '' }}
-          ${{ secrets.AI_API_URL && format('AI_API_URL={0}', secrets.AI_API_URL) || '' }}
-          ${{ secrets.AI_API_KEY && format('AI_API_KEY={0}', secrets.AI_API_KEY) || '' }}
-          ${{ secrets.AI_MODEL && format('AI_MODEL={0}', secrets.AI_MODEL) || '' }}

@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import os
+import platform
 import re
 import secrets
 import shutil
@@ -206,6 +207,54 @@ _id_signer = URLSafeSerializer(app.config["SECRET_KEY"], salt="gradelogy-url-id"
 app.url_map.converters["oid"] = SignedIdConverter
 
 log = logging.getLogger("gradelogy")
+
+APP_STARTED_AT = datetime.now()
+
+
+def _read_git_info():
+    """读取版本库信息：容器里没有 .git 时依赖构建参数，本地开发直接读 .git。"""
+    commit, branch = cfg.GIT_COMMIT, cfg.GIT_BRANCH
+    if commit:
+        return commit[:7], branch
+    try:
+        git_dir = os.path.join(BASE_DIR, ".git")
+        with open(os.path.join(git_dir, "HEAD"), encoding="utf-8") as f:
+            head = f.read().strip()
+        if head.startswith("ref: "):
+            ref = head[5:]
+            branch = branch or ref.rsplit("/", 1)[-1]
+            with open(os.path.join(git_dir, ref), encoding="utf-8") as f:
+                commit = f.read().strip()
+        else:
+            commit = head
+    except OSError:
+        pass
+    return commit[:7], branch
+
+
+APP_GIT_COMMIT, APP_GIT_BRANCH = _read_git_info()
+
+# 「帮助」弹窗里的本地文档：按角色控制可见范围，避免学生看到管理员操作说明
+HELP_DOCS = {
+    "student": ("学生手册", ("student", "teacher", "admin")),
+    "teacher": ("老师手册", ("teacher", "admin")),
+    "admin": ("管理员手册", ("admin",)),
+}
+
+
+@app.context_processor
+def _inject_app_meta():
+    user = getattr(g, "user", None)
+    role = user["role"] if user else ""
+    return {
+        "app_version": cfg.APP_VERSION,
+        "app_commit": APP_GIT_COMMIT,
+        "app_branch": APP_GIT_BRANCH,
+        "app_python": platform.python_version(),
+        "app_started": APP_STARTED_AT.strftime("%Y-%m-%d %H:%M"),
+        "help_docs": [{"slug": slug, "title": title}
+                      for slug, (title, roles) in HELP_DOCS.items() if role in roles],
+    }
 
 
 def _json_or_none(value):
@@ -827,6 +876,22 @@ def index():
         return redirect(url_for("login"))
     return redirect(url_for({"admin": "admin_users", "teacher": "courses",
                              "student": "student_home"}[g.user["role"]]))
+
+
+@app.route("/help/<name>")
+@login_required
+def help_doc(name):
+    """站内渲染 docs/*.md，内网/离线部署也能看使用说明。"""
+    meta = HELP_DOCS.get(name)
+    if not meta or g.user["role"] not in meta[1]:
+        abort(404)
+    path = os.path.join(BASE_DIR, "docs", f"{name}.md")
+    try:
+        with open(path, encoding="utf-8") as f:
+            body = render_markdown(f.read())
+    except OSError:
+        abort(404)
+    return render_template("help.html", doc_title=meta[0], body=body)
 
 
 @app.route("/student_home")
@@ -2526,13 +2591,39 @@ def render_markdown(md):
     esc = lambda s: (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
     def inline(text):
-        return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", esc(text))
+        s = esc(text)
+        s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+        s = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)",
+                   r'<a href="\2" target="_blank" rel="noopener">\1</a>', s)
+        return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
 
     lines = (md or "").splitlines()
     html, i = [], 0
     while i < len(lines):
         line = lines[i]
         if not line.strip():
+            i += 1
+            continue
+        if line.startswith("```"):
+            code = []
+            i += 1
+            while i < len(lines) and not lines[i].startswith("```"):
+                code.append(lines[i])
+                i += 1
+            i += 1  # 跳过结束标记
+            html.append("<pre><code>" + esc("\n".join(code)) + "</code></pre>")
+            continue
+        if line.startswith(">"):
+            quotes = []
+            while i < len(lines) and lines[i].startswith(">"):
+                quotes.append(lines[i].lstrip(">").strip())
+                i += 1
+            html.append("<blockquote>"
+                        + "".join(f"<p>{inline(x)}</p>" for x in quotes if x)
+                        + "</blockquote>")
+            continue
+        if re.fullmatch(r"-{3,}|\*{3,}", line.strip()):
+            html.append("<hr>")
             i += 1
             continue
         if line.startswith("#"):

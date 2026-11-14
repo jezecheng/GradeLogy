@@ -8,6 +8,10 @@ a:hover { text-decoration: underline; }
 .nav a { color: #fff; font-weight: 500; }
 .nav .brand { font-size: 18px; font-weight: 700; margin-right: 16px; }
 .nav-right { margin-left: auto; display: flex; gap: 12px; align-items: center; }
+.nav-help { background: rgba(255,255,255,.14); color: #fff; font: inherit; font-size: 14px;
+            border: 1px solid rgba(255,255,255,.45); border-radius: 6px;
+            padding: 3px 12px; cursor: pointer; line-height: 1.6; }
+.nav-help:hover { background: rgba(255,255,255,.26); }
 .role-badge { font-size: 12px; padding: 2px 8px; border-radius: 999px;
               background: rgba(255,255,255,.22); color: #fff; }
 .role-badge.role-teacher { background: rgba(255,255,255,.22); }
@@ -84,6 +88,36 @@ dialog.modal h2 { margin-bottom: 4px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 6px; }
 button.ghost { background: #fff; color: #4a5260; border: 1px solid #d0d5dd; }
 button.ghost:hover { background: #f4f6f8; }
+
+/* 「帮助」→ 关于：版本与文档入口 */
+dialog.modal.about-modal { width: min(460px, 92vw); }
+.about-meta { display: grid; grid-template-columns: 72px 1fr; gap: 6px 12px;
+              margin: 14px 0; font-size: 14px; }
+.about-meta dt { color: #8a8f99; }
+.about-meta dd { margin: 0; word-break: break-all; }
+.about-meta code, .doc-body code { background: #f2f4f7; border-radius: 4px; padding: 1px 5px;
+                                   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                                   font-size: 13px; }
+.about-docs { border-top: 1px solid #eef0f3; padding-top: 12px; display: flex;
+              flex-direction: column; gap: 6px; }
+.about-docs .col-title { margin-bottom: 2px; }
+
+/* 站内使用文档：docs/*.md 渲染后的排版 */
+.doc-body { background: #fff; border-radius: 10px; padding: 22px 24px;
+            box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+.doc-body h2 { font-size: 19px; margin: 22px 0 10px; }
+.doc-body h3 { font-size: 16px; margin: 18px 0 8px; }
+.doc-body h2:first-child, .doc-body h3:first-child { margin-top: 0; }
+.doc-body p { margin: 8px 0; }
+.doc-body ul, .doc-body ol { margin: 8px 0 8px 22px; }
+.doc-body li { margin: 4px 0; }
+.doc-body pre { background: #f6f8fa; border: 1px solid #eef0f3; border-radius: 8px;
+                padding: 12px 14px; overflow: auto; margin: 10px 0; }
+.doc-body pre code { background: none; padding: 0; }
+.doc-body blockquote { border-left: 3px solid #c9d4ea; background: #f8faff;
+                       margin: 10px 0; padding: 6px 14px; color: #5b6472; }
+.doc-body blockquote p { margin: 4px 0; }
+.doc-body hr { border: none; border-top: 1px solid #eef0f3; margin: 18px 0; }
 
 /* 生成类按钮的处理中状态：小圆环 + 禁用外观 */
 button.is-busy, button.is-busy:hover { opacity: .78; cursor: progress; }

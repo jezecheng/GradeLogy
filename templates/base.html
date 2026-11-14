@@ -22,6 +22,7 @@
     <a href="{{ url_for('student_home') }}">我的学习</a>
   {% endif %}
   <span class="nav-right">
+    <button type="button" class="nav-help" data-about-open>帮助</button>
     <a href="{{ url_for('change_password') }}">{{ g.user.display_name }}</a>
     <span class="role-badge">{{ {'admin':'管理员','teacher':'老师','student':'学生'}[g.user.role] }}</span>
     <a href="{{ url_for('logout') }}">退出</a>
@@ -34,8 +35,50 @@
   {% endwith %}
   {% block content %}{% endblock %}
 </main>
+
+<dialog id="about-dialog" class="modal about-modal">
+  <h2>关于 GradeLogy</h2>
+  <p class="muted">化学竞赛作业管理平台</p>
+  <dl class="about-meta">
+    <dt>版本</dt>
+    <dd>v{{ app_version }}</dd>
+    {% if app_commit %}
+    <dt>提交</dt>
+    <dd><code>{{ app_commit }}</code>{% if app_branch %} · {{ app_branch }}{% endif %}</dd>
+    {% endif %}
+    <dt>运行环境</dt>
+    <dd>Python {{ app_python }}</dd>
+    <dt>启动时间</dt>
+    <dd>{{ app_started }}</dd>
+  </dl>
+  {% if help_docs %}
+  <div class="about-docs">
+    <div class="col-title">使用文档</div>
+    {% for d in help_docs %}
+    <a class="btn-link" href="{{ url_for('help_doc', name=d.slug) }}" target="_blank">{{ d.title }}</a>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <div class="modal-actions">
+    <button type="button" data-about-close>关闭</button>
+  </div>
+</dialog>
+
 <script src="{{ url_for('static', filename='ui.js') }}"></script>
 <script src="{{ url_for('static', filename='upload_draft.js') }}"></script>
+<script>
+(function () {
+  var dlg = document.getElementById('about-dialog');
+  if (!dlg) return;
+  document.querySelectorAll('[data-about-open]').forEach(function (btn) {
+    btn.addEventListener('click', function () { dlg.showModal(); });
+  });
+  dlg.querySelectorAll('[data-about-close]').forEach(function (btn) {
+    btn.addEventListener('click', function () { dlg.close(); });
+  });
+  dlg.addEventListener('click', function (e) { if (e.target === dlg) dlg.close(); });
+})();
+</script>
 {% include "_assistant.html" %}
 {% block scripts %}{% endblock %}
 </body>

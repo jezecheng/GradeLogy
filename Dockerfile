@@ -4,12 +4,18 @@
 ARG BASE_IMAGE=python:3.12-slim
 FROM ${BASE_IMAGE}
 
+# 构建时注入版本库信息，供「帮助 → 关于」显示；不传也能正常启动
+ARG GIT_COMMIT=""
+ARG GIT_BRANCH=""
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     TZ=Asia/Shanghai \
     DATA_DIR=/data \
     HOST=0.0.0.0 \
-    PORT=5000
+    PORT=5000 \
+    GIT_COMMIT=${GIT_COMMIT} \
+    GIT_BRANCH=${GIT_BRANCH}
 
 WORKDIR /app
 

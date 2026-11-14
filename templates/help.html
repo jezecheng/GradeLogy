@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}{{ doc_title }}{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('index') }}">← 返回</a></p>
+<h1>{{ doc_title }}</h1>
+<div class="doc-body">{{ body|safe }}</div>
+{% endblock %}

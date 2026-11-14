@@ -2,9 +2,11 @@ services:
   gradelogy:
     build:
       context: .
-      # 国内网络拉不到 Docker Hub 时，改用镜像加速地址
-      # args:
-      #   BASE_IMAGE: docker.m.daocloud.io/library/python:3.12-slim
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-}
+        GIT_BRANCH: ${GIT_BRANCH:-}
+        # 国内网络拉不到 Docker Hub 时取消注释：
+        # BASE_IMAGE: docker.m.daocloud.io/library/python:3.12-slim
     image: gradelogy:latest
     container_name: gradelogy
     restart: unless-stopped

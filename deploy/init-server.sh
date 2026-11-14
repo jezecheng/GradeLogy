@@ -82,6 +82,8 @@ chmod 600 .env
 
 # ---------- 6. 首次启动 ----------
 echo "[4/5] docker compose build + up ..."
+export GIT_COMMIT="$(git rev-parse --short HEAD)"
+export GIT_BRANCH="$BRANCH"
 docker compose build --no-cache
 docker compose up -d
 

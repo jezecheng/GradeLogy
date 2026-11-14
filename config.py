@@ -15,7 +15,21 @@ def _env(name, default=""):
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-APP_VERSION = _env("APP_VERSION", "1.0.0")
+
+
+def _read_version():
+    """版本号放在仓库根目录的 VERSION 文件里，发布时改这一处即可。"""
+    try:
+        with open(os.path.join(BASE_DIR, "VERSION"), encoding="utf-8") as f:
+            return f.read().strip() or "1.0.0"
+    except OSError:
+        return "1.0.0"
+
+
+APP_VERSION = _env("APP_VERSION", _read_version())
+# 容器里没有 .git，构建时通过 build arg 注入；本地开发则由 app.py 直接读 .git
+GIT_COMMIT = _env("GIT_COMMIT", "")
+GIT_BRANCH = _env("GIT_BRANCH", "")
 
 # 数据根目录：数据库、附件、日志默认都放在这里，容器里挂一个卷即可整体迁移
 DATA_DIR = os.path.abspath(_env("DATA_DIR", BASE_DIR))
