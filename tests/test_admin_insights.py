@@ -11,6 +11,7 @@ import time
 import unittest
 import zipfile
 from datetime import datetime, timedelta
+from unittest import mock
 
 _TEST_ROOT = tempfile.mkdtemp(prefix="gradelogy-admin-tests-")
 os.environ["DATA_DIR"] = _TEST_ROOT
@@ -385,6 +386,71 @@ class CourseExportTest(unittest.TestCase):
         self.assertNotIn(f"{self.ROOT_NAME}/第1讲 极限 (2)/student/", names)
         self.assertFalse(any("outside" in name for name in names))
         resp.close()
+
+
+class LectureScopeTest(unittest.TestCase):
+    """保存教师版页码即生成题目清单，不再需要独立的分析按钮。"""
+
+    def setUp(self):
+        app_module.app.config.update(TESTING=True)
+        con = sqlite3.connect(app_module.DB_PATH)
+        for table in ("ai_usage_events", "ai_operations", "questions", "submissions",
+                      "lectures", "enrollments", "course_teachers", "courses", "users"):
+            con.execute(f"DELETE FROM {table}")
+        con.executemany(
+            "INSERT INTO users(id,username,password_hash,display_name,role,active,"
+            "must_change_password) VALUES(?,?,'x',?,?,1,0)",
+            [(2, "teacher1", "老师一", "teacher"), (3, "teacher2", "老师二", "teacher")])
+        con.execute("INSERT INTO courses(id,name,teacher_id) VALUES(30,'数学',2)")
+        con.execute("INSERT INTO course_teachers(course_id,teacher_id) VALUES(30,2)")
+        con.execute("INSERT INTO lectures(id,course_id,title,answer_pdf) "
+                    "VALUES(100,30,'第1讲','ans.pdf')")
+        con.commit()
+        con.close()
+        with open(os.path.join(app_module.UPLOAD_DIR, "ans.pdf"), "wb") as f:
+            f.write(b"%PDF-1.4 test")
+
+    def login(self, uid):
+        client = app_module.app.test_client()
+        with client.session_transaction() as sess:
+            sess["uid"] = uid
+            sess["_csrf"] = "test-token"
+        return client
+
+    def test_save_pages_generates_scope_in_one_step(self):
+        settings = {"ai_api_url": "http://ai.local", "ai_api_key": "k", "ai_model": "m"}
+        questions = [{"no": "1", "key": "1", "max": 10, "hint": "求极限"}]
+        with mock.patch.object(app_module, "pdf_page_count", return_value=10), \
+                mock.patch.object(app_module, "get_setting",
+                                  side_effect=lambda tid, key: settings.get(key, "")), \
+                mock.patch.object(app_module, "analyze_answer_pdf",
+                                  return_value=(questions, "")) as analyze:
+            resp = self.login(2).post(
+                f"/lecture/{app_module._id_signer.dumps(100)}/answer/pages",
+                data={"_csrf": "test-token", "page": ["2", "3"]})
+        self.assertEqual(resp.status_code, 302)
+        analyze.assert_called_once()
+        self.assertEqual(analyze.call_args.kwargs["pages"], [2, 3])
+
+        con = sqlite3.connect(app_module.DB_PATH)
+        row = con.execute("SELECT answer_pages, scope_candidates, scope_selected "
+                         "FROM lectures WHERE id=100").fetchone()
+        con.close()
+        self.assertEqual(row[0], "2,3")
+        self.assertIn("求极限", row[1])
+        self.assertEqual(row[2], "")
+
+        # 独立分析入口已合并，旧地址不再可用
+        self.assertEqual(self.login(2).post(
+            f"/lecture/{app_module._id_signer.dumps(100)}/scope/analyze",
+            data={"_csrf": "test-token"}).status_code, 404)
+
+        with mock.patch.object(app_module, "pdf_page_count", return_value=10):
+            page = self.login(2).get(f"/lecture/{app_module._id_signer.dumps(100)}")
+        html = page.get_data(as_text=True)
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("保存并生成题目列表", html)
+        self.assertNotIn("scope/analyze", html)
 
 
 if __name__ == "__main__":

@@ -100,17 +100,9 @@
       {% else %}未生成题目清单{% endif %}{% if answer_picked %} · 答案 {{ answer_picked|length }}/{{ answer_total }} 页{% endif %}
     </span>
   </summary>
-  <div class="scope-actions">
-    <form method="post" action="{{ url_for('lecture_scope_analyze', hid=hw.id) }}" class="scope-analyze-form"
-          data-has-result="{{ '1' if cands else '0' }}">
-      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-      <button type="submit" class="small" {% if not hw.answer_pdf %}disabled{% endif %}>
-        {{ '重新分析标准答案' if cands else '分析标准答案生成题目列表' }}</button>
-    </form>
-  </div>
-  <p class="muted small">上传教师版标准答案后即可识别题目清单；已保存页码时，只分析选中的答案页。
-    勾选本讲实际布置的题目并保存，AI 批阅只处理勾选的题目；未划定范围时批阅不会执行。分析约需 20~60 秒。</p>
-  <p class="muted small scope-hint" hidden>正在分析标准答案，请勿重复点击…</p>
+  <p class="muted small">上传教师版标准答案后，在下方勾选页码并点「保存并生成题目列表」，AI 只分析选中的答案页；
+    勾选本讲实际布置的题目并保存，AI 批阅只处理勾选的题目。未划定范围时批阅不会执行。分析约需 20~60 秒。</p>
+  <p class="muted small scope-hint" hidden>正在生成题目清单，请勿重复点击（约 20~60 秒）…</p>
 
   {% if hw.answer_pdf %}
   <div class="page-picker">
@@ -120,8 +112,9 @@
         将发送 <b id="page-count">{{ answer_picked|length if answer_picked else answer_total }}</b> 页给模型</span>
     </div>
     <p class="muted small">学生交的是哪几页，这里就只勾哪几页；未勾选任何页码时使用整份答案。
-      保存后的页码同时用于生成题目清单和 AI 批阅，只发送相关页可以明显减少图片数量与 token 消耗。</p>
-    <form method="post" action="{{ url_for('lecture_answer_pages', hid=hw.id) }}" id="page-form">
+      保存后立即用这些页生成题目清单，同时也用于 AI 批阅；只发送相关页可以明显减少图片数量与 token 消耗。</p>
+    <form method="post" action="{{ url_for('lecture_answer_pages', hid=hw.id) }}" id="page-form"
+          data-has-result="{{ '1' if cands else '0' }}">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
       <div class="page-tools">
         <input type="text" id="page-range" placeholder="例如 1-5, 8, 10-12" style="max-width:220px">
@@ -141,8 +134,8 @@
         {% endfor %}
       </div>
       <div class="save-bar">
-        <button type="submit">保存页码</button>
-        <span class="muted small">全不选并保存＝发送整份教师版 PDF</span>
+        <button type="submit">保存并生成题目列表</button>
+        <span class="muted small">全不选并保存＝用整份教师版 PDF 生成</span>
       </div>
     </form>
   </div>
@@ -171,7 +164,7 @@
     </div>
   </form>
   {% else %}
-  <p class="muted">{% if hw.answer_pdf %}还没有题目清单。先点上方按钮，让 AI 读一遍标准答案。{% else %}请先上传教师版标准答案 PDF，再生成题目清单。{% endif %}</p>
+  <p class="muted">{% if hw.answer_pdf %}还没有题目清单。先在上方勾选教师版页码并点「保存并生成题目列表」。{% else %}请先上传教师版标准答案 PDF，再生成题目清单。{% endif %}</p>
   {% endif %}
 </details>
 
@@ -181,7 +174,7 @@
     <button type="button" class="small" data-dialog-open="upload-for-dialog">代学生上传</button>
   </div>
   {% if not grade_ready %}
-  <p class="muted small">{% if not hw.answer_pdf %}上传教师版标准答案 PDF 后才能使用 AI 批阅。{% elif not cands %}请先在「作业范围」分析标准答案并生成题目清单。{% else %}请先在「作业范围」勾选本讲题目并保存，AI 批阅才会执行。{% endif %}</p>
+  <p class="muted small">{% if not hw.answer_pdf %}上传教师版标准答案 PDF 后才能使用 AI 批阅。{% elif not cands %}请先在「作业范围」选择教师版页码并保存，生成题目清单。{% else %}请先在「作业范围」勾选本讲题目并保存，AI 批阅才会执行。{% endif %}</p>
   {% endif %}
   <dialog id="upload-for-dialog" class="modal">
     <h2>代学生上传作业</h2>
@@ -438,34 +431,29 @@
     });
   }
 
-  form.addEventListener('submit', function () {
-    busyOn(form.querySelector('button[type="submit"]'), '保存中…');
+  function start() {
+    busyOn(form.querySelector('button[type="submit"]'), '生成中…');
+    var hint = document.querySelector('.scope-hint');
+    if (hint) hint.hidden = false;
+  }
+  form.addEventListener('submit', function (e) {
+    // 已有题目清单时，重新保存页码会覆盖清单并清空已选范围，先确认
+    if (form.dataset.hasResult === '1' && form.dataset.confirmed !== '1') {
+      e.preventDefault();
+      confirmDialog('保存后会立即重新生成题目清单，已勾选的作业范围需要重新确认，确定继续吗？',
+                    '保存并生成').then(function (ok) {
+        if (!ok) return;
+        form.dataset.confirmed = '1';
+        start();
+        form.submit();
+      });
+      return;
+    }
+    start();
   });
 })();
-// 作业范围：分析标准答案约需几十秒，提交后给出提示并禁用按钮
+// 作业范围：至少勾选一道题才能保存
 (function () {
-  var analyze = document.querySelector('.scope-analyze-form');
-  if (analyze) {
-    function start() {
-      busyOn(analyze.querySelector('button'), '分析中…');
-      var hint = document.querySelector('.scope-hint');
-      if (hint) hint.hidden = false;
-    }
-    analyze.addEventListener('submit', function (e) {
-      if (analyze.dataset.hasResult === '1' && analyze.dataset.confirmed !== '1') {
-        e.preventDefault();
-        confirmDialog('重新分析会覆盖现有题目清单，已勾选的作业范围需要重新确认，确定要重新生成吗？',
-                      '重新分析').then(function (ok) {
-          if (!ok) return;
-          analyze.dataset.confirmed = '1';
-          start();
-          analyze.submit();
-        });
-        return;
-      }
-      start();
-    });
-  }
   var form = document.getElementById('scope-form');
   if (!form) return;
   var boxes = form.querySelectorAll('input[name="no"]');

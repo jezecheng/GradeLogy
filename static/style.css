@@ -55,7 +55,6 @@ details.scope-card > summary::before { content: "▸"; color: #8a8f99; font-size
 details.scope-card[open] > summary::before { transform: rotate(90deg); }
 details.scope-card[open] > summary.card-head { margin-bottom: 12px; }
 .scope-summary { margin-left: auto; }
-.scope-actions { display: flex; justify-content: flex-end; margin-bottom: 6px; }
 
 /* 学生首页：按课程折叠的讲次列表，可同时展开多个课程 */
 .course-frame { background: #fff; border-radius: 10px; padding: 0 16px; margin-bottom: 16px;

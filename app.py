@@ -2077,10 +2077,49 @@ def lecture_answer(hid):
     return redirect(url_for("lecture_detail", hid=hid))
 
 
+def _answer_pages_note(picked, total):
+    """页码保存结果的提示文案，成功生成题目清单后会拼在前面。"""
+    if not picked:
+        return f"已清除页码限制：将发送教师版 PDF 的全部 {total} 页。"
+    if len(picked) == total:
+        return f"已保存页码：全部 {total} 页（与不限制相同）。"
+    return f"已保存页码：{len(picked)}/{total} 页，只发送这些页。"
+
+
+def _analyze_scope(hw, pages):
+    """调用 AI 读取教师版答案并识别题目清单，返回 (题目, 错误, 用量文本)。"""
+    teacher_id = g.user["id"]
+    if get_setting(teacher_id, "ai_demo") == "1":
+        return [], "演示模式不会调用 AI，无法生成题目清单；请到「AI 设置」关闭演示模式。", ""
+    block = _offpeak_block_if_enabled(teacher_id)
+    if block:
+        return [], block, ""
+    api_url = get_setting(teacher_id, "ai_api_url").rstrip("/")
+    api_key = get_setting(teacher_id, "ai_api_key")
+    model = get_setting(teacher_id, "ai_model")
+    if not api_url or not api_key or not model:
+        return [], "尚未配置 AI 接口，无法生成题目清单。", ""
+
+    log.info("分析作业范围 lecture=%s answer_pdf=%s pages=%s",
+             hw["id"], hw["answer_pdf"], pages)
+    operation = _start_ai_operation(
+        teacher_id, "scope_analyze", model, course_id=hw["course_id"], lecture_id=hw["id"])
+    try:
+        questions, err = analyze_answer_pdf(
+            os.path.join(UPLOAD_DIR, hw["answer_pdf"]), api_url, api_key, model,
+            pages=pages, usage_hook=operation["usage_hook"])
+    except Exception as e:
+        _finish_ai_operation(operation, "failed", str(e))
+        raise
+    _finish_ai_operation(operation, "failed" if err else "success", err)
+    usage_text = _ai_usage_text(_ai_operation_history(operation_id=operation["id"], limit=1)[0])
+    return questions, err, usage_text
+
+
 @app.route("/lecture/<oid:hid>/answer/pages", methods=["POST"])
 @role_required("teacher")
 def lecture_answer_pages(hid):
-    """保存教师版 PDF 要发送给模型的页码；全部不选等于发送整份文件。"""
+    """保存教师要发送给模型的页码，并立即用这些页生成题目清单。"""
     db = get_db()
     hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
     if not hw:
@@ -2095,12 +2134,20 @@ def lecture_answer_pages(hid):
     db.execute("UPDATE lectures SET answer_pages=? WHERE id=?",
                (",".join(str(p) for p in picked), hid))
     db.commit()
-    if not picked:
-        flash("已清除页码限制：批阅时会发送教师版 PDF 的全部页。")
-    elif len(picked) == total:
-        flash(f"已保存页码：全部 {total} 页（与不限制相同）。")
-    else:
-        flash(f"已保存页码：{len(picked)}/{total} 页，批阅时只发送这些页。")
+    note = _answer_pages_note(picked, total)
+    try:
+        questions, err, usage_text = _analyze_scope(hw, picked)
+    except Exception as e:  # noqa: BLE001 页码已保存，分析失败只提示不回滚
+        log.exception("生成题目清单失败 lecture=%s", hid)
+        flash(f"{note} 生成题目清单失败：{e}")
+        return redirect(url_for("lecture_detail", hid=hid))
+    if err:
+        flash(f"{note} {err}{'；' + usage_text if usage_text else ''}")
+        return redirect(url_for("lecture_detail", hid=hid))
+    db.execute("UPDATE lectures SET scope_candidates=?, scope_selected='' WHERE id=?",
+               (json.dumps(questions, ensure_ascii=False), hid))
+    db.commit()
+    flash(f"{note} 已识别 {len(questions)} 道题，请勾选本讲需要批阅的题目。{usage_text}")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
@@ -2140,58 +2187,6 @@ def lecture_student_pdf(hid):
         db.execute("UPDATE lectures SET student_pdf=? WHERE id=?", (name, hid))
         db.commit()
         flash("学生版讲义已更新，学生端可预览")
-    return redirect(url_for("lecture_detail", hid=hid))
-
-
-@app.route("/lecture/<oid:hid>/scope/analyze", methods=["POST"])
-@role_required("teacher")
-def lecture_scope_analyze(hid):
-    """用 AI 读教师版标准答案，生成可勾选的题目清单。"""
-    db = get_db()
-    hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
-    if not hw:
-        abort(404)
-    own_course(hw["course_id"])
-    if not hw["answer_pdf"]:
-        flash("请先上传教师版标准答案 PDF，再分析题目清单。")
-        return redirect(url_for("lecture_detail", hid=hid))
-
-    teacher_id = g.user["id"]
-    if get_setting(teacher_id, "ai_demo") == "1":
-        flash("演示模式不会调用 AI，无法分析题目清单；请到「AI 设置」关闭演示模式。")
-        return redirect(url_for("lecture_detail", hid=hid))
-    block = _offpeak_block_if_enabled(teacher_id)
-    if block:
-        flash(block)
-        return redirect(url_for("lecture_detail", hid=hid))
-    api_url = get_setting(teacher_id, "ai_api_url").rstrip("/")
-    api_key = get_setting(teacher_id, "ai_api_key")
-    model = get_setting(teacher_id, "ai_model")
-    if not api_url or not api_key or not model:
-        flash("尚未配置 AI 接口，无法分析标准答案。")
-        return redirect(url_for("lecture_detail", hid=hid))
-
-    answer_pages = _page_list(hw["answer_pages"])
-    log.info("分析作业范围 lecture=%s answer_pdf=%s pages=%s",
-             hid, hw["answer_pdf"], answer_pages)
-    operation = _start_ai_operation(
-        teacher_id, "scope_analyze", model, course_id=hw["course_id"], lecture_id=hid)
-    try:
-        questions, err = analyze_answer_pdf(
-            os.path.join(UPLOAD_DIR, hw["answer_pdf"]), api_url, api_key, model,
-            pages=answer_pages, usage_hook=operation["usage_hook"])
-    except Exception as e:
-        _finish_ai_operation(operation, "failed", str(e))
-        raise
-    _finish_ai_operation(operation, "failed" if err else "success", err)
-    usage_text = _ai_usage_text(_ai_operation_history(operation_id=operation["id"], limit=1)[0])
-    if err:
-        flash(f"{err}；{usage_text}")
-        return redirect(url_for("lecture_detail", hid=hid))
-    db.execute("UPDATE lectures SET scope_candidates=?, scope_selected='' WHERE id=?",
-               (json.dumps(questions, ensure_ascii=False), hid))
-    db.commit()
-    flash(f"已识别 {len(questions)} 道题，请勾选本讲需要批阅的题目。{usage_text}")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
@@ -2438,7 +2433,7 @@ def submission_grade(sid):
         flash("请先上传教师版标准答案 PDF，再开始批阅。")
         return redirect(url_for("lecture_detail", hid=hw["id"]))
     if not (hw["scope_candidates"] or "").strip() or not (hw["scope_selected"] or "").strip():
-        flash("请先在「作业范围」分析标准答案、勾选本讲题目并保存，再开始批阅。")
+        flash("请先在「作业范围」选择教师版页码并保存，生成题目清单并勾选本讲题目，再开始批阅。")
         return redirect(url_for("lecture_detail", hid=hw["id"]))
 
     block = _offpeak_block_if_enabled(g.user["id"])
