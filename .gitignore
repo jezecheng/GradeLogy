@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 
 # 敏感信息与运行数据
+.env
 .secret_key
 data.sqlite*
 server.log
