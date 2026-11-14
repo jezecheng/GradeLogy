@@ -53,11 +53,11 @@ _MIME = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
          ".jpeg": "image/jpeg", ".webp": "image/webp"}
 
 SCOPE_PROMPT = (
-    "你是阅卷助理。附件是学生版讲义的整页扫描图。\n"
+    "你是阅卷助理。附件是教师版标准答案的整页扫描图。\n"
     "请只输出 JSON，不要输出解释或代码块标记：\n"
     '{"questions":[{"no":"题号","max":5,"hint":"这题考查什么（不超过 20 字）"}]}\n'
     "规则：\n"
-    "1. 按学生版讲义上标注的题号顺序列出全部题目，题号保持原文写法。\n"
+    "1. 按标准答案上标注的题号顺序列出全部题目，题号保持原文写法。\n"
     "2. max 填该题满分；没有标注就填 0，不要估算。\n"
     "3. 带小问的大题按大题合并成一条，不要把 (1)(2) 拆成多题。\n"
     "4. 看不清的题号不要编造。")
@@ -213,18 +213,18 @@ def _normalize(raw):
     return questions
 
 
-def analyze_scope_pdf(pdf_path, api_url, api_key, model, max_tokens=16384,
-                      pages=None):
-    """从学生版讲义里识别题目清单，返回 (questions, error)。
+def analyze_answer_pdf(answer_path, api_url, api_key, model, max_tokens=16384,
+                       pages=None):
+    """从教师版标准答案里识别题目清单，返回 (questions, error)。
 
     每项为 {no, max, hint}，供老师在讲次页勾选本讲作业范围。
     pages 为要发送的页码（1 起）；为空表示整份文件。
     """
-    parts, err = _file_parts(pdf_path, "学生版讲义", pages)
+    parts, err = _file_parts(answer_path, "标准答案", pages)
     if err:
         return None, err
     content = [{"type": "text", "text": SCOPE_PROMPT},
-               {"type": "text", "text": f"学生版讲义，共 {len(parts)} 页："}]
+               {"type": "text", "text": f"教师版标准答案，共 {len(parts)} 页："}]
     content += parts
     reply, finish, err = llm.chat(api_url, api_key, model, content,
                                   max_tokens=max_tokens, timeout=180, retries=1)
@@ -245,8 +245,8 @@ def analyze_scope_pdf(pdf_path, api_url, api_key, model, max_tokens=16384,
                     "hint": str(q.get("hint", "")).strip()})
     if not out:
         if finish == "length":
-            return None, "AI 输出被截断（题目数太多），请重试；多次失败可直接跳过作业范围，默认批改全部题目。"
-        return None, "AI 没有识别出题目清单，请重试，或直接跳过作业范围（默认批改全部题目）。"
+            return None, "AI 输出被截断（题目数太多），请重试。"
+        return None, "AI 没有识别出题目清单，请重试；也可先确认标准答案 PDF 是否清晰。"
     return out, ""
 
 

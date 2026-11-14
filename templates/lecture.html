@@ -3,6 +3,7 @@
 {% block content %}
 {% set cands = hw.scope_candidates|fromjson or [] %}
 {% set chosen = hw.scope_selected|fromjson or [] %}
+{% set grade_ready = hw.answer_pdf and cands and chosen %}
 <p><a href="{{ url_for('course_detail', cid=course.id) }}">← 返回 {{ course.name }}</a></p>
 <h1>{{ hw.title }}</h1>
 <p class="muted">讲次{% if hw.deadline %} · 截止 {{ hw.deadline.replace('T',' ') }}{% endif %}{% if hw.description %} · {{ hw.description }}{% endif %}</p>
@@ -95,7 +96,7 @@
     <h2>作业范围</h2>
     <span class="muted small scope-summary">
       {% if chosen %}已选 {{ chosen|length }} 题
-      {% elif cands %}未选择，批改全部题目
+      {% elif cands %}未划定，AI 批阅不可用
       {% else %}未生成题目清单{% endif %}{% if answer_picked %} · 答案 {{ answer_picked|length }}/{{ answer_total }} 页{% endif %}
     </span>
   </summary>
@@ -103,13 +104,13 @@
     <form method="post" action="{{ url_for('lecture_scope_analyze', hid=hw.id) }}" class="scope-analyze-form"
           data-has-result="{{ '1' if cands else '0' }}">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-      <button type="submit" class="small" {% if not hw.student_pdf %}disabled{% endif %}>
-        {{ '重新分析学生版讲义' if cands else '分析学生版讲义生成题目列表' }}</button>
+      <button type="submit" class="small" {% if not hw.answer_pdf %}disabled{% endif %}>
+        {{ '重新分析标准答案' if cands else '分析标准答案生成题目列表' }}</button>
     </form>
   </div>
-  <p class="muted small">上传学生版讲义后即可识别题目清单，无需先上传教师版答案。勾选本讲实际布置的题目，
-    批阅时只处理勾选的题目；全部不勾选表示批改全部题目。分析约需 20~60 秒。</p>
-  <p class="muted small scope-hint" hidden>正在分析学生版讲义，请勿重复点击…</p>
+  <p class="muted small">上传教师版标准答案后即可识别题目清单；已保存页码时，只分析选中的答案页。
+    勾选本讲实际布置的题目并保存，AI 批阅只处理勾选的题目；未划定范围时批阅不会执行。分析约需 20~60 秒。</p>
+  <p class="muted small scope-hint" hidden>正在分析标准答案，请勿重复点击…</p>
 
   {% if hw.answer_pdf %}
   <div class="page-picker">
@@ -118,8 +119,8 @@
       <span class="muted small">共 {{ answer_total }} 页 ·
         将发送 <b id="page-count">{{ answer_picked|length if answer_picked else answer_total }}</b> 页给模型</span>
     </div>
-    <p class="muted small">学生交的是哪几页，这里就只勾哪几页；未勾选任何页码时发送整份答案。
-      只发送相关页可以明显减少批阅的图片数量与 token 消耗；这里的选择不影响学生版讲义的题目识别。</p>
+    <p class="muted small">学生交的是哪几页，这里就只勾哪几页；未勾选任何页码时使用整份答案。
+      保存后的页码同时用于生成题目清单和 AI 批阅，只发送相关页可以明显减少图片数量与 token 消耗。</p>
     <form method="post" action="{{ url_for('lecture_answer_pages', hid=hw.id) }}" id="page-form">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
       <div class="page-tools">
@@ -166,11 +167,11 @@
       <button type="submit">保存作业范围</button>
       <button type="button" class="small ghost" data-scope-all="1">全选</button>
       <button type="button" class="small ghost" data-scope-all="0">全不选</button>
-      <span class="muted small">当前已选 <b id="scope-count">{{ cands|length if not chosen else chosen|length }}</b> 题</span>
+      <span class="muted small">至少勾选一道题；当前已选 <b id="scope-count">{{ cands|length if not chosen else chosen|length }}</b> 题</span>
     </div>
   </form>
   {% else %}
-  <p class="muted">{% if hw.student_pdf %}还没有题目清单。先点上方按钮，让 AI 读一遍学生版讲义。{% else %}请先上传学生版讲义，再生成题目清单。{% endif %}</p>
+  <p class="muted">{% if hw.answer_pdf %}还没有题目清单。先点上方按钮，让 AI 读一遍标准答案。{% else %}请先上传教师版标准答案 PDF，再生成题目清单。{% endif %}</p>
   {% endif %}
 </details>
 
@@ -179,6 +180,9 @@
     <h2>提交与批阅（{{ subs|length }} 份）</h2>
     <button type="button" class="small" data-dialog-open="upload-for-dialog">代学生上传</button>
   </div>
+  {% if not grade_ready %}
+  <p class="muted small">{% if not hw.answer_pdf %}上传教师版标准答案 PDF 后才能使用 AI 批阅。{% elif not cands %}请先在「作业范围」分析标准答案并生成题目清单。{% else %}请先在「作业范围」勾选本讲题目并保存，AI 批阅才会执行。{% endif %}</p>
+  {% endif %}
   <dialog id="upload-for-dialog" class="modal">
     <h2>代学生上传作业</h2>
     <p class="muted small">适用于学生把纸质作业交给老师的情况；上传后同样可以走 AI 批阅与报告。</p>
@@ -242,7 +246,7 @@
          data-pdf-title="{{ s.display_name }} · 扫描件{% if sfiles|length > 1 %} {{ loop.index }}{% endif %}">查看扫描件{% if sfiles|length > 1 %} {{ loop.index }}{% endif %}</a>
       {% endfor %}
       <a class="btn-link" href="{{ url_for('submission_review', sid=s.id) }}">逐题核对</a>
-      <a class="btn-link" href="{{ url_for('submission_report', sid=s.id) }}">批改报告</a>
+      {% if s.report_md %}<a class="btn-link" href="{{ url_for('submission_report', sid=s.id) }}">批改报告</a>{% endif %}
       {% if s.report_published %}
         <span class="reviewed-badge">已发布给学生</span>
       {% elif s.report_md %}
@@ -251,7 +255,7 @@
       <form method="post" action="{{ url_for('submission_grade', sid=s.id) }}" class="grade-form"
             data-has-result="{{ '1' if (s.n_questions or s.status == '已批改') else '0' }}">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-        <button class="small">{{ '重新批阅' if s.status == '待批改' or s.feedback else 'AI 批阅' }}</button>
+        <button class="small" {% if not grade_ready %}disabled title="请先上传教师版答案并划定作业范围"{% endif %}>{{ '重新批阅' if s.status == '待批改' or s.feedback else 'AI 批阅' }}</button>
       </form>
     </div>
     <p class="muted small grade-hint" hidden>正在把作业与标准答案交给 AI，约 1~3 分钟，请勿刷新或重复点击。</p>
@@ -438,7 +442,7 @@
     busyOn(form.querySelector('button[type="submit"]'), '保存中…');
   });
 })();
-// 作业范围：分析学生版讲义约需几十秒，提交后给出提示并禁用按钮
+// 作业范围：分析标准答案约需几十秒，提交后给出提示并禁用按钮
 (function () {
   var analyze = document.querySelector('.scope-analyze-form');
   if (analyze) {

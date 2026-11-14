@@ -84,11 +84,12 @@
   {% endfor %}
 
   {% for p in kind_mine %}
-  <details class="prompt-item">
+  <details class="prompt-item" id="prompt-{{ p.id }}" open>
     <summary>
       <span class="prompt-name">{{ p.name }}</span>
       <span class="mine-badge">我的</span>
       <span class="muted small">{{ p.updated_at }}</span>
+      <span class="muted small">可编辑、可删除</span>
     </summary>
     <div class="prompt-body">
       <form method="post" action="{{ url_for('prompt_save', pid=p.id) }}" class="stack-form">

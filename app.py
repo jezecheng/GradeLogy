@@ -38,7 +38,7 @@ import config as cfg
 from utilities import assistant, llm, roster, storage
 from utilities.pdfgrade import (DEFAULT_GRADE_PROMPT, DEFAULT_REPORT_PROMPT,
                                 ai_lecture_summary, ai_report_comment,
-                                analyze_scope_pdf, grade_pdf_submission,
+                                analyze_answer_pdf, grade_pdf_submission,
                                 pdf_page_count, render_page_jpeg)
 
 cfg.ensure_dirs()
@@ -1643,24 +1643,23 @@ def lecture_student_pdf(hid):
         except ValueError as e:
             flash(str(e))
             return redirect(url_for("lecture_detail", hid=hid))
-        db.execute("UPDATE lectures SET student_pdf=?, scope_candidates='', scope_selected='' WHERE id=?",
-                   (name, hid))
+        db.execute("UPDATE lectures SET student_pdf=? WHERE id=?", (name, hid))
         db.commit()
-        flash("学生版讲义已更新，学生端可预览；原作业范围已清空，请重新分析并确认。")
+        flash("学生版讲义已更新，学生端可预览")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
 @app.route("/lecture/<oid:hid>/scope/analyze", methods=["POST"])
 @role_required("teacher")
 def lecture_scope_analyze(hid):
-    """用 AI 读学生版讲义，生成可勾选的题目清单。"""
+    """用 AI 读教师版标准答案，生成可勾选的题目清单。"""
     db = get_db()
     hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
     if not hw:
         abort(404)
     own_course(hw["course_id"])
-    if not hw["student_pdf"]:
-        flash("请先上传学生版讲义 PDF，再分析题目清单。")
+    if not hw["answer_pdf"]:
+        flash("请先上传教师版标准答案 PDF，再分析题目清单。")
         return redirect(url_for("lecture_detail", hid=hid))
 
     teacher_id = g.user["id"]
@@ -1675,12 +1674,15 @@ def lecture_scope_analyze(hid):
     api_key = get_setting(teacher_id, "ai_api_key")
     model = get_setting(teacher_id, "ai_model")
     if not api_url or not api_key or not model:
-        flash("尚未配置 AI 接口，无法分析学生版讲义。")
+        flash("尚未配置 AI 接口，无法分析标准答案。")
         return redirect(url_for("lecture_detail", hid=hid))
 
-    log.info("分析作业范围 lecture=%s student_pdf=%s", hid, hw["student_pdf"])
-    questions, err = analyze_scope_pdf(
-        os.path.join(UPLOAD_DIR, hw["student_pdf"]), api_url, api_key, model)
+    answer_pages = _page_list(hw["answer_pages"])
+    log.info("分析作业范围 lecture=%s answer_pdf=%s pages=%s",
+             hid, hw["answer_pdf"], answer_pages)
+    questions, err = analyze_answer_pdf(
+        os.path.join(UPLOAD_DIR, hw["answer_pdf"]), api_url, api_key, model,
+        pages=answer_pages)
     if err:
         flash(err)
         return redirect(url_for("lecture_detail", hid=hid))
@@ -1694,17 +1696,20 @@ def lecture_scope_analyze(hid):
 @app.route("/lecture/<oid:hid>/scope/save", methods=["POST"])
 @role_required("teacher")
 def lecture_scope_save(hid):
-    """保存勾选的作业范围；全部不勾选表示批改全部题目。"""
+    """保存勾选的作业范围；至少勾选一道题，AI 批阅只处理勾选的题目。"""
     db = get_db()
     hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
     if not hw:
         abort(404)
     own_course(hw["course_id"])
     keys = [k.strip() for k in request.form.getlist("no") if k.strip()]
+    if not keys:
+        flash("请至少勾选一道题再保存；未划定作业范围时 AI 批阅不会执行。")
+        return redirect(url_for("lecture_detail", hid=hid))
     db.execute("UPDATE lectures SET scope_selected=? WHERE id=?",
-               (json.dumps(keys, ensure_ascii=False) if keys else "", hid))
+               (json.dumps(keys, ensure_ascii=False), hid))
     db.commit()
-    flash(f"已保存作业范围：{len(keys)} 道题" if keys else "已清除作业范围：批改全部题目")
+    flash(f"已保存作业范围：{len(keys)} 道题")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
@@ -1916,6 +1921,9 @@ def submission_grade(sid):
     course = own_course(hw["course_id"])
     if not hw["answer_pdf"]:
         flash("请先上传教师版标准答案 PDF，再开始批阅。")
+        return redirect(url_for("lecture_detail", hid=hw["id"]))
+    if not (hw["scope_candidates"] or "").strip() or not (hw["scope_selected"] or "").strip():
+        flash("请先在「作业范围」分析标准答案、勾选本讲题目并保存，再开始批阅。")
         return redirect(url_for("lecture_detail", hid=hw["id"]))
 
     block = _offpeak_block_if_enabled(g.user["id"])
@@ -2155,7 +2163,7 @@ def prompt_save(pid):
                "WHERE id=?", (name, content, pid))
     db.commit()
     flash(f"提示词「{name}」已保存")
-    return redirect(url_for("prompts_page"))
+    return redirect(url_for("prompts_page") + f"#prompt-{pid}")
 
 
 @app.route("/prompts/<oid:pid>/copy", methods=["POST"])
@@ -2169,11 +2177,11 @@ def prompt_copy(pid):
     if not row["is_default"] and row["teacher_id"] != g.user["id"]:
         abort(403)
     name = f"{row['name']}（副本）"[:60]
-    db.execute("INSERT INTO prompts(teacher_id,kind,name,content) VALUES(?,?,?,?)",
-               (g.user["id"], row["kind"], name, row["content"]))
+    cur = db.execute("INSERT INTO prompts(teacher_id,kind,name,content) VALUES(?,?,?,?)",
+                     (g.user["id"], row["kind"], name, row["content"]))
     db.commit()
     flash(f"已复制为「{name}」，可以自由修改")
-    return redirect(url_for("prompts_page"))
+    return redirect(url_for("prompts_page") + f"#prompt-{cur.lastrowid}")
 
 
 @app.route("/prompts/<oid:pid>/delete", methods=["POST"])
@@ -2510,7 +2518,7 @@ def run_grading(teacher_id, file_name, answer_pdf="", scope="", answer_pages=Non
 
 
 def _scope_instruction(hw):
-    """把老师勾选的作业范围翻译成给模型的约束；未设置范围时返回空串（批改全部题目）。"""
+    """把老师勾选的作业范围翻译成给模型的约束；未设置范围时返回空串（调用方已拦截）。"""
     try:
         keys = json.loads(hw["scope_selected"] or "[]")
         cands = json.loads(hw["scope_candidates"] or "[]")
