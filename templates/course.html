@@ -224,6 +224,31 @@
 
 <div class="card">
   <div class="card-head">
+    <h2>课程备份</h2>
+    <form method="post" action="{{ url_for('course_export_start', cid=course.id) }}">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <button class="small">导出课程备份</button>
+    </form>
+  </div>
+  <p class="muted small">打包全部讲次的学生版 / 教师版教案、每位学生的提交作业与批改报告，按「课程 → 讲次 → 学生」目录整理。生成后直接下载，服务器保留 1 天。</p>
+  {% if exports %}
+  <table>
+    <thead><tr><th>生成时间</th><th>大小</th><th>下载</th></tr></thead>
+    <tbody>
+      {% for item in exports %}
+      <tr>
+        <td>{{ item.created }}</td>
+        <td>{{ item.size }}</td>
+        <td><a href="{{ url_for('course_export_file', cid=course.id, name=item.name) }}">下载</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+<div class="card">
+  <div class="card-head">
     <h2>考试（{{ exams|length }}）</h2>
     <button type="button" class="small" data-dialog-open="exam-dialog">＋ 新建考试</button>
   </div>

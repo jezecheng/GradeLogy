@@ -16,8 +16,7 @@
     <span>教学管理平台</span>
   </a>
   {% if g.user.role == 'admin' %}
-    <a href="{{ url_for('admin_users') }}">用户管理</a>
-    <a href="{{ url_for('consistency_page') }}">系统维护</a>
+    <a href="{{ url_for('admin_users') }}">系统管理</a>
   {% elif g.user.role == 'teacher' %}
     <a href="{{ url_for('courses') }}">我的课程</a>
     <a href="{{ url_for('prompts_page') }}">我的提示词</a>

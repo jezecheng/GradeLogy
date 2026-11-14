@@ -35,7 +35,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
 import config as cfg
-from utilities import assistant, llm, roster, storage
+from utilities import assistant, course_export, llm, logview, roster, storage
 from utilities.pdfgrade import (DEFAULT_GRADE_PROMPT, DEFAULT_REPORT_PROMPT,
                                 ai_lecture_summary, ai_report_comment,
                                 analyze_answer_pdf, grade_pdf_submission,
@@ -49,6 +49,9 @@ UPLOAD_DIR = cfg.STORAGE_DIR
 DB_PATH = cfg.DB_PATH
 BACKUP_DIR = cfg.BACKUP_DIR
 BACKUP_RE = re.compile(r"gradelogy_\d{8}_\d{6}\.zip")
+# 课程备份包：course_<课程ID>_<生成时间>[_序号].zip，保留 24 小时
+COURSE_EXPORT_RE = re.compile(r"course_(\d+)_(\d{8}_\d{6})(?:_(\d+))?\.zip")
+COURSE_EXPORT_KEEP_HOURS = 24
 ALLOWED_EXT = {"png", "jpg", "jpeg", "webp", "pdf"}
 
 # macOS 自带 Python 往往没有 CA 证书链，用 certifi 兜底，避免 HTTPS 调用 AI 时报 SSL 错误
@@ -504,6 +507,7 @@ CREATE TABLE IF NOT EXISTS ai_usage_events(
   status TEXT NOT NULL,
   error TEXT DEFAULT '',
   created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS idx_ai_operations_started ON ai_operations(started_at, id);
 CREATE INDEX IF NOT EXISTS idx_ai_operations_teacher ON ai_operations(teacher_id, id);
 CREATE INDEX IF NOT EXISTS idx_ai_operations_lecture ON ai_operations(lecture_id, id);
 CREATE INDEX IF NOT EXISTS idx_ai_operations_submission ON ai_operations(submission_id, id);
@@ -852,6 +856,116 @@ app.jinja_env.globals["ai_status_label"] = AI_STATUS_LABEL.get
 app.jinja_env.globals["ai_usage_text"] = _ai_usage_text
 
 
+def _ai_dashboard_data(filters):
+    """管理员全局用量：先聚合到操作，再汇总，避免重试放大操作数。"""
+    where, params = [], []
+    if filters["period"] != "all":
+        days = int(filters["period"])
+        start = (datetime.now() - timedelta(days=days - 1)).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        where.append("o.started_at>=?")
+        params.append(start.isoformat(sep=" ", timespec="milliseconds"))
+    for key, column in (("teacher_id", "o.teacher_id"), ("course_id", "o.course_id"),
+                        ("operation_type", "o.operation_type"), ("model", "o.model"),
+                        ("status", "o.status")):
+        value = filters.get(key)
+        if value not in (None, ""):
+            where.append(column + "=?")
+            params.append(value)
+
+    sql = """
+        WITH operation_usage AS (
+          SELECT o.*, u.display_name AS teacher_name, u.username AS teacher_username,
+            c.name AS course_name,
+            COUNT(e.id) AS request_count,
+            CASE WHEN COUNT(e.prompt_tokens)>0 THEN SUM(e.prompt_tokens) END AS prompt_tokens,
+            CASE WHEN COUNT(e.completion_tokens)>0 THEN SUM(e.completion_tokens) END AS completion_tokens,
+            CASE WHEN COUNT(e.total_tokens)>0 THEN SUM(e.total_tokens) END AS total_tokens,
+            CASE WHEN COUNT(e.cached_tokens)>0 THEN SUM(e.cached_tokens) END AS cached_tokens,
+            CASE WHEN COUNT(e.reasoning_tokens)>0 THEN SUM(e.reasoning_tokens) END AS reasoning_tokens,
+            SUM(CASE WHEN e.id IS NOT NULL AND e.total_tokens IS NULL THEN 1 ELSE 0 END)
+              AS unknown_usage_count,
+            CASE WHEN COUNT(e.estimated_cost)>0 THEN SUM(e.estimated_cost) END AS estimated_cost,
+            SUM(CASE WHEN e.id IS NOT NULL AND e.estimated_cost IS NULL THEN 1 ELSE 0 END)
+              AS unknown_cost_count,
+            SUM(e.latency_ms) AS latency_sum,
+            COUNT(e.latency_ms) AS latency_count,
+            ROUND((julianday(o.finished_at)-julianday(o.started_at))*86400,1) AS elapsed_s
+          FROM ai_operations o
+          LEFT JOIN users u ON u.id=o.teacher_id
+          LEFT JOIN courses c ON c.id=o.course_id
+          LEFT JOIN ai_usage_events e ON e.operation_id=o.id
+    """
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " GROUP BY o.id)"
+    db = get_db()
+    summary = dict(db.execute(sql + """
+        SELECT COUNT(*) AS operation_count,
+          COALESCE(SUM(status='success'),0) AS success_count,
+          COALESCE(SUM(status='failed'),0) AS failed_count,
+          COALESCE(SUM(status='running'),0) AS running_count,
+          COALESCE(SUM(request_count),0) AS request_count,
+          COALESCE(SUM(request_count=0),0) AS no_request_count,
+          SUM(prompt_tokens) AS prompt_tokens,
+          SUM(completion_tokens) AS completion_tokens,
+          SUM(total_tokens) AS total_tokens,
+          SUM(cached_tokens) AS cached_tokens,
+          SUM(reasoning_tokens) AS reasoning_tokens,
+          COALESCE(SUM(unknown_usage_count),0) AS unknown_usage_count,
+          SUM(estimated_cost) AS estimated_cost,
+          COALESCE(SUM(unknown_cost_count),0) AS unknown_cost_count,
+          CASE WHEN SUM(latency_count)>0
+               THEN ROUND(1.0*SUM(latency_sum)/SUM(latency_count)/1000,1) END AS avg_latency_s
+        FROM operation_usage""", params).fetchone())
+    finished = summary["success_count"] + summary["failed_count"]
+    summary["success_rate"] = (round(summary["success_count"] * 1000 / finished) / 10
+                               if finished else None)
+
+    def with_bars(rows):
+        items = [dict(row) for row in rows]
+        peak = max((row["operation_count"] for row in items), default=0)
+        for row in items:
+            row["bar_pct"] = round(row["operation_count"] * 100 / peak, 1) if peak else 0
+        return items
+
+    daily = with_bars(db.execute(sql + """
+        SELECT substr(started_at,1,10) AS label, COUNT(*) AS operation_count,
+          COALESCE(SUM(request_count),0) AS request_count,
+          SUM(total_tokens) AS total_tokens, SUM(estimated_cost) AS estimated_cost
+        FROM operation_usage GROUP BY substr(started_at,1,10) ORDER BY label DESC""",
+        params).fetchall())
+    groups = {}
+    dimensions = {
+        "operations": ("operation_type", "operation_type"),
+        "models": ("COALESCE(NULLIF(model,''),'未指定模型')", "COALESCE(NULLIF(model,''),'未指定模型')"),
+        "teachers": ("COALESCE(NULLIF(teacher_name,''),teacher_username,'已删除教师')",
+                     "COALESCE(NULLIF(teacher_name,''),teacher_username,'已删除教师')"),
+    }
+    for key, (label, grouping) in dimensions.items():
+        groups[key] = with_bars(db.execute(sql + f"""
+            SELECT {label} AS label, COUNT(*) AS operation_count,
+              COALESCE(SUM(request_count),0) AS request_count,
+              SUM(total_tokens) AS total_tokens, SUM(estimated_cost) AS estimated_cost
+            FROM operation_usage GROUP BY {grouping}
+            ORDER BY operation_count DESC, label""", params).fetchall())
+    recent = [dict(row) for row in db.execute(
+        sql + " SELECT * FROM operation_usage ORDER BY id DESC LIMIT 20", params).fetchall()]
+    options = {
+        "teachers": db.execute(
+            "SELECT id,display_name,username FROM users WHERE role='teacher' OR EXISTS "
+            "(SELECT 1 FROM ai_operations o WHERE o.teacher_id=users.id) "
+            "ORDER BY display_name,username").fetchall(),
+        "courses": db.execute("SELECT id,name FROM courses ORDER BY name,id").fetchall(),
+        "models": db.execute("SELECT DISTINCT model FROM ai_operations WHERE model<>'' "
+                             "ORDER BY model").fetchall(),
+        "operations": [{"value": value, "label": label}
+                       for value, label in AI_OPERATION_LABEL.items()],
+    }
+    return {"summary": summary, "daily": daily, "groups": groups,
+            "recent": recent, "options": options}
+
+
 # ---------- 提示词（批改 / 报告）----------
 PROMPT_KIND_LABEL = {"grade": "批改", "report": "报告"}
 
@@ -884,7 +998,7 @@ def _mark_request_start():
 @app.after_request
 def _access_log(resp):
     """每个请求写入一条访问日志；静态资源与健康检查跳过，避免轮询刷屏。"""
-    if request.endpoint in ("static", "healthz"):
+    if request.endpoint in ("static", "healthz", "admin_logs_tail"):
         return resp
     started = getattr(g, "request_started", None)
     cost_ms = (time.perf_counter() - started) * 1000 if started else 0.0
@@ -1162,6 +1276,89 @@ def admin_users():
                            pristine=_is_pristine())
 
 
+@app.route("/admin/ai-usage")
+@role_required("admin")
+def admin_ai_usage():
+    period = request.args.get("period", "30")
+    if period not in {"7", "30", "90", "all"}:
+        period = "30"
+
+    def optional_id(name):
+        try:
+            value = int(request.args.get(name, ""))
+            return value if value > 0 else ""
+        except (TypeError, ValueError):
+            return ""
+
+    operation_type = request.args.get("operation_type", "")
+    if operation_type not in AI_OPERATION_LABEL:
+        operation_type = ""
+    status = request.args.get("status", "")
+    if status not in AI_STATUS_LABEL:
+        status = ""
+    filters = {
+        "period": period,
+        "teacher_id": optional_id("teacher_id"),
+        "course_id": optional_id("course_id"),
+        "operation_type": operation_type,
+        "model": request.args.get("model", "").strip()[:200],
+        "status": status,
+    }
+    return render_template("admin_ai_usage.html", filters=filters,
+                           **_ai_dashboard_data(filters))
+
+
+@app.route("/admin/logs")
+@role_required("admin")
+def admin_logs_page():
+    files = []
+    for item in logview.list_logs(cfg.LOG_DIR):
+        item = dict(item)
+        item["size_text"] = storage.human_size(item["size"])
+        item["mtime_text"] = datetime.fromtimestamp(item["mtime"]).strftime("%Y-%m-%d %H:%M:%S")
+        files.append(item)
+    selected = request.args.get("name", "app.log")
+    names = {item["name"] for item in files}
+    if selected not in names:
+        selected = files[0]["name"] if files else ""
+    resp = render_template("admin_logs.html", files=files, selected=selected)
+    return resp, 200, {"Cache-Control": "no-store"}
+
+
+@app.route("/admin/logs/tail")
+@role_required("admin")
+def admin_logs_tail():
+    name = request.args.get("name", "app.log")
+    cursor = None
+    if "offset" in request.args:
+        try:
+            cursor = {key: int(request.args[key]) for key in ("offset", "dev", "ino")}
+        except (KeyError, TypeError, ValueError):
+            abort(400, description="日志游标无效。")
+        if cursor["offset"] < 0:
+            abort(400, description="日志游标无效。")
+    try:
+        result = logview.read_chunk(cfg.LOG_DIR, name, cursor)
+    except FileNotFoundError:
+        abort(404)
+    resp = jsonify(result)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/admin/logs/download/<name>")
+@role_required("admin")
+def admin_logs_download(name):
+    try:
+        path = logview.resolve_log(cfg.LOG_DIR, name)
+    except FileNotFoundError:
+        abort(404)
+    resp = send_file(path, as_attachment=True, download_name=name,
+                     mimetype="text/plain; charset=utf-8")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 @app.route("/admin_users")
 def admin_users_alias():
     """兼容手输下划线的地址。"""
@@ -1429,6 +1626,68 @@ def course_edit(cid):
     return redirect(url_for("course_detail", cid=cid))
 
 
+def _prune_course_exports():
+    """清理超过 24 小时的课程备份包。"""
+    if not os.path.isdir(cfg.EXPORT_DIR):
+        return
+    cutoff = time.time() - COURSE_EXPORT_KEEP_HOURS * 3600
+    for name in os.listdir(cfg.EXPORT_DIR):
+        path = os.path.join(cfg.EXPORT_DIR, name)
+        if COURSE_EXPORT_RE.fullmatch(name) and os.path.isfile(path) \
+                and os.path.getmtime(path) < cutoff:
+            try:
+                os.remove(path)
+            except OSError:
+                log.warning("课程备份清理失败：%s", path)
+
+
+def _course_exports(cid):
+    """列出本课程仍可下载的备份包，新的在前，最多 10 个。"""
+    _prune_course_exports()
+    items = []
+    if not os.path.isdir(cfg.EXPORT_DIR):
+        return items
+    for name in sorted(os.listdir(cfg.EXPORT_DIR), reverse=True):
+        match = COURSE_EXPORT_RE.fullmatch(name)
+        path = os.path.join(cfg.EXPORT_DIR, name)
+        if not match or int(match.group(1)) != cid or not os.path.isfile(path):
+            continue
+        items.append({
+            "name": name,
+            "size": storage.human_size(os.path.getsize(path)),
+            "created": datetime.strptime(match.group(2), "%Y%m%d_%H%M%S")
+            .strftime("%Y-%m-%d %H:%M:%S")})
+    return items[:10]
+
+
+def _course_export_lectures(cid):
+    """整理课程备份所需的讲次、学生提交与批改报告。"""
+    db = get_db()
+    lectures = db.execute(
+        "SELECT id,title,student_pdf,answer_pdf FROM lectures WHERE course_id=? "
+        "ORDER BY title COLLATE NOCASE, id", (cid,)).fetchall()
+    rows = db.execute("""
+        SELECT s.lecture_id, s.student_id, s.file_path, s.report_md,
+               u.username, u.display_name
+        FROM submissions s
+        JOIN users u ON u.id=s.student_id
+        JOIN lectures h ON h.id=s.lecture_id
+        WHERE h.course_id=? ORDER BY s.id""", (cid,)).fetchall()
+    by_lecture = {}
+    for row in rows:
+        students = by_lecture.setdefault(row["lecture_id"], {})
+        student = students.setdefault(row["student_id"], {
+            "username": row["username"], "display_name": row["display_name"],
+            "files": [], "report_md": ""})
+        student["files"].extend(file_list(row["file_path"]))
+        if row["report_md"]:
+            student["report_md"] = row["report_md"]  # 多次提交时取最新报告
+    return [{"title": lecture["title"], "student_pdf": lecture["student_pdf"],
+             "answer_pdf": lecture["answer_pdf"],
+             "students": list(by_lecture.get(lecture["id"], {}).values())}
+            for lecture in lectures]
+
+
 @app.route("/course/<oid:cid>")
 @role_required("teacher", "admin")
 def course_detail(cid):
@@ -1474,7 +1733,55 @@ def course_detail(cid):
                            teacher_candidates=teacher_candidates,
                            grade_prompts=_prompt_options(cid, "grade"),
                            report_prompts=_prompt_options(cid, "report"),
+                           exports=_course_exports(cid),
                            can_manage_teachers=is_course_owner(course))
+
+
+@app.route("/course/<oid:cid>/export", methods=["POST"])
+@role_required("teacher", "admin")
+def course_export_start(cid):
+    """生成整个课程的备份 zip 并直接下载，服务器保留 24 小时。"""
+    course = own_course(cid)
+    _prune_course_exports()
+    os.makedirs(cfg.EXPORT_DIR, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    name, n = f"course_{cid}_{stamp}.zip", 2
+    path = os.path.join(cfg.EXPORT_DIR, name)
+    while os.path.exists(path):
+        name = f"course_{cid}_{stamp}_{n}.zip"
+        path = os.path.join(cfg.EXPORT_DIR, name)
+        n += 1
+    try:
+        written, missing = course_export.build_course_zip(
+            path, course["name"], _course_export_lectures(cid), UPLOAD_DIR)
+    except Exception:  # noqa: BLE001 导出失败不应留下半截文件
+        log.exception("课程备份导出失败 course=%s", cid)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        flash("导出失败，请稍后重试")
+        return redirect(url_for("course_detail", cid=cid))
+    log.info("课程备份导出 course=%s files=%s missing=%s operator=%s",
+             cid, written, missing, g.user["username"])
+    download = f"{course_export.safe_component(course['name'], '课程')}_课程备份_{stamp}.zip"
+    return send_file(path, as_attachment=True, download_name=download)
+
+
+@app.route("/course/<oid:cid>/export/<name>")
+@role_required("teacher", "admin")
+def course_export_file(cid, name):
+    """下载 24 小时内生成的课程备份包，仅限本课程老师。"""
+    course = own_course(cid)
+    match = COURSE_EXPORT_RE.fullmatch(name or "")
+    if not match or int(match.group(1)) != cid:
+        abort(404)
+    path = os.path.join(cfg.EXPORT_DIR, name)
+    if not os.path.isfile(path):
+        abort(404)
+    download = (f"{course_export.safe_component(course['name'], '课程')}"
+                f"_课程备份_{match.group(2)}.zip")
+    return send_file(path, as_attachment=True, download_name=download)
 
 
 @app.route("/course/<oid:cid>/teachers", methods=["POST"])

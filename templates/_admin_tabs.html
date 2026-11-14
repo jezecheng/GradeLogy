@@ -1,0 +1,10 @@
+<nav class="admin-tabs" aria-label="系统管理">
+  <a href="{{ url_for('admin_users') }}"
+     {% if request.endpoint == 'admin_users' %}class="active" aria-current="page"{% endif %}>用户管理</a>
+  <a href="{{ url_for('admin_ai_usage') }}"
+     {% if request.endpoint == 'admin_ai_usage' %}class="active" aria-current="page"{% endif %}>AI 使用</a>
+  <a href="{{ url_for('admin_logs_page') }}"
+     {% if request.endpoint == 'admin_logs_page' %}class="active" aria-current="page"{% endif %}>系统日志</a>
+  <a href="{{ url_for('consistency_page') }}"
+     {% if request.endpoint == 'consistency_page' %}class="active" aria-current="page"{% endif %}>系统维护</a>
+</nav>

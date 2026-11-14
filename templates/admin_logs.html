@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}系统日志{% endblock %}
+{% block content %}
+{% include "_admin_tabs.html" %}
+<h1>系统日志</h1>
+<p class="muted">实时查看访问、审计、AI 调用和异常堆栈。日志可能包含账号、来源 IP 与异常信息，仅限管理员访问。</p>
+
+<div class="card" id="log-browser"
+     data-tail-url="{{ url_for('admin_logs_tail') }}"
+     data-download-url="{{ url_for('admin_logs_download', name='__NAME__') }}"
+     data-initial-name="{{ selected }}">
+  <div class="log-toolbar">
+    <label>日志文件
+      <select id="log-file" {% if not files %}disabled{% endif %}>
+        {% for file in files %}
+        <option value="{{ file.name }}" {% if file.name == selected %}selected{% endif %}>{{ file.name }} · {{ file.size_text }} · {{ file.mtime_text }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="log-actions">
+      <button type="button" class="ghost" id="log-toggle" {% if not files %}disabled{% endif %}>暂停</button>
+      <button type="button" class="ghost" id="log-clear">清空视图</button>
+      <a id="log-download" href="{{ url_for('admin_logs_download', name=selected) if selected else '#' }}">下载原文件</a>
+    </div>
+  </div>
+  <div class="log-toolbar log-filter-bar">
+    <label>级别
+      <select id="log-level">
+        <option value="">全部级别</option>
+        <option value="DEBUG">DEBUG</option>
+        <option value="INFO">INFO</option>
+        <option value="WARNING">WARNING</option>
+        <option value="ERROR">ERROR</option>
+        <option value="CRITICAL">CRITICAL</option>
+      </select>
+    </label>
+    <label class="log-search">关键词
+      <input id="log-keyword" type="search" maxlength="200" placeholder="按日志内容筛选">
+    </label>
+    <label class="check-line log-autoscroll"><input type="checkbox" id="log-autoscroll" checked>自动滚动到底部</label>
+  </div>
+  <div class="log-status-row">
+    <span class="muted small" id="log-status" role="status">{% if files %}等待读取…{% else %}尚未生成应用日志。{% endif %}</span>
+    <span class="muted small">每 3 秒增量刷新 · 页面隐藏时暂停 · 最多保留 1000 行</span>
+  </div>
+  <div class="log-viewer" id="log-viewer" role="log" aria-label="应用日志内容"></div>
+  <p class="muted small log-note">「清空视图」只清空当前页面，不会修改日志文件。切换轮转文件后会重新读取该文件末尾。</p>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='admin_logs.js') }}"></script>
+{% endblock %}

@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+{% block title %}AI 使用{% endblock %}
+{% macro token_text(value) -%}
+  {%- if value is not none %}{{ '{:,}'.format(value) }}{% else %}—{% endif -%}
+{%- endmacro %}
+{% macro cost_text(value) -%}
+  {%- if value is not none %}¥{{ '%.4f'|format(value) }}{% else %}—{% endif -%}
+{%- endmacro %}
+{% macro distribution_table(rows, operation_labels=false) %}
+  {% if rows %}
+  <table class="bar-table">
+    <tr><th>名称</th><th>操作</th><th>请求</th><th>总 token</th><th>预估费用</th></tr>
+    {% for row in rows %}
+    <tr>
+      <td>
+        <strong>{% if operation_labels %}{{ ai_operation_label(row.label) or row.label }}{% else %}{{ row.label }}{% endif %}</strong>
+        <div class="usage-bar" aria-hidden="true"><span style="width:{{ row.bar_pct }}%"></span></div>
+      </td>
+      <td>{{ row.operation_count }}</td>
+      <td>{{ row.request_count }}</td>
+      <td>{{ token_text(row.total_tokens) }}</td>
+      <td>{{ cost_text(row.estimated_cost) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">当前筛选条件下暂无数据。</p>
+  {% endif %}
+{% endmacro %}
+{% block content %}
+{% include "_admin_tabs.html" %}
+<h1>AI 使用</h1>
+<p class="muted">汇总所有老师的 AI 操作与逐次模型请求。费用按调用时的价格快照估算，实际以服务商账单为准。</p>
+
+<div class="card">
+  <form method="get" action="{{ url_for('admin_ai_usage') }}" class="filter-form ai-filter-form">
+    <label>时间范围
+      <select name="period">
+        <option value="7" {% if filters.period == '7' %}selected{% endif %}>近 7 天</option>
+        <option value="30" {% if filters.period == '30' %}selected{% endif %}>近 30 天</option>
+        <option value="90" {% if filters.period == '90' %}selected{% endif %}>近 90 天</option>
+        <option value="all" {% if filters.period == 'all' %}selected{% endif %}>全部</option>
+      </select>
+    </label>
+    <label>教师
+      <select name="teacher_id">
+        <option value="">全部教师</option>
+        {% for teacher in options.teachers %}
+        <option value="{{ teacher.id }}" {% if filters.teacher_id == teacher.id %}selected{% endif %}>{{ teacher.display_name or teacher.username }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>课程
+      <select name="course_id">
+        <option value="">全部课程</option>
+        {% for course in options.courses %}
+        <option value="{{ course.id }}" {% if filters.course_id == course.id %}selected{% endif %}>{{ course.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>操作类型
+      <select name="operation_type">
+        <option value="">全部类型</option>
+        {% for opt in options.operations %}
+        <option value="{{ opt.value }}" {% if filters.operation_type == opt.value %}selected{% endif %}>{{ opt.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>模型
+      <select name="model">
+        <option value="">全部模型</option>
+        {% for item in options.models %}
+        <option value="{{ item.model }}" {% if filters.model == item.model %}selected{% endif %}>{{ item.model }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>状态
+      <select name="status">
+        <option value="">全部状态</option>
+        {% for value, label in [('success','成功'),('failed','失败'),('running','进行中')] %}
+        <option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="filter-actions">
+      <button type="submit">应用筛选</button>
+      <a class="small" href="{{ url_for('admin_ai_usage') }}">重置</a>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>用量总览</h2><span class="muted small">已知数据合计，不将未知值记为 0</span></div>
+  <div class="stats-kpis admin-ai-kpis">
+    <div class="kpi">
+      <div class="kpi-num">{{ summary.operation_count }}</div>
+      <div class="kpi-lbl">AI 操作</div>
+      <div class="kpi-sub">成功 {{ summary.success_count }} · 失败 {{ summary.failed_count }} · 进行中 {{ summary.running_count }}</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-num">{% if summary.success_rate is not none %}{{ summary.success_rate }}%{% else %}—{% endif %}</div>
+      <div class="kpi-lbl">已完成操作成功率</div>
+      <div class="kpi-sub">进行中不计入分母</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-num">{{ summary.request_count }}</div>
+      <div class="kpi-lbl">模型请求（含重试）</div>
+      <div class="kpi-sub">{{ summary.no_request_count }} 次操作未发起请求</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-num">{{ token_text(summary.total_tokens) }}</div>
+      <div class="kpi-lbl">总 token</div>
+      <div class="kpi-sub">输入 {{ token_text(summary.prompt_tokens) }} · 输出 {{ token_text(summary.completion_tokens) }}</div>
+      {% if summary.unknown_usage_count %}<div class="kpi-sub">{{ summary.unknown_usage_count }} 次请求用量未知</div>{% endif %}
+    </div>
+    <div class="kpi">
+      <div class="kpi-num">{{ cost_text(summary.estimated_cost) }}</div>
+      <div class="kpi-lbl">预估费用</div>
+      {% if summary.unknown_cost_count %}<div class="kpi-sub">{{ summary.unknown_cost_count }} 次请求费用未知</div>{% else %}<div class="kpi-sub">按价格快照估算</div>{% endif %}
+    </div>
+    <div class="kpi">
+      <div class="kpi-num">{% if summary.avg_latency_s is not none %}{{ summary.avg_latency_s }}s{% else %}—{% endif %}</div>
+      <div class="kpi-lbl">平均请求耗时</div>
+      <div class="kpi-sub">仅统计服务商已返回耗时的请求</div>
+    </div>
+  </div>
+  <p class="muted small token-breakdown">缓存 token：{{ token_text(summary.cached_tokens) }} · 推理 token：{{ token_text(summary.reasoning_tokens) }}；未知项目以 — 表示。</p>
+</div>
+
+<div class="dashboard-grid">
+  <div class="card">
+    <div class="card-head"><h2>按日趋势</h2><span class="muted small">横条按操作数归一化</span></div>
+    {% if daily %}
+    <div class="daily-usage-table">
+      <table class="bar-table">
+        <tr><th>日期</th><th>操作</th><th>请求</th><th>总 token</th><th>预估费用</th></tr>
+        {% for row in daily %}
+        <tr>
+          <td>{{ row.label }}<div class="usage-bar" aria-hidden="true"><span style="width:{{ row.bar_pct }}%"></span></div></td>
+          <td>{{ row.operation_count }}</td><td>{{ row.request_count }}</td>
+          <td>{{ token_text(row.total_tokens) }}</td><td>{{ cost_text(row.estimated_cost) }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+    {% else %}<p class="muted">当前筛选条件下暂无数据。</p>{% endif %}
+  </div>
+  <div class="card">
+    <h2>按操作类型</h2>
+    {{ distribution_table(groups.operations, true) }}
+  </div>
+  <div class="card">
+    <h2>按模型</h2>
+    {{ distribution_table(groups.models) }}
+  </div>
+  <div class="card">
+    <h2>按教师</h2>
+    {{ distribution_table(groups.teachers) }}
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>最近操作</h2><span class="muted small">最多 20 条，与上方筛选条件一致</span></div>
+  {% if recent %}
+  <table>
+    <tr><th>开始时间</th><th>教师 / 课程</th><th>操作</th><th>模型 / 状态</th><th>消耗</th></tr>
+    {% for op in recent %}
+    <tr>
+      <td class="nowrap">{{ op.started_at }}</td>
+      <td>{{ op.teacher_name or op.teacher_username or '已删除教师' }}<br><span class="muted small">{{ op.course_name or '未关联课程' }}</span></td>
+      <td>{{ ai_operation_label(op.operation_type) or op.operation_type }}<br><span class="muted small">#{{ op.id }}</span></td>
+      <td>{{ op.model or '未指定模型' }}<br><span class="muted small">{{ ai_status_label(op.status) or op.status }}</span></td>
+      <td>{{ ai_usage_text(op) }}
+        {% if op.request_count > 1 %}<div class="muted small">共 {{ op.request_count }} 次请求，以上为合计。</div>{% endif %}
+        {% if op.error %}<div class="danger-text small">失败原因：{{ op.error }}</div>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">当前筛选条件下暂无操作。</p>{% endif %}
+</div>
+{% endblock %}

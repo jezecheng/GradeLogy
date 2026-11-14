@@ -29,6 +29,14 @@ h2 { font-size: 17px; margin-bottom: 10px; }
 .small { font-size: 13px; }
 .center { text-align: center; }
 
+.admin-tabs { display: flex; gap: 4px; margin-bottom: 20px; padding: 4px;
+              background: #e9edf3; border-radius: 9px; overflow-x: auto; }
+.admin-tabs a { flex: 1; min-width: 104px; padding: 8px 14px; border-radius: 6px;
+                color: #5b6472; text-align: center; white-space: nowrap; }
+.admin-tabs a:hover { color: #1456f0; text-decoration: none; }
+.admin-tabs a.active { background: #fff; color: #1456f0; font-weight: 600;
+                       box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+
 .card { background: #fff; border-radius: 10px; padding: 20px; margin-bottom: 20px;
         box-shadow: 0 1px 3px rgba(0,0,0,.08); }
 .card.narrow { max-width: 520px; margin: 40px auto; }
@@ -337,6 +345,43 @@ button.btn-link:hover { text-decoration: underline; }
 .legend-dot.bad     { background: #cf222e; }
 .legend-dot.unk     { background: #8a8f99; }
 
+/* 管理员 AI 使用总览 */
+.ai-filter-form label { flex: 1 1 145px; }
+.ai-filter-form select { width: 100%; }
+.filter-actions { display: flex; align-items: center; gap: 10px; margin-left: auto; padding-top: 22px; }
+.admin-ai-kpis .kpi { flex-basis: 160px; }
+.kpi-sub { color: #8a8f99; font-size: 11px; line-height: 1.45; margin-top: 4px; }
+.token-breakdown { margin: 12px 0 0; }
+.dashboard-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+                  gap: 20px; margin-bottom: 20px; }
+.dashboard-grid .card { margin-bottom: 0; min-width: 0; }
+.daily-usage-table { max-height: 520px; overflow: auto; }
+.usage-bar { height: 4px; min-width: 64px; margin-top: 6px; border-radius: 999px;
+             background: #edf0f5; overflow: hidden; }
+.usage-bar span { display: block; height: 100%; border-radius: inherit; background: #6b96ee; }
+
+/* 管理员实时日志 */
+.log-toolbar { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.log-toolbar > label { flex: 1 1 280px; }
+.log-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.log-filter-bar { align-items: center; padding-top: 12px; border-top: 1px solid #eef0f3; }
+.log-filter-bar > label:first-child { flex: 0 1 170px; }
+.log-filter-bar .log-search { flex: 2 1 280px; }
+.log-autoscroll { flex: 0 1 auto !important; white-space: nowrap; }
+.log-autoscroll input { width: auto; }
+.log-status-row { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 8px 0; }
+.log-viewer { height: 560px; overflow: auto; padding: 12px 14px; border-radius: 8px;
+              background: #111827; color: #d1d5db; font: 12px/1.6 ui-monospace, SFMono-Regular,
+              Menlo, Consolas, monospace; }
+.log-line { white-space: pre-wrap; overflow-wrap: anywhere; border-bottom: 1px solid rgba(255,255,255,.035); }
+.log-warning { color: #fbbf24; }
+.log-error, .log-critical { color: #f87171; }
+.log-debug { color: #9ca3af; }
+.log-info { color: #d1d5db; }
+.log-other { color: #b8c0cc; }
+.log-empty { color: #9ca3af; padding: 16px 0; }
+.log-note { margin: 10px 0 0; }
+
 .lecture-summary-body h1, .lecture-summary-body h2 { font-size: 16px; margin: 10px 0 4px; }
 .lecture-summary-body p, .lecture-summary-body li { font-size: 14px; line-height: 1.65; }
 .lecture-summary-body ul { margin-left: 20px; margin-bottom: 8px; }
@@ -424,6 +469,7 @@ button.btn-link:hover { text-decoration: underline; }
   .card { padding: 16px; margin-bottom: 16px; }
   .card-table { padding: 4px 12px; }
   .grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+  .dashboard-grid { grid-template-columns: 1fr; gap: 16px; }
   body.pdf-open .container { margin: 16px; }
   .pdf-panel { border-left: 0; box-shadow: none; }
 }
@@ -444,6 +490,10 @@ button.btn-link:hover { text-decoration: underline; }
   input, textarea, select { font-size: 16px; }
   .filter-form, .inline-form { flex-direction: column; align-items: stretch; gap: 8px; }
   .filter-form input, .filter-form select, .inline-form input:not([type=checkbox]) { width: 100%; }
+  .filter-actions { margin-left: 0; padding-top: 0; }
+  .log-toolbar { flex-direction: column; align-items: stretch; }
+  .log-filter-bar > label:first-child, .log-filter-bar .log-search { flex: 1 1 auto; }
+  .log-viewer { height: 60vh; padding: 10px; }
   button { padding: 10px 14px; font-size: 15px; }
   button.small { padding: 6px 10px; font-size: 13px; }
   td.actions { gap: 6px; }
