@@ -36,12 +36,13 @@ def _usage_int(value):
 def _emit_usage(hook, event):
     """用量落库失败不应触发模型请求重试，也不应覆盖原始调用结果。"""
     if not hook:
-        return
+        return None
     try:
-        hook(event)
+        return hook(event)
     except Exception:
         _log.exception("AI 用量记录失败 model=%s attempt=%s",
                        event.get("model"), event.get("attempt"))
+        return None
 
 
 def _usage_event(usage, model, attempt, latency_ms, finish_reason="", status="success",
@@ -77,10 +78,11 @@ def _usage_event(usage, model, attempt, latency_ms, finish_reason="", status="su
 
 
 def chat(api_url, api_key, model, content, max_tokens=1500, timeout=180, retries=3,
-         usage_hook=None):
+         usage_hook=None, report_running=False):
     """通用 OpenAI 兼容调用，返回 (reply, finish_reason, error)。失败自动重试（含 429 退避）。
 
     usage_hook 在每次请求后收到一条用量事件；重试的各次请求也分别记录，缺省 usage 保留为 None。
+    report_running 为知识图谱等进度页在请求前额外上报 running，并用返回的事件 ID 更新同一行。
     timeout: 单次请求超时秒数；整份 PDF 批阅耗时较长，调用方可调大。
     retries: 总尝试次数。批阅这类长请求应传 1，避免超时后反复重试把线程占满。
     """
@@ -93,6 +95,16 @@ def chat(api_url, api_key, model, content, max_tokens=1500, timeout=180, retries
     started = time.perf_counter()
     for attempt in range(retries):
         attempt_started = time.perf_counter()
+        event_id = None
+        if report_running:
+            event_id = _emit_usage(usage_hook, _usage_event(
+                None, model, attempt + 1, None, status="running"))
+
+        def record(event):
+            if event_id is not None:
+                event["usage_event_id"] = event_id
+            _emit_usage(usage_hook, event)
+
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read())
@@ -100,7 +112,7 @@ def chat(api_url, api_key, model, content, max_tokens=1500, timeout=180, retries
             choice = data["choices"][0]
             finish = (choice.get("finish_reason") or "").lower()
             latency_ms = round((time.perf_counter() - attempt_started) * 1000)
-            _emit_usage(usage_hook, _usage_event(
+            record(_usage_event(
                 data.get("usage"), model, attempt + 1, latency_ms, finish,
                 provider_request_id=data.get("id") or header_request_id,
                 response_model=data.get("model") or ""))
@@ -112,7 +124,7 @@ def chat(api_url, api_key, model, content, max_tokens=1500, timeout=180, retries
         except urllib.error.HTTPError as e:
             detail = e.read().decode()[:200]
             error = f"HTTP {e.code} {detail}"
-            _emit_usage(usage_hook, _usage_event(
+            record(_usage_event(
                 None, model, attempt + 1,
                 round((time.perf_counter() - attempt_started) * 1000),
                 status="error", error=error,
@@ -124,7 +136,7 @@ def chat(api_url, api_key, model, content, max_tokens=1500, timeout=180, retries
             _log.warning("AI 请求失败 model=%s HTTP %s %s", model, e.code, detail[:120])
             return "", "", error
         except Exception as e:
-            _emit_usage(usage_hook, _usage_event(
+            record(_usage_event(
                 None, model, attempt + 1,
                 round((time.perf_counter() - attempt_started) * 1000),
                 status="error", error=str(e)))

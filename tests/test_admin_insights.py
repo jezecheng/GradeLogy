@@ -903,15 +903,43 @@ class AsyncGradingTest(unittest.TestCase):
 
     def test_startup_marks_interrupted_jobs_failed(self):
         con = sqlite3.connect(app_module.DB_PATH)
-        con.execute("INSERT INTO ai_operations(teacher_id,operation_type,submission_id,"
-                    "status,started_at) VALUES(2,'grade',?,'queued',CURRENT_TIMESTAMP)",
-                    (self.SID,))
+        grade_id = con.execute(
+            "INSERT INTO ai_operations(teacher_id,operation_type,submission_id,"
+            "status,started_at) VALUES(2,'grade',?,'queued',CURRENT_TIMESTAMP)",
+            (self.SID,)).lastrowid
+        kg_id = con.execute(
+            "INSERT INTO ai_operations(teacher_id,operation_type,material_id,"
+            "status,started_at) VALUES(2,'kg_build',999,'running',CURRENT_TIMESTAMP)"
+        ).lastrowid
+        for operation_id in (grade_id, kg_id):
+            con.execute("INSERT INTO ai_usage_events(operation_id,attempt,status) "
+                        "VALUES(?,1,'running')", (operation_id,))
         con.commit()
         con.close()
         app_module.init_db()
         row = self.operation()
         self.assertEqual(row[0], "failed")
+        self.assertIn("批阅任务", row[1])
         self.assertIn("重新提交", row[1])
+
+        con = sqlite3.connect(app_module.DB_PATH)
+        kg_operation = con.execute(
+            "SELECT status,error FROM ai_operations WHERE id=?", (kg_id,)).fetchone()
+        events = con.execute(
+            "SELECT operation_id,status,error,latency_ms FROM ai_usage_events "
+            "WHERE operation_id IN (?,?) ORDER BY operation_id", (grade_id, kg_id)).fetchall()
+        con.close()
+        self.assertEqual(kg_operation[0], "failed")
+        self.assertIn("知识图谱建图", kg_operation[1])
+        self.assertIn("自动重新排队", kg_operation[1])
+        self.assertNotIn("批阅任务", kg_operation[1])
+        self.assertEqual([event[1] for event in events], ["error", "error"])
+        for event in events:
+            self.assertIsNotNone(event[3])
+            if event[0] == kg_id:
+                self.assertIn("知识图谱建图请求", event[2])
+            else:
+                self.assertIn("本次 AI 请求", event[2])
 
     def _run_scan(self):
         with app_module.app.app_context():

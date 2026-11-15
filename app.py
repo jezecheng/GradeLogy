@@ -2665,47 +2665,89 @@ def _kg_graph(gid, edit=False):
     return row
 
 
-# 多份资料集中上传时串行建图，避免同时打满模型限流
+# 多份资料集中上传时串行建图，避免同时打满模型限流；集合防止重复入队
 _kg_build_lock = threading.Lock()
+_kg_schedule_lock = threading.Lock()
+_kg_enqueued = set()
 
 
 def _kg_start_build(graph_id, material_id, teacher_id):
     """后台构建图谱：请求返回后继续跑，资料状态可刷新查看。"""
-    threading.Thread(target=_kg_build_worker,
-                     args=(graph_id, material_id, teacher_id), daemon=True).start()
+    with _kg_schedule_lock:
+        if material_id in _kg_enqueued:
+            return False
+        _kg_enqueued.add(material_id)
+    try:
+        threading.Thread(target=_kg_build_worker,
+                         args=(graph_id, material_id, teacher_id), daemon=True).start()
+    except Exception:
+        with _kg_schedule_lock:
+            _kg_enqueued.discard(material_id)
+        raise
+    return True
 
 
 def _kg_build_worker(graph_id, material_id, teacher_id):
-    with _kg_build_lock:
-        with app.app_context():
-            db = get_db()
-            try:
-                api_url, api_key, model, err = _ai_endpoint(teacher_id)
-                if err:
-                    db.execute("UPDATE kg_materials SET status=?, error=? WHERE id=?",
-                               (kg_utils.STATUS_FAILED, err, material_id))
-                    db.commit()
-                    return
-                operation = _start_ai_operation(teacher_id, "kg_build", model)
+    try:
+        with _kg_build_lock:
+            with app.app_context():
+                db = get_db()
                 try:
-                    result = kg_utils.build_material(
-                        db, material_id, api_url, api_key, model,
-                        usage_hook=operation["usage_hook"])
-                except Exception as e:  # noqa: BLE001 后台任务失败写入资料状态
-                    _finish_ai_operation(operation, "failed", str(e))
-                    db.execute("UPDATE kg_materials SET status=?, error=? WHERE id=?",
-                               (kg_utils.STATUS_FAILED, str(e)[:500], material_id))
-                    db.commit()
-                    log.exception("知识图谱构建失败 material=%s", material_id)
-                    return
-                if result:
-                    _finish_ai_operation(operation, "success", "")
-                else:
-                    row = db.execute("SELECT error FROM kg_materials WHERE id=?",
-                                     (material_id,)).fetchone()
-                    _finish_ai_operation(operation, "failed", row["error"] if row else "")
-            finally:
-                close_db()
+                    material = db.execute(
+                        "SELECT status FROM kg_materials WHERE id=? AND graph_id=?",
+                        (material_id, graph_id)).fetchone()
+                    if not material or material["status"] not in (
+                            kg_utils.STATUS_PENDING, kg_utils.STATUS_BUILDING):
+                        return
+                    api_url, api_key, model, err = _ai_endpoint(teacher_id)
+                    if err:
+                        db.execute("UPDATE kg_materials SET status=?, error=?,"
+                                   "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                                   (kg_utils.STATUS_FAILED, err, material_id))
+                        db.commit()
+                        return
+                    operation = _start_ai_operation(
+                        teacher_id, "kg_build", model, material_id=material_id)
+                    try:
+                        result = kg_utils.build_material(
+                            db, material_id, api_url, api_key, model,
+                            usage_hook=operation["usage_hook"])
+                    except Exception as e:  # noqa: BLE001 后台任务失败写入资料状态
+                        _finish_ai_operation(operation, "failed", str(e))
+                        db.execute("UPDATE kg_materials SET status=?, error=?,"
+                                   "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                                   (kg_utils.STATUS_FAILED, str(e)[:500], material_id))
+                        db.commit()
+                        log.exception("知识图谱构建失败 material=%s", material_id)
+                        return
+                    if result:
+                        _finish_ai_operation(operation, "success", "")
+                    else:
+                        row = db.execute("SELECT error FROM kg_materials WHERE id=?",
+                                         (material_id,)).fetchone()
+                        _finish_ai_operation(operation, "failed", row["error"] if row else "")
+                finally:
+                    close_db()
+    finally:
+        with _kg_schedule_lock:
+            _kg_enqueued.discard(material_id)
+
+
+def start_kg_recovery():
+    """服务启动后按上传顺序恢复中断及等待中的资料，成功块由建图逻辑直接复用。"""
+    with app.app_context():
+        try:
+            rows = get_db().execute(
+                "SELECT id,graph_id,uploaded_by FROM kg_materials "
+                "WHERE status IN (?,?) ORDER BY id",
+                (kg_utils.STATUS_PENDING, kg_utils.STATUS_BUILDING)).fetchall()
+        finally:
+            close_db()
+    for row in rows:
+        _kg_start_build(row["graph_id"], row["id"], row["uploaded_by"])
+    if rows:
+        log.info("已恢复 %s 份知识图谱资料的建图队列", len(rows))
+    return len(rows)
 
 
 @_routes.route("/knowledge-graphs")
@@ -2759,13 +2801,102 @@ def _kg_status_counts(materials):
     return counts
 
 
+def _kg_duration_text(seconds):
+    if seconds is None:
+        return ""
+    seconds = max(0, int(round(seconds)))
+    if seconds < 60:
+        return f"{seconds} 秒"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes} 分 {secs} 秒" if secs else f"{minutes} 分钟"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} 小时 {minutes} 分" if minutes else f"{hours} 小时"
+
+
+def _kg_material_view(db, item):
+    """资料状态、本地时间、chunk 进度与基于实际块耗时的剩余时间粗估。"""
+    view = dict(item)
+    view.update(_kg_status_view(item["status"]))
+    for key in ("created_at", "started_at", "finished_at"):
+        view[key + "_local"] = _localtime(item[key])
+    timing = db.execute(
+        "SELECT ROUND((julianday(COALESCE(finished_at,CURRENT_TIMESTAMP))-"
+        "julianday(started_at))*86400,1) AS elapsed FROM kg_materials "
+        "WHERE id=? AND started_at IS NOT NULL", (item["id"],)).fetchone()
+    view["elapsed_s"] = timing["elapsed"] if timing else None
+    view["elapsed_text"] = _kg_duration_text(view["elapsed_s"])
+    chunks = {kg_utils.CHUNK_PENDING: 0, kg_utils.CHUNK_RUNNING: 0,
+              kg_utils.CHUNK_SUCCESS: 0, kg_utils.CHUNK_FAILED: 0}
+    for row in db.execute("SELECT status,COUNT(*) AS n FROM kg_chunks "
+                          "WHERE material_id=? GROUP BY status", (item["id"],)):
+        chunks[row["status"]] = row["n"]
+    view["chunks"] = {"total": sum(chunks.values()), "pending": chunks["pending"],
+                      "running": chunks["running"], "success": chunks["success"],
+                      "failed": chunks["failed"]}
+    durations = sorted(row[0] for row in db.execute(
+        "SELECT (julianday(finished_at)-julianday(started_at))*86400 FROM kg_chunks "
+        "WHERE material_id=? AND status='success' "
+        "AND started_at IS NOT NULL AND finished_at IS NOT NULL "
+        "ORDER BY finished_at DESC,id DESC LIMIT 5", (item["id"],)))
+    eta = None
+    if durations and item["status"] in (kg_utils.STATUS_PENDING, kg_utils.STATUS_BUILDING):
+        middle = len(durations) // 2
+        typical = (durations[middle] if len(durations) % 2 else
+                   (durations[middle - 1] + durations[middle]) / 2)
+        eta = chunks[kg_utils.CHUNK_PENDING] * typical
+        running = db.execute(
+            "SELECT (julianday(CURRENT_TIMESTAMP)-julianday(started_at))*86400 AS elapsed "
+            "FROM kg_chunks WHERE material_id=? AND status='running' "
+            "ORDER BY chunk_no LIMIT 1", (item["id"],)).fetchone()
+        if running:
+            eta += max(0, typical - (running["elapsed"] or 0))
+    view["eta_s"] = max(0, round(eta)) if eta is not None else None
+    view["eta_text"] = _kg_duration_text(view["eta_s"])
+    return view
+
+
+def _kg_material_requests(db, material_id):
+    """展开单份资料时返回逐次请求，包含重启前的历史操作与 HTTP 重试。"""
+    rows = db.execute("""
+        SELECT e.id,e.operation_id,e.attempt,e.status,e.latency_ms,e.total_tokens,
+          e.prompt_tokens,e.completion_tokens,e.finish_reason,e.error,e.created_at,
+          c.chunk_no
+        FROM ai_usage_events e
+        JOIN ai_operations o ON o.id=e.operation_id
+        LEFT JOIN kg_chunks c ON c.id=e.chunk_id
+        WHERE o.material_id=? ORDER BY e.id""", (material_id,)).fetchall()
+    result = []
+    for row in rows:
+        elapsed = row["latency_ms"] / 1000 if row["latency_ms"] is not None else None
+        if elapsed is None and row["status"] == "running":
+            elapsed = db.execute(
+                "SELECT (julianday(CURRENT_TIMESTAMP)-julianday(?))*86400",
+                (row["created_at"],)).fetchone()[0]
+        result.append({
+            "id": row["id"], "operation_id": row["operation_id"],
+            "chunk_no": row["chunk_no"] + 1 if row["chunk_no"] is not None else None,
+            "attempt": row["attempt"], "status": row["status"],
+            "status_label": {"running": "进行中", "success": "成功"}.get(
+                row["status"], "失败"),
+            "started_at": _localtime(row["created_at"]),
+            "elapsed_s": round(elapsed, 1) if elapsed is not None else None,
+            "elapsed_text": _kg_duration_text(elapsed),
+            "prompt_tokens": row["prompt_tokens"], "completion_tokens": row["completion_tokens"],
+            "total_tokens": row["total_tokens"], "finish_reason": row["finish_reason"] or "",
+            "error": row["error"] or "",
+        })
+    return result
+
+
 @_routes.route("/knowledge-graphs/<oid:gid>")
 @role_required("teacher", "admin")
 def knowledge_graph_detail(gid):
     graph = _kg_graph(gid)
     db = get_db()
-    materials = db.execute("SELECT * FROM kg_materials WHERE graph_id=? "
-                           "ORDER BY id DESC", (gid,)).fetchall()
+    rows = db.execute("SELECT * FROM kg_materials WHERE graph_id=? "
+                      "ORDER BY id DESC", (gid,)).fetchall()
+    materials = [_kg_material_view(db, row) for row in rows]
     building = any(m["status"] in (kg_utils.STATUS_PENDING, kg_utils.STATUS_BUILDING)
                    for m in materials)
     return render_template(
@@ -2799,23 +2930,31 @@ def knowledge_graph_status(gid):
     """供页面轮询，避免建图期间整页刷新打断正在选择的新资料。"""
     _kg_graph(gid)
     db = get_db()
-    materials = db.execute("SELECT * FROM kg_materials WHERE graph_id=? "
-                           "ORDER BY id DESC", (gid,)).fetchall()
-    view = [_kg_status_view(item["status"]) for item in materials]
-    return jsonify({
+    rows = db.execute("SELECT * FROM kg_materials WHERE graph_id=? "
+                      "ORDER BY id DESC", (gid,)).fetchall()
+    materials = [_kg_material_view(db, row) for row in rows]
+    payload = {
         "counts": kg_utils.graph_counts(db, gid),
         "status_counts": _kg_status_counts(materials),
-        "building": any(v["style"] in ("pending", "building") for v in view),
+        "building": any(v["style"] in ("pending", "building") for v in materials),
         "materials": [{
-            "id": item["id"],
-            "label": v["label"],
-            "style": v["style"],
-            "icon": v["icon"],
-            "error": item["error"] or "",
-            "page_count": item["page_count"] or 0,
-            "char_count": item["char_count"] or 0,
-        } for item, v in zip(materials, view)],
-    })
+            "id": item["id"], "label": item["label"], "style": item["style"],
+            "icon": item["icon"], "error": item["error"] or "",
+            "page_count": item["page_count"] or 0, "char_count": item["char_count"] or 0,
+            "created_at_local": item["created_at_local"],
+            "started_at_local": item["started_at_local"],
+            "finished_at_local": item["finished_at_local"],
+            "elapsed_text": item["elapsed_text"], "chunks": item["chunks"],
+            "eta_s": item["eta_s"], "eta_text": item["eta_text"],
+        } for item in materials],
+    }
+    material_id = request.args.get("material_id", type=int)
+    if material_id is not None:
+        if not any(item["id"] == material_id for item in materials):
+            abort(404)
+        payload["request_material_id"] = material_id
+        payload["requests"] = _kg_material_requests(db, material_id)
+    return jsonify(payload)
 
 
 @_routes.route("/knowledge-graphs/<oid:gid>/materials", methods=["POST"])
@@ -3972,6 +4111,7 @@ def create_app():
 # 模块导入时即完成建表与迁移，gunicorn 直接加载 app:app 也能拿到完整 schema
 app = create_app()
 init_db()
+start_kg_recovery()
 start_auto_backup()
 start_model_sync()
 start_auto_grade()

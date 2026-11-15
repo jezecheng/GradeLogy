@@ -147,27 +147,150 @@ class KGLogicTest(unittest.TestCase):
         self.assertEqual((concepts, relations), ([], []))
         self.assertTrue(error.startswith(kg.TRUNCATED_MARK))
 
-    def test_build_material_splits_truncated_batch(self):
+    def test_build_material_splits_truncated_single_chunk(self):
         material_id = self._material()
-        for number in range(2):
-            self.con.execute(
-                "INSERT INTO kg_chunks(graph_id,material_id,chunk_no,content)"
-                " VALUES(1,?,?,?)", (material_id, number, "乙" * 200))
+        self.con.execute(
+            "INSERT INTO kg_chunks(graph_id,material_id,chunk_no,content)"
+            " VALUES(1,?,0,?)", (material_id, "甲。" * 700))
         self.con.commit()
-        concepts = [{"name": "氧化还原反应", "category": "", "definition": "",
-                     "aliases": [], "confidence": 0.8}]
+        first = [{"name": "氧化还原反应", "category": "", "definition": "",
+                  "aliases": [], "confidence": 0.8}]
+        second = [{"name": "电子守恒", "category": "", "definition": "",
+                   "aliases": [], "confidence": 0.8}]
         truncated = ([], [], f"{kg.TRUNCATED_MARK}（max_tokens=32768）")
         with mock.patch.object(kg, "analyze_batch",
-                               side_effect=[truncated,
-                                            (concepts, [], ""),
-                                            (concepts, [], "")]) as mocked:
+                               side_effect=[truncated, (first, [], ""),
+                                            (second, [], "")]) as mocked:
             result = kg.build_material(self.con, material_id, "u", "k", "m")
         self.assertEqual(mocked.call_count, 3)
         self.assertEqual(result["errors"], 0)
-        self.assertEqual(result["new_nodes"], 1)
-        row = self.con.execute("SELECT * FROM kg_materials WHERE id=?",
-                               (material_id,)).fetchone()
-        self.assertEqual(row["status"], kg.STATUS_DONE)
+        self.assertEqual(result["new_nodes"], 2)
+        material = self.con.execute("SELECT * FROM kg_materials WHERE id=?",
+                                    (material_id,)).fetchone()
+        chunk = self.con.execute("SELECT * FROM kg_chunks WHERE material_id=?",
+                                 (material_id,)).fetchone()
+        self.assertEqual(material["status"], kg.STATUS_DONE)
+        self.assertEqual(chunk["status"], kg.CHUNK_SUCCESS)
+        self.assertEqual(len(json.loads(chunk["extraction_json"])["concepts"]), 2)
+
+    def test_build_material_resumes_chunks_and_replays_merge_idempotently(self):
+        material_id = self._material()
+        saved = json.dumps({
+            "concepts": [{"name": "概念甲", "category": "", "definition": "",
+                          "aliases": [], "confidence": 0.8}],
+            "relations": [{"from": "概念甲", "to": "概念乙",
+                           "relation": "prerequisite", "evidence": "跨块关系",
+                           "confidence": 0.9}],
+        }, ensure_ascii=False)
+        statuses = [kg.CHUNK_SUCCESS, kg.CHUNK_RUNNING, kg.CHUNK_FAILED, kg.CHUNK_PENDING]
+        for number, status in enumerate(statuses):
+            self.con.execute(
+                "INSERT INTO kg_chunks(graph_id,material_id,chunk_no,content,status,"
+                "extraction_json) VALUES(1,?,?,?,?,?)",
+                (material_id, number, f"第{number + 1}块", status,
+                 saved if number == 0 else ""))
+        self.con.commit()
+
+        def extraction(name):
+            return ([{"name": name, "category": "", "definition": "",
+                      "aliases": [], "confidence": 0.8}], [], "")
+
+        with mock.patch.object(kg, "analyze_batch",
+                               side_effect=[extraction("概念乙"), extraction("概念丙"),
+                                            extraction("概念丁")]) as mocked:
+            result = kg.build_material(self.con, material_id, "u", "k", "m")
+        self.assertEqual([call.args[0][0] for call in mocked.call_args_list],
+                         ["第2块", "第3块", "第4块"])
+        self.assertEqual((result["new_nodes"], result["new_edges"], result["errors"]),
+                         (4, 1, 0))
+        self.assertEqual(self.con.execute(
+            "SELECT COUNT(*) FROM kg_chunks WHERE material_id=? AND status='success'",
+            (material_id,)).fetchone()[0], 4)
+
+        mocked.reset_mock()
+        replay = kg.build_material(self.con, material_id, "u", "k", "m")
+        mocked.assert_not_called()
+        self.assertEqual((replay["new_nodes"], replay["new_edges"]), (0, 0))
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM kg_nodes").fetchone()[0], 4)
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM kg_edges").fetchone()[0], 1)
+        edge = self.con.execute("SELECT * FROM kg_edges").fetchone()
+        self.assertEqual(edge["source_materials"], f",{material_id},")
+
+    def test_llm_running_event_is_updated_for_each_retry(self):
+        events = []
+
+        def hook(event):
+            events.append(dict(event))
+            return len(events)
+
+        class Response:
+            headers = {"x-request-id": "request-2"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def read():
+                return json.dumps({
+                    "id": "response-2", "choices": [{"message": {"content": "完成"},
+                                                      "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 4, "completion_tokens": 5, "total_tokens": 9},
+                }).encode()
+
+        limited = kg.llm.urllib.error.HTTPError(
+            "http://ai.local", 429, "busy", None, io.BytesIO(b"busy"))
+        with mock.patch.object(kg.llm.urllib.request, "urlopen",
+                               side_effect=[limited, Response()]), \
+                mock.patch.object(kg.llm.time, "sleep"):
+            reply, finish, error = kg.llm.chat(
+                "http://ai.local", "k", "m", "正文", retries=2,
+                usage_hook=hook, report_running=True)
+        self.assertEqual((reply, finish, error), ("完成", "stop", ""))
+        self.assertEqual([event["status"] for event in events],
+                         ["running", "error", "running", "success"])
+        self.assertEqual([event["attempt"] for event in events], [1, 1, 2, 2])
+        self.assertEqual(events[1]["usage_event_id"], 1)
+        self.assertEqual(events[3]["usage_event_id"], 3)
+        self.assertEqual(events[-1]["total_tokens"], 9)
+
+    def test_legacy_database_migrates_progress_columns_idempotently(self):
+        handle = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False)
+        handle.close()
+        try:
+            con = sqlite3.connect(handle.name)
+            con.executescript(database.SCHEMA)
+            con.execute("ALTER TABLE ai_operations DROP COLUMN material_id")
+            con.execute("ALTER TABLE ai_usage_events DROP COLUMN chunk_id")
+            for column in ("started_at", "finished_at"):
+                con.execute(f"ALTER TABLE kg_materials DROP COLUMN {column}")
+            for column in ("status", "error", "extraction_json", "started_at", "finished_at"):
+                con.execute(f"ALTER TABLE kg_chunks DROP COLUMN {column}")
+            con.close()
+            with mock.patch.object(database, "DB_PATH", handle.name):
+                database.init_db()
+                database.init_db()
+            con = sqlite3.connect(handle.name)
+            expected = {
+                "ai_operations": {"material_id"},
+                "ai_usage_events": {"chunk_id"},
+                "kg_materials": {"started_at", "finished_at"},
+                "kg_chunks": {"status", "error", "extraction_json", "started_at", "finished_at"},
+            }
+            for table, columns in expected.items():
+                actual = {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
+                self.assertTrue(columns.issubset(actual))
+            indexes = {row[0] for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'")}
+            self.assertIn("idx_ai_operations_material", indexes)
+            self.assertIn("idx_ai_usage_chunk", indexes)
+            con.close()
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                if os.path.exists(handle.name + suffix):
+                    os.remove(handle.name + suffix)
 
     def _node(self, name, category="概念"):
         cur = self.con.execute(
@@ -335,12 +458,16 @@ class KGLogicTest(unittest.TestCase):
 class KGRouteTest(unittest.TestCase):
     def setUp(self):
         app_module.app.config.update(TESTING=True)
+        with app_module._kg_schedule_lock:
+            app_module._kg_enqueued.clear()
         self._clear()
         self._seed()
         self.client = self.login(2)
 
     def tearDown(self):
         self._clear()
+        with app_module._kg_schedule_lock:
+            app_module._kg_enqueued.clear()
         shutil.rmtree(os.path.join(app_module.UPLOAD_DIR, "kg"), ignore_errors=True)
 
     @staticmethod
@@ -475,6 +602,47 @@ class KGRouteTest(unittest.TestCase):
             for thread in threads:
                 thread.join(timeout=5)
         self.assertEqual(state["peak"], 1)
+
+    def test_startup_recovery_restores_only_active_materials_in_order(self):
+        graph = self._create_graph()
+        con = self._db()
+        for material_id, status in ((60, kg.STATUS_PENDING), (61, kg.STATUS_DONE),
+                                    (62, kg.STATUS_BUILDING), (63, kg.STATUS_FAILED)):
+            con.execute(
+                "INSERT INTO kg_materials(id,graph_id,filename,stored_name,sha256,"
+                "status,uploaded_by) VALUES(?,?,?,?,?,?,2)",
+                (material_id, graph["id"], f"{material_id}.txt",
+                 f"kg/{graph['id']}/{material_id}.txt", str(material_id) * 64, status))
+        con.commit()
+        con.close()
+        with mock.patch.object(app_module, "_kg_start_build") as start:
+            self.assertEqual(app_module.start_kg_recovery(), 2)
+        self.assertEqual(start.call_args_list, [
+            mock.call(graph["id"], 60, 2), mock.call(graph["id"], 62, 2)])
+
+    def test_build_scheduler_prevents_duplicate_enqueue(self):
+        graph = self._create_graph()
+        with mock.patch.object(app_module.threading, "Thread") as thread_class:
+            self.assertTrue(app_module._kg_start_build(graph["id"], 64, 2))
+            self.assertFalse(app_module._kg_start_build(graph["id"], 64, 2))
+        thread_class.assert_called_once_with(
+            target=app_module._kg_build_worker, args=(graph["id"], 64, 2), daemon=True)
+        thread_class.return_value.start.assert_called_once_with()
+
+    def test_build_worker_ignores_missing_or_terminal_material(self):
+        graph = self._create_graph()
+        con = self._db()
+        con.execute(
+            "INSERT INTO kg_materials(id,graph_id,filename,stored_name,sha256,"
+            "status,uploaded_by) VALUES(65,?,?,?,?,?,2)",
+            (graph["id"], "done.txt", f"kg/{graph['id']}/done.txt", "e" * 64,
+             kg.STATUS_DONE))
+        con.commit()
+        con.close()
+        with mock.patch.object(app_module, "_ai_endpoint") as endpoint:
+            app_module._kg_build_worker(graph["id"], 65, 2)
+            app_module._kg_build_worker(graph["id"], 999, 2)
+        endpoint.assert_not_called()
 
     def test_detail_renders_layered_svg_and_concept_links(self):
         graph = self._create_graph()
@@ -875,6 +1043,117 @@ class KGRouteTest(unittest.TestCase):
             self.url("knowledge_graph_status", gid=graph["id"])).get_json()
         self.assertFalse(data["building"])
 
+    def test_status_reports_local_times_chunk_counts_duration_and_eta(self):
+        graph = self._create_graph()
+        con = self._db()
+        materials = [
+            (170, kg.STATUS_BUILDING, "2026-01-02 03:05:00", None),
+            (171, kg.STATUS_DONE, "2026-01-02 03:05:00", "2026-01-02 03:06:05"),
+            (172, kg.STATUS_PENDING, None, None),
+        ]
+        for material_id, status, started, finished in materials:
+            con.execute(
+                "INSERT INTO kg_materials(id,graph_id,filename,stored_name,sha256,status,"
+                "uploaded_by,created_at,started_at,finished_at) VALUES(?,?,?,?,?,?,2,?,?,?)",
+                (material_id, graph["id"], f"{material_id}.txt",
+                 f"kg/{graph['id']}/{material_id}.txt", str(material_id) * 64, status,
+                 "2026-01-02 03:04:05", started, finished))
+        chunks = [
+            (0, kg.CHUNK_SUCCESS, "2026-01-02 00:00:00", "2026-01-02 00:00:10"),
+            (1, kg.CHUNK_SUCCESS, "2026-01-02 00:01:00", "2026-01-02 00:01:30"),
+            (2, kg.CHUNK_RUNNING, None, None),
+            (3, kg.CHUNK_PENDING, None, None),
+            (4, kg.CHUNK_FAILED, "2026-01-02 00:02:00", "2026-01-02 00:02:05"),
+        ]
+        for chunk_no, status, started, finished in chunks:
+            con.execute(
+                "INSERT INTO kg_chunks(graph_id,material_id,chunk_no,content,status,"
+                "started_at,finished_at) VALUES(?,170,?, '正文',?,?,?)",
+                (graph["id"], chunk_no, status, started, finished))
+        con.execute("UPDATE kg_chunks SET started_at=CURRENT_TIMESTAMP "
+                    "WHERE material_id=170 AND chunk_no=2")
+        con.execute("INSERT INTO kg_chunks(graph_id,material_id,chunk_no,content) "
+                    "VALUES(?,172,0,'正文')", (graph["id"],))
+        con.commit()
+        con.close()
+
+        local_created = app_module._localtime("2026-01-02 03:04:05")
+        html = self.client.get(
+            self.url("knowledge_graph_detail", gid=graph["id"])).get_data(as_text=True)
+        self.assertIn(local_created, html)
+        self.assertIn("共 5 块 · 成功 2 · 处理中 1 · 待处理 1 · 失败 1", html)
+        self.assertIn("1 分 5 秒", html)
+
+        data = self.client.get(
+            self.url("knowledge_graph_status", gid=graph["id"])).get_json()
+        items = {item["id"]: item for item in data["materials"]}
+        building = items[170]
+        self.assertEqual(building["created_at_local"], local_created)
+        self.assertEqual(building["chunks"], {
+            "total": 5, "pending": 1, "running": 1, "success": 2, "failed": 1})
+        self.assertTrue(building["elapsed_text"])
+        self.assertGreaterEqual(building["eta_s"], 35)
+        self.assertLessEqual(building["eta_s"], 40)
+        self.assertEqual(items[171]["elapsed_text"], "1 分 5 秒")
+        self.assertEqual(items[171]["finished_at_local"],
+                         app_module._localtime("2026-01-02 03:06:05"))
+        self.assertIsNone(items[172]["eta_s"])
+        self.assertEqual(items[172]["started_at_local"], "")
+
+    def test_material_request_details_reuse_event_and_check_graph(self):
+        graph = self._create_graph()
+        con = self._db()
+        other_graph_id = con.execute(
+            "INSERT INTO knowledge_graphs(subject,name,created_by) VALUES('化学','另一图谱',2)"
+        ).lastrowid
+        for material_id, graph_id in ((180, graph["id"]), (181, other_graph_id)):
+            con.execute(
+                "INSERT INTO kg_materials(id,graph_id,filename,stored_name,sha256,"
+                "status,uploaded_by) VALUES(?,?,?,?,?,?,2)",
+                (material_id, graph_id, f"{material_id}.txt",
+                 f"kg/{graph_id}/{material_id}.txt", str(material_id) * 64,
+                 kg.STATUS_BUILDING))
+        con.execute(
+            "INSERT INTO kg_chunks(id,graph_id,material_id,chunk_no,content) "
+            "VALUES(190,?,180,0,'正文')", (graph["id"],))
+        con.commit()
+        con.close()
+
+        with app_module.app.app_context():
+            first = app_module._start_ai_operation(2, "kg_build", "m", material_id=180)
+            event_id = first["usage_hook"]({
+                "chunk_id": 190, "attempt": 1, "model": "m", "status": "running"})
+            first["usage_hook"]({
+                "usage_event_id": event_id, "chunk_id": 190, "attempt": 1, "model": "m",
+                "status": "success", "latency_ms": 13000, "prompt_tokens": 10,
+                "completion_tokens": 20, "total_tokens": 30, "finish_reason": "stop"})
+            second = app_module._start_ai_operation(2, "kg_build", "m", material_id=180)
+            second["usage_hook"]({
+                "chunk_id": 190, "attempt": 2, "model": "m", "status": "error",
+                "error": "请求超时", "latency_ms": 2000})
+
+        con = self._db()
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM ai_usage_events WHERE operation_id=?",
+            (first["id"],)).fetchone()[0], 1)
+        con.close()
+        data = self.client.get(
+            self.url("knowledge_graph_status", gid=graph["id"]) + "?material_id=180").get_json()
+        self.assertEqual(data["request_material_id"], 180)
+        self.assertEqual(len(data["requests"]), 2)
+        success = data["requests"][0]
+        self.assertEqual((success["chunk_no"], success["attempt"], success["status"]),
+                         (1, 1, "success"))
+        self.assertEqual(success["elapsed_text"], "13 秒")
+        self.assertEqual(success["total_tokens"], 30)
+        self.assertTrue(success["started_at"])
+        self.assertEqual(data["requests"][1]["error"], "请求超时")
+        self.assertEqual(data["requests"][1]["operation_id"], second["id"])
+
+        foreign = self.client.get(
+            self.url("knowledge_graph_status", gid=graph["id"]) + "?material_id=181")
+        self.assertEqual(foreign.status_code, 404)
+
     def test_detail_uses_polling_and_collapsible_sections(self):
         graph = self._create_graph()
         con = self._db()
@@ -892,6 +1171,11 @@ class KGRouteTest(unittest.TestCase):
         self.assertIn("kg-refresh-hint", html)
         self.assertIn('<details class="card kg-fold"', html)
         self.assertIn("建图过程中也可以继续上传", html)
+        self.assertIn("data-material-toggle", html)
+        self.assertIn("data-request-content", html)
+        self.assertIn("setInterval(poll, 4000)", html)
+        self.assertIn("error.textContent = request.error", html)
+        self.assertIn("if (active) { poll(); }", html)
         self.assertNotIn("window.location.reload()", html)
 
     def test_background_worker_marks_failed_without_ai_config(self):

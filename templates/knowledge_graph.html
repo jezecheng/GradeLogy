@@ -66,6 +66,17 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
 .kg-head-actions { display: flex; align-items: center; gap: 8px; }
 .kg-head-actions form { margin: 0; }
 .kg-name { font-weight: 600; }
+.kg-request-toggle { border: 0; background: none; padding: 0; cursor: pointer;
+  text-align: left; color: inherit; font: inherit; font-weight: 600; }
+.kg-request-toggle::before { content: '▸'; color: #8a8f99; margin-right: 5px; }
+.kg-request-toggle[aria-expanded="true"]::before { content: '▾'; }
+.kg-chunk-progress, .kg-eta { color: #6b7280; font-size: 12px; margin-top: 5px; }
+.kg-processing { font-size: 12px; color: #6b7280; line-height: 1.7; white-space: nowrap; }
+.kg-request-panel { background: #f8fafc; border-radius: 8px; padding: 10px 12px; }
+.kg-request-panel h3 { margin: 0 0 8px; font-size: 13px; }
+.kg-request-scroll { max-height: 320px; overflow: auto; }
+.kg-request-scroll table { background: #fff; }
+.kg-request-error { color: #b91c1c; white-space: normal; }
 .kg-note { color: #8a8f99; font-size: 12px; }
 .kg-arrow { color: #8a8f99; margin: 0 4px; }
 </style>
@@ -140,7 +151,7 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
   </div>
   <div class="kg-table-wrap">
   <table class="kg">
-    <thead><tr><th>资料</th><th>大小</th><th>解析</th><th>状态</th><th>上传时间</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
+    <thead><tr><th>资料（点击查看 AI Request）</th><th>大小</th><th>解析与分块</th><th>状态</th><th>上传时间</th><th>处理时间</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
     <tbody>
       {% for m in materials %}
       {% set ext = m.filename.rsplit('.', 1)[-1] | lower %}
@@ -149,22 +160,34 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
           <div class="kg-file">
             <span class="file-icon {{ ext }}">{{ ext | upper }}</span>
             <div>
-              <div class="kg-name">{{ m.filename }}</div>
+              <button type="button" class="kg-request-toggle" data-material-toggle="{{ m.id }}"
+                      aria-expanded="false" aria-controls="kg-requests-{{ m.id }}">{{ m.filename }}</button>
               <div class="kg-note" data-error {% if not m.error %}hidden{% endif %}>{{ m.error or '' }}</div>
             </div>
           </div>
         </td>
         <td>{{ (m.size / 1024) | round(0) | int }} KB</td>
-        <td data-parsed>{{ m.page_count }} 页 / {{ m.char_count }} 字</td>
         <td>
-          <span class="status status-{{ 'done' if m.status == '完成' else 'building' if m.status == '建图中' else 'failed' if m.status == '失败' else 'pending' }}" data-status>
+          <div data-parsed>{{ m.page_count }} 页 / {{ m.char_count }} 字</div>
+          <div class="kg-chunk-progress" data-chunks>共 {{ m.chunks.total }} 块 · 成功 {{ m.chunks.success }} · 处理中 {{ m.chunks.running }} · 待处理 {{ m.chunks.pending }} · 失败 {{ m.chunks.failed }}</div>
+          <div class="kg-eta" data-eta {% if not (m.eta_text or m.style in ('building', 'pending')) %}hidden{% endif %}>
+            {% if m.eta_text %}预计剩余约 {{ m.eta_text }}（粗估）{% else %}首个文本块完成后估算剩余时间{% endif %}
+          </div>
+        </td>
+        <td>
+          <span class="status status-{{ m.style }}" data-status>
             {% if m.status == '完成' %}<span class="status-dot">✓</span>已完成
             {% elif m.status == '建图中' %}<span class="spinner"></span>处理中
             {% elif m.status == '失败' %}<span class="status-dot">✕</span>处理失败
             {% else %}<span class="status-dot">○</span>待处理{% endif %}
           </span>
         </td>
-        <td>{{ m.created_at }}</td>
+        <td>{{ m.created_at_local }}</td>
+        <td class="kg-processing">
+          <div>开始：<span data-started>{{ m.started_at_local or '尚未开始' }}</span></div>
+          <div data-finished-row {% if not m.finished_at_local %}hidden{% endif %}>完成：<span data-finished>{{ m.finished_at_local }}</span></div>
+          <div data-elapsed-row {% if not m.elapsed_text %}hidden{% endif %}>耗时：<span data-elapsed>{{ m.elapsed_text }}</span></div>
+        </td>
         {% if can_edit %}
         <td>
           <form method="post"
@@ -175,6 +198,14 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
           </form>
         </td>
         {% endif %}
+      </tr>
+      <tr data-material-requests="{{ m.id }}" hidden>
+        <td colspan="{{ 7 if can_edit else 6 }}">
+          <div class="kg-request-panel" id="kg-requests-{{ m.id }}">
+            <h3>AI Request 处理明细 <span class="muted small">含自动重试与服务重启前的记录</span></h3>
+            <div data-request-content><p class="muted small">展开后加载请求进度。</p></div>
+          </div>
+        </td>
       </tr>
       {% endfor %}
     </tbody>
@@ -302,12 +333,14 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
   {% endif %}
 </details>
 
-{% if building %}
+{% if materials %}
 <script>
-  // 轮询状态而不是整页刷新，避免打断建图期间继续选择/上传新资料
+  // 局部轮询与按需展开请求明细，不打断建图期间继续选择/上传新资料
   (function () {
     var statusUrl = {{ url_for('knowledge_graph_status', gid=graph.id) | tojson }};
     var timer = null;
+    var active = {{ 'true' if building else 'false' }};
+    var expandedId = null;
 
     function pill(material) {
       var icon = material.style === 'building'
@@ -316,7 +349,65 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
       return icon + material.label;
     }
 
+    function chunkText(chunks) {
+      return '共 ' + chunks.total + ' 块 · 成功 ' + chunks.success +
+        ' · 处理中 ' + chunks.running + ' · 待处理 ' + chunks.pending +
+        ' · 失败 ' + chunks.failed;
+    }
+
+    function renderRequests(materialId, requests) {
+      var container = document.querySelector('tr[data-material-requests="' + materialId +
+        '"] [data-request-content]');
+      if (!container) { return; }
+      container.textContent = '';
+      if (!requests.length) {
+        var empty = document.createElement('p');
+        empty.className = 'muted small';
+        empty.textContent = '还没有 AI Request 记录。';
+        container.appendChild(empty);
+        return;
+      }
+      var scroll = document.createElement('div');
+      scroll.className = 'kg-request-scroll';
+      var table = document.createElement('table');
+      table.className = 'kg';
+      var thead = document.createElement('thead');
+      var head = document.createElement('tr');
+      ['Chunk', '尝试', '状态', '开始时间', '耗时', 'Token', '错误'].forEach(function (label) {
+        var th = document.createElement('th');
+        th.textContent = label;
+        head.appendChild(th);
+      });
+      thead.appendChild(head);
+      table.appendChild(thead);
+      var tbody = document.createElement('tbody');
+      requests.forEach(function (request) {
+        var tr = document.createElement('tr');
+        var values = [
+          request.chunk_no ? '第 ' + request.chunk_no + ' 块' : '—',
+          '第 ' + request.attempt + ' 次', request.status_label,
+          request.started_at || '—', request.elapsed_text || '—',
+          request.total_tokens === null ? '—' : String(request.total_tokens)
+        ];
+        values.forEach(function (value) {
+          var td = document.createElement('td');
+          td.textContent = value;
+          tr.appendChild(td);
+        });
+        var error = document.createElement('td');
+        error.className = 'kg-request-error';
+        error.textContent = request.error || '—';
+        tr.appendChild(error);
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      scroll.appendChild(table);
+      container.appendChild(scroll);
+    }
+
     function apply(payload) {
+      var wasActive = active;
+      active = payload.building;
       payload.materials.forEach(function (material) {
         var row = document.querySelector('tr[data-material-id="' + material.id + '"]');
         if (!row) { return; }
@@ -326,34 +417,72 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
         var error = row.querySelector('[data-error]');
         error.textContent = material.error;
         error.hidden = !material.error;
-        var parsed = row.querySelector('[data-parsed]');
-        if (parsed && material.page_count) {
-          parsed.textContent = material.page_count + ' 页 / ' + material.char_count + ' 字';
-        }
+        row.querySelector('[data-parsed]').textContent = material.page_count + ' 页 / ' +
+          material.char_count + ' 字';
+        row.querySelector('[data-chunks]').textContent = chunkText(material.chunks);
+        var eta = row.querySelector('[data-eta]');
+        eta.hidden = !(material.eta_text || material.style === 'building' ||
+          material.style === 'pending');
+        eta.textContent = material.eta_text
+          ? '预计剩余约 ' + material.eta_text + '（粗估）'
+          : '首个文本块完成后估算剩余时间';
+        row.querySelector('[data-started]').textContent = material.started_at_local || '尚未开始';
+        var finishedRow = row.querySelector('[data-finished-row]');
+        finishedRow.hidden = !material.finished_at_local;
+        row.querySelector('[data-finished]').textContent = material.finished_at_local;
+        var elapsedRow = row.querySelector('[data-elapsed-row]');
+        elapsedRow.hidden = !material.elapsed_text;
+        row.querySelector('[data-elapsed]').textContent = material.elapsed_text;
       });
       Object.keys(payload.status_counts).forEach(function (key) {
-        var nodes = document.querySelectorAll('[data-status-count="' + key + '"]');
-        nodes.forEach(function (node) { node.textContent = payload.status_counts[key]; });
+        document.querySelectorAll('[data-status-count="' + key + '"]').forEach(function (node) {
+          node.textContent = payload.status_counts[key];
+        });
       });
       Object.keys(payload.counts).forEach(function (key) {
-        var nodes = document.querySelectorAll('[data-count="' + key + '"]');
-        nodes.forEach(function (node) { node.textContent = payload.counts[key]; });
+        document.querySelectorAll('[data-count="' + key + '"]').forEach(function (node) {
+          node.textContent = payload.counts[key];
+        });
       });
-      if (!payload.building) {
+      if (payload.requests && payload.request_material_id === expandedId) {
+        renderRequests(expandedId, payload.requests);
+      }
+      if (active && !timer) {
+        timer = setInterval(poll, 4000);
+      } else if (!active && timer) {
         clearInterval(timer);
-        document.getElementById('kg-refresh-hint').hidden = false;
+        timer = null;
+        if (wasActive) { document.getElementById('kg-refresh-hint').hidden = false; }
       }
     }
 
     function poll() {
-      fetch(statusUrl, {headers: {'Accept': 'application/json'}})
+      var url = statusUrl + (expandedId ? '?material_id=' + encodeURIComponent(expandedId) : '');
+      fetch(url, {headers: {'Accept': 'application/json'}})
         .then(function (response) { return response.ok ? response.json() : null; })
         .then(function (payload) { if (payload) { apply(payload); } })
         .catch(function () {});
     }
 
-    timer = setInterval(poll, 4000);
-    poll();
+    document.querySelectorAll('[data-material-toggle]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var id = Number(button.dataset.materialToggle);
+        if (expandedId !== null) {
+          var oldButton = document.querySelector('[data-material-toggle="' + expandedId + '"]');
+          var oldRow = document.querySelector('tr[data-material-requests="' + expandedId + '"]');
+          if (oldButton) { oldButton.setAttribute('aria-expanded', 'false'); }
+          if (oldRow) { oldRow.hidden = true; }
+          if (expandedId === id) { expandedId = null; return; }
+        }
+        expandedId = id;
+        button.setAttribute('aria-expanded', 'true');
+        var detailRow = document.querySelector('tr[data-material-requests="' + id + '"]');
+        if (detailRow) { detailRow.hidden = false; }
+        poll();
+      });
+    });
+
+    if (active) { poll(); }
   }());
 </script>
 {% endif %}

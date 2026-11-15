@@ -145,6 +145,7 @@ CREATE TABLE IF NOT EXISTS ai_operations(
   course_id INTEGER,
   lecture_id INTEGER,
   submission_id INTEGER,
+  material_id INTEGER,
   model TEXT DEFAULT '',
   status TEXT NOT NULL DEFAULT 'running',
   started_at TEXT NOT NULL,
@@ -153,6 +154,7 @@ CREATE TABLE IF NOT EXISTS ai_operations(
 CREATE TABLE IF NOT EXISTS ai_usage_events(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   operation_id INTEGER NOT NULL REFERENCES ai_operations(id),
+  chunk_id INTEGER,
   attempt INTEGER NOT NULL,
   provider_request_id TEXT,
   model TEXT DEFAULT '',
@@ -247,6 +249,8 @@ CREATE TABLE IF NOT EXISTS kg_materials(
   status TEXT NOT NULL DEFAULT '待建图',
   error TEXT DEFAULT '',
   uploaded_by INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT,
+  finished_at TEXT,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(graph_id, sha256));
 CREATE INDEX IF NOT EXISTS idx_kg_materials_graph ON kg_materials(graph_id, id);
@@ -256,7 +260,12 @@ CREATE TABLE IF NOT EXISTS kg_chunks(
   material_id INTEGER NOT NULL REFERENCES kg_materials(id),
   page_no INTEGER DEFAULT 0,
   chunk_no INTEGER DEFAULT 0,
-  content TEXT NOT NULL);
+  content TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  error TEXT DEFAULT '',
+  extraction_json TEXT DEFAULT '',
+  started_at TEXT,
+  finished_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_kg_chunks_material ON kg_chunks(material_id, chunk_no);
 CREATE TABLE IF NOT EXISTS kg_nodes(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -451,6 +460,28 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=()):
     key_cols = {r[1] for r in con.execute("PRAGMA table_info(ai_api_keys)")}
     if "model" not in key_cols:
         con.execute("ALTER TABLE ai_api_keys ADD COLUMN model TEXT DEFAULT ''")
+    # 知识图谱建图断点续建与逐请求进度
+    operation_cols = {r[1] for r in con.execute("PRAGMA table_info(ai_operations)")}
+    if "material_id" not in operation_cols:
+        con.execute("ALTER TABLE ai_operations ADD COLUMN material_id INTEGER")
+    event_cols = {r[1] for r in con.execute("PRAGMA table_info(ai_usage_events)")}
+    if "chunk_id" not in event_cols:
+        con.execute("ALTER TABLE ai_usage_events ADD COLUMN chunk_id INTEGER")
+    material_cols = {r[1] for r in con.execute("PRAGMA table_info(kg_materials)")}
+    for col in ("started_at", "finished_at"):
+        if col not in material_cols:
+            con.execute(f"ALTER TABLE kg_materials ADD COLUMN {col} TEXT")
+    chunk_cols = {r[1] for r in con.execute("PRAGMA table_info(kg_chunks)")}
+    for col, ddl in (("status", "TEXT NOT NULL DEFAULT 'pending'"),
+                     ("error", "TEXT DEFAULT ''"),
+                     ("extraction_json", "TEXT DEFAULT ''"),
+                     ("started_at", "TEXT"), ("finished_at", "TEXT")):
+        if col not in chunk_cols:
+            con.execute(f"ALTER TABLE kg_chunks ADD COLUMN {col} {ddl}")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_ai_operations_material "
+                "ON ai_operations(material_id, id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_ai_usage_chunk "
+                "ON ai_usage_events(chunk_id, id)")
     if con.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
         con.execute("INSERT INTO users(username,password_hash,display_name,role,must_change_password) "
                     "VALUES(?,?,?,?,1)",
@@ -461,10 +492,25 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=()):
             upload_migrator(con)
         except OSError:
             _log.exception("附件目录迁移失败，旧路径仍可用")
-    # 上次进程退出时未完成的批阅任务无法恢复，标记失败以便老师重新提交
+    # 上次进程退出时未完成的操作标记失败；知识图谱随后由启动恢复自动续建
     con.execute("UPDATE ai_operations SET status='failed', error=?, "
-                "finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running')",
+                "finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running') "
+                "AND operation_type='kg_build'",
+                ("服务重启，知识图谱建图已中断，已自动重新排队，将从未完成块续建",))
+    con.execute("UPDATE ai_operations SET status='failed', error=?, "
+                "finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running') "
+                "AND operation_type<>'kg_build'",
                 ("服务重启，批阅任务已中断，请重新提交",))
+    con.execute("""
+        UPDATE ai_usage_events SET status='error',
+          error=CASE WHEN EXISTS(
+            SELECT 1 FROM ai_operations o WHERE o.id=ai_usage_events.operation_id
+              AND o.operation_type='kg_build')
+            THEN '服务重启，知识图谱建图请求已中断'
+            ELSE '服务重启，本次 AI 请求已中断' END,
+          latency_ms=MAX(0, CAST(ROUND(
+            (julianday(CURRENT_TIMESTAMP)-julianday(created_at))*86400000) AS INTEGER))
+        WHERE status='running'""")
     con.commit()
     con.close()
     try:

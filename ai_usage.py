@@ -52,7 +52,8 @@ def _now_in_peak():
 
 
 def _start_ai_operation(teacher_id, operation_type, model, course_id=None,
-                        lecture_id=None, submission_id=None, status="running"):
+                        lecture_id=None, submission_id=None, status="running",
+                        material_id=None):
     """创建一次用户操作；每次点击/重试都使用新的 operation_id。"""
     preset = next((m for m in MODEL_PRESETS if m["model"] == model), None)
     price_in = preset["price_in"] if preset else None
@@ -79,9 +80,9 @@ def _start_ai_operation(teacher_id, operation_type, model, course_id=None,
     db = get_db()
     cur = db.execute(
         "INSERT INTO ai_operations(teacher_id,operation_type,course_id,lecture_id,"
-        "submission_id,model,status,started_at) VALUES(?,?,?,?,?,?,?,?)",
-        (teacher_id, operation_type, course_id, lecture_id, submission_id, model,
-         status, started_at))
+        "submission_id,material_id,model,status,started_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        (teacher_id, operation_type, course_id, lecture_id, submission_id, material_id,
+         model, status, started_at))
     db.commit()
     operation = {"id": cur.lastrowid, "pricing": pricing, "finished": False}
     operation["usage_hook"] = lambda event: _record_ai_usage(operation, event)
@@ -89,7 +90,7 @@ def _start_ai_operation(teacher_id, operation_type, model, course_id=None,
 
 
 def _record_ai_usage(operation, event):
-    """记录单次模型请求；价格和高峰倍率取操作开始时的快照。"""
+    """记录单次模型请求；知识图谱请求开始时插入，结束时更新同一行。"""
     pricing = operation["pricing"]
     prompt = event.get("prompt_tokens")
     completion = event.get("completion_tokens")
@@ -100,19 +101,31 @@ def _record_ai_usage(operation, event):
                 * pricing["peak_multiplier"] / 1000000)
     usage = event.get("usage")
     db = get_db()
-    db.execute(
-        "INSERT INTO ai_usage_events(operation_id,attempt,provider_request_id,model,"
+    values = (event.get("chunk_id"), event.get("attempt"), event.get("provider_request_id"),
+              event.get("model") or "", prompt, completion, event.get("total_tokens"),
+              event.get("cached_tokens"), event.get("reasoning_tokens"),
+              event.get("latency_ms"), event.get("finish_reason") or "", cost,
+              json.dumps(pricing, ensure_ascii=False),
+              json.dumps(usage, ensure_ascii=False) if usage is not None else "",
+              event.get("status") or "error", str(event.get("error") or "")[:1000])
+    event_id = event.get("usage_event_id")
+    if event_id is not None:
+        db.execute(
+            "UPDATE ai_usage_events SET chunk_id=?,attempt=?,provider_request_id=?,model=?,"
+            "prompt_tokens=?,completion_tokens=?,total_tokens=?,cached_tokens=?,"
+            "reasoning_tokens=?,latency_ms=?,finish_reason=?,estimated_cost=?,"
+            "pricing_json=?,usage_json=?,status=?,error=? WHERE id=? AND operation_id=?",
+            values + (event_id, operation["id"]))
+        db.commit()
+        return event_id
+    cur = db.execute(
+        "INSERT INTO ai_usage_events(operation_id,chunk_id,attempt,provider_request_id,model,"
         "prompt_tokens,completion_tokens,total_tokens,cached_tokens,reasoning_tokens,"
         "latency_ms,finish_reason,estimated_cost,pricing_json,usage_json,status,error) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (operation["id"], event.get("attempt"), event.get("provider_request_id"),
-         event.get("model") or "", prompt, completion, event.get("total_tokens"),
-         event.get("cached_tokens"), event.get("reasoning_tokens"), event.get("latency_ms"),
-         event.get("finish_reason") or "", cost,
-         json.dumps(pricing, ensure_ascii=False),
-         json.dumps(usage, ensure_ascii=False) if usage is not None else "",
-         event.get("status") or "error", str(event.get("error") or "")[:1000]))
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (operation["id"],) + values)
     db.commit()
+    return cur.lastrowid
 
 
 def _finish_ai_operation(operation, status, error=""):

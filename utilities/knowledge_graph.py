@@ -17,11 +17,15 @@ STATUS_BUILDING = "建图中"
 STATUS_DONE = "完成"
 STATUS_FAILED = "失败"
 
+CHUNK_PENDING = "pending"
+CHUNK_RUNNING = "running"
+CHUNK_SUCCESS = "success"
+CHUNK_FAILED = "failed"
+
 RELATIONS = ("prerequisite", "contains", "related")
 RELATION_LABEL = {"prerequisite": "前置", "contains": "包含", "related": "相关"}
 # 推理模型会把大量 token 花在思考上，4096/8192 可能全部耗尽导致正文为空
 KG_MAX_TOKENS = 32768
-BATCH_CHARS = 3000
 TRUNCATED_MARK = "模型输出被截断"
 
 KG_BUILD_PROMPT = """你是资深学科教研员与知识图谱构建专家。请从下面的学科资料中抽取概念及其关系，用于构建学科知识图谱。
@@ -111,7 +115,7 @@ def analyze_batch(texts, api_url, api_key, model, max_tokens=KG_MAX_TOKENS,
     try:
         reply, finish, err = llm.chat(
             api_url, api_key, model, [{"type": "text", "text": prompt}],
-            max_tokens=max_tokens, usage_hook=usage_hook)
+            max_tokens=max_tokens, usage_hook=usage_hook, report_running=True)
     except Exception as e:  # noqa: BLE001 构建失败记录到资料状态即可
         return [], [], str(e)
     if err:
@@ -125,19 +129,6 @@ def analyze_batch(texts, api_url, api_key, model, max_tokens=KG_MAX_TOKENS,
         return [], [], "模型未返回合法 JSON"
     return (clean_concepts(data.get("concepts")),
             clean_relations(data.get("relations")), "")
-
-
-def _batches(rows, limit=BATCH_CHARS):
-    batch, size = [], 0
-    for row in rows:
-        text = row["content"]
-        if batch and size + len(text) > limit:
-            yield batch
-            batch, size = [], 0
-        batch.append(text)
-        size += len(text)
-    if batch:
-        yield batch
 
 
 def _sources(value):
@@ -322,52 +313,86 @@ def extract_material(db, material, abs_path):
 
 
 def build_material(db, material_id, api_url, api_key, model, usage_hook=None):
-    """后台任务：读取资料切块 -> 分批 AI 抽取 -> 增量合并。"""
+    """逐块持久化抽取结果，重启后续建；最后统一合图以保留跨块关系。"""
     material = db.execute("SELECT * FROM kg_materials WHERE id=?",
                           (material_id,)).fetchone()
     if not material:
         return None
-    db.execute("UPDATE kg_materials SET status=?, error='' WHERE id=?",
+    db.execute("UPDATE kg_materials SET status=?, error='', "
+               "started_at=COALESCE(started_at,CURRENT_TIMESTAMP),finished_at=NULL WHERE id=?",
                (STATUS_BUILDING, material_id))
     db.commit()
-    rows = db.execute("SELECT content FROM kg_chunks WHERE material_id=? "
+    rows = db.execute("SELECT * FROM kg_chunks WHERE material_id=? "
                       "ORDER BY chunk_no", (material_id,)).fetchall()
     if not rows:
-        db.execute("UPDATE kg_materials SET status=?, error=? WHERE id=?",
+        db.execute("UPDATE kg_materials SET status=?, error=?, "
+                   "finished_at=CURRENT_TIMESTAMP WHERE id=?",
                    (STATUS_FAILED, "没有可用的资料文本，请重新上传", material_id))
         db.commit()
         return None
+
+    for row in rows:
+        if row["status"] == CHUNK_SUCCESS and row["extraction_json"]:
+            continue
+
+        def chunk_usage(event):
+            event["chunk_id"] = row["id"]
+            return usage_hook(event) if usage_hook else None
+
+        def analyze_texts(texts):
+            """截断时对半拆批；单块则拆正文，避免推理模型一次输出过长。"""
+            batch_concepts, batch_relations, error = analyze_batch(
+                texts, api_url, api_key, model, usage_hook=chunk_usage)
+            if error.startswith(TRUNCATED_MARK):
+                if len(texts) > 1:
+                    left_texts, right_texts = texts[:len(texts) // 2], texts[len(texts) // 2:]
+                elif len(texts[0]) > 1000:
+                    text = texts[0]
+                    middle = len(text) // 2
+                    split = max(text.rfind("\n", 0, middle), text.rfind("。", 0, middle))
+                    split = split + 1 if split >= middle // 2 else middle
+                    left_texts, right_texts = [text[:split]], [text[split:]]
+                else:
+                    return batch_concepts, batch_relations, [error]
+                left = analyze_texts(left_texts)
+                right = analyze_texts(right_texts)
+                return (left[0] + right[0], left[1] + right[1], left[2] + right[2])
+            return batch_concepts, batch_relations, ([error] if error else [])
+
+        db.execute("UPDATE kg_chunks SET status=?,error='',started_at=CURRENT_TIMESTAMP,"
+                   "finished_at=NULL WHERE id=?", (CHUNK_RUNNING, row["id"]))
+        db.commit()
+        chunk_concepts, chunk_relations, chunk_errors = analyze_texts([row["content"]])
+        payload = json.dumps({"concepts": chunk_concepts, "relations": chunk_relations},
+                             ensure_ascii=False)
+        db.execute("UPDATE kg_chunks SET status=?,error=?,extraction_json=?,"
+                   "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                   (CHUNK_FAILED if chunk_errors else CHUNK_SUCCESS,
+                    "；".join(chunk_errors)[:500], payload, row["id"]))
+        db.commit()
+
     concepts, relations, errors = [], [], []
-
-    def analyze_texts(texts):
-        """截断时把批次对半拆开重试，避免推理模型一次输出过长直接失败。"""
-        batch_concepts, batch_relations, error = analyze_batch(
-            texts, api_url, api_key, model, usage_hook=usage_hook)
-        if error.startswith(TRUNCATED_MARK) and len(texts) > 1:
-            middle = len(texts) // 2
-            left = analyze_texts(texts[:middle])
-            right = analyze_texts(texts[middle:])
-            return (left[0] + right[0], left[1] + right[1],
-                    left[2] + right[2])
-        return batch_concepts, batch_relations, ([error] if error else [])
-
-    for texts in _batches(rows):
-        batch_concepts, batch_relations, batch_errors = analyze_texts(texts)
-        concepts.extend(batch_concepts)
-        relations.extend(batch_relations)
-        errors.extend(batch_errors)
+    saved_rows = db.execute("SELECT status,error,extraction_json FROM kg_chunks "
+                            "WHERE material_id=? ORDER BY chunk_no", (material_id,)).fetchall()
+    for row in saved_rows:
+        if row["extraction_json"]:
+            data = json.loads(row["extraction_json"])
+            concepts.extend(data.get("concepts") or [])
+            relations.extend(data.get("relations") or [])
+        if row["status"] == CHUNK_FAILED:
+            errors.append(row["error"] or "未知错误")
     if not concepts:
         message = "；".join(errors[:2]) or "模型未抽取到任何概念"
-        db.execute("UPDATE kg_materials SET status=?, error=? WHERE id=?",
+        db.execute("UPDATE kg_materials SET status=?, error=?,"
+                   "finished_at=CURRENT_TIMESTAMP WHERE id=?",
                    (STATUS_FAILED, message[:500], material_id))
         db.commit()
         return None
     nodes, edges, new_nodes, new_edges = merge_extraction(
         db, material["graph_id"], material_id, concepts, relations)
-    note = ""
-    if errors:
-        note = f"部分片段失败：{errors[0]}"
-    db.execute("UPDATE kg_materials SET status=?, error=? WHERE id=?",
+    note = f"部分片段失败：{errors[0]}" if errors else ""
+    db.execute("UPDATE kg_materials SET status=?, error=?,"
+               "finished_at=CURRENT_TIMESTAMP WHERE id=?",
                (STATUS_DONE, note[:500], material_id))
     db.commit()
     return {"nodes": nodes, "edges": edges,
