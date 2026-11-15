@@ -552,11 +552,16 @@ def load_user():
 
 @_routes.before_request
 def limit_body_size():
-    """按端点限制请求体大小：恢复备份走大上限，其余（学生上传等）仍用 MAX_UPLOAD_MB。
+    """按端点限制请求体大小：恢复备份与知识图谱资料走大上限，其余用 MAX_UPLOAD_MB。
 
     必须排在 CSRF 校验之前：CSRF 会解析表单，超大请求应在解析前就拒绝。
     """
-    cap = cfg.MAX_RESTORE_MB if request.endpoint == "admin_restore" else cfg.MAX_UPLOAD_MB
+    if request.endpoint == "admin_restore":
+        cap = cfg.MAX_RESTORE_MB
+    elif request.endpoint == "knowledge_graph_upload":
+        cap = cfg.KG_MAX_UPLOAD_MB
+    else:
+        cap = cfg.MAX_UPLOAD_MB
     if (request.content_length or 0) > cap * 1024 * 1024:
         abort(413, description=f"上传内容超过 {cap}MB 限制。")
 
@@ -2704,6 +2709,24 @@ def knowledge_graph_create():
     return redirect(url_for("knowledge_graph_detail", gid=cur.lastrowid))
 
 
+def _kg_status_view(status):
+    """资料状态的展示文案与样式，页面首屏与轮询接口共用。"""
+    if status == kg_utils.STATUS_DONE:
+        return {"label": "已完成", "style": "done", "icon": "✓"}
+    if status == kg_utils.STATUS_BUILDING:
+        return {"label": "处理中", "style": "building", "icon": ""}
+    if status == kg_utils.STATUS_FAILED:
+        return {"label": "处理失败", "style": "failed", "icon": "✕"}
+    return {"label": "待处理", "style": "pending", "icon": "○"}
+
+
+def _kg_status_counts(materials):
+    counts = {"done": 0, "building": 0, "pending": 0, "failed": 0}
+    for item in materials:
+        counts[_kg_status_view(item["status"])["style"]] += 1
+    return counts
+
+
 @_routes.route("/knowledge-graphs/<oid:gid>")
 @role_required("teacher", "admin")
 def knowledge_graph_detail(gid):
@@ -2713,23 +2736,54 @@ def knowledge_graph_detail(gid):
                            "ORDER BY id DESC", (gid,)).fetchall()
     building = any(m["status"] in (kg_utils.STATUS_PENDING, kg_utils.STATUS_BUILDING)
                    for m in materials)
-    status_counts = {"done": 0, "building": 0, "pending": 0, "failed": 0}
-    for item in materials:
-        if item["status"] == kg_utils.STATUS_DONE:
-            status_counts["done"] += 1
-        elif item["status"] == kg_utils.STATUS_BUILDING:
-            status_counts["building"] += 1
-        elif item["status"] == kg_utils.STATUS_FAILED:
-            status_counts["failed"] += 1
-        else:
-            status_counts["pending"] += 1
     return render_template(
         "knowledge_graph.html", graph=graph, materials=materials,
         counts=kg_utils.graph_counts(db, gid),
-        status_counts=status_counts,
+        status_counts=_kg_status_counts(materials),
         nodes=kg_utils.list_nodes(db, gid), edges=kg_utils.list_edges(db, gid),
         building=building, relation_label=kg_utils.RELATION_LABEL,
+        layered=kg_utils.layered_graph(db, gid),
+        max_upload_mb=cfg.KG_MAX_UPLOAD_MB,
         can_edit=g.user["role"] == "admin" or graph["created_by"] == g.user["id"])
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/concepts/<oid:nid>")
+@role_required("teacher", "admin")
+def knowledge_graph_concept(gid, nid):
+    """单个概念的上下游邻域，服务讲评时的根因追问。"""
+    graph = _kg_graph(gid)
+    db = get_db()
+    detail = kg_utils.concept_neighbors(db, gid, nid)
+    if not detail:
+        abort(404)
+    return render_template(
+        "knowledge_graph_concept.html", graph=graph, detail=detail,
+        relation_label=kg_utils.RELATION_LABEL)
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/status.json")
+@role_required("teacher", "admin")
+def knowledge_graph_status(gid):
+    """供页面轮询，避免建图期间整页刷新打断正在选择的新资料。"""
+    _kg_graph(gid)
+    db = get_db()
+    materials = db.execute("SELECT * FROM kg_materials WHERE graph_id=? "
+                           "ORDER BY id DESC", (gid,)).fetchall()
+    view = [_kg_status_view(item["status"]) for item in materials]
+    return jsonify({
+        "counts": kg_utils.graph_counts(db, gid),
+        "status_counts": _kg_status_counts(materials),
+        "building": any(v["style"] in ("pending", "building") for v in view),
+        "materials": [{
+            "id": item["id"],
+            "label": v["label"],
+            "style": v["style"],
+            "icon": v["icon"],
+            "error": item["error"] or "",
+            "page_count": item["page_count"] or 0,
+            "char_count": item["char_count"] or 0,
+        } for item, v in zip(materials, view)],
+    })
 
 
 @_routes.route("/knowledge-graphs/<oid:gid>/materials", methods=["POST"])
@@ -2761,14 +2815,14 @@ def knowledge_graph_upload(gid):
                 if not chunk:
                     break
                 size += len(chunk)
-                if size > cfg.MAX_UPLOAD_MB * 1024 * 1024:
+                if size > cfg.KG_MAX_UPLOAD_MB * 1024 * 1024:
                     too_big = True
                     break
                 digest.update(chunk)
                 fh.write(chunk)
         if too_big:
             os.remove(abs_path)
-            flash(f"「{filename}」超过 {cfg.MAX_UPLOAD_MB}MB，已跳过")
+            flash(f"「{filename}」超过 {cfg.KG_MAX_UPLOAD_MB}MB，已跳过")
             continue
         sha = digest.hexdigest()
         duplicate = db.execute(
@@ -3832,7 +3886,8 @@ def create_app():
     global _id_signer
     app = Flask(__name__)
     app.config["SECRET_KEY"] = cfg.SECRET_KEY or load_secret_key()
-    app.config["MAX_CONTENT_LENGTH"] = max(cfg.MAX_UPLOAD_MB, cfg.MAX_RESTORE_MB) * 1024 * 1024
+    app.config["MAX_CONTENT_LENGTH"] = max(
+        cfg.MAX_UPLOAD_MB, cfg.MAX_RESTORE_MB, cfg.KG_MAX_UPLOAD_MB) * 1024 * 1024
     # Cookie 加固：禁止 JS 读取；SameSite 阻断跨站携带；HTTPS 部署时用 COOKIE_SECURE=1 打开 Secure
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"

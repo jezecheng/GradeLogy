@@ -44,6 +44,8 @@ EXPORT_DIR = os.path.abspath(_env("EXPORT_DIR", os.path.join(DATA_DIR, "exports"
 HOST = _env("HOST", "0.0.0.0")
 PORT = int(_env("PORT", "5000"))
 MAX_UPLOAD_MB = int(_env("MAX_UPLOAD_MB", "20"))
+# 知识图谱资料通常是整本教材或考纲，单独放宽；仍保留上限防止磁盘被占满
+KG_MAX_UPLOAD_MB = int(_env("KG_MAX_UPLOAD_MB", "500"))
 # 备份包解压后的总大小上限（MB），防止恶意 zip 撑爆磁盘
 MAX_RESTORE_MB = int(_env("MAX_RESTORE_MB", "2048"))
 LOG_LEVEL = _env("LOG_LEVEL", "INFO").upper()

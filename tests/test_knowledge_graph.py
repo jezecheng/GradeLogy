@@ -169,6 +169,66 @@ class KGLogicTest(unittest.TestCase):
                                (material_id,)).fetchone()
         self.assertEqual(row["status"], kg.STATUS_DONE)
 
+    def _node(self, name, category="概念"):
+        cur = self.con.execute(
+            "INSERT INTO kg_nodes(graph_id,name,normalized,category,aliases,definition,confidence)"
+            " VALUES(1,?,?,?,?,?,0.9)", (name, name, category, "[]", f"{name}的定义"))
+        self.con.commit()
+        return cur.lastrowid
+
+    def _edge(self, src, dst, relation="prerequisite"):
+        self.con.execute(
+            "INSERT INTO kg_edges(graph_id,src_id,dst_id,relation,evidence,confidence)"
+            " VALUES(1,?,?,?,?,0.8)", (src, dst, relation, ""))
+        self.con.commit()
+
+    def test_layered_graph_orders_prerequisites_by_layer(self):
+        basic = self._node("物质分类")
+        middle = self._node("物质的量")
+        advanced = self._node("物质的量浓度")
+        self._edge(basic, middle)
+        self._edge(middle, advanced)
+        layout = kg.layered_graph(self.con, 1)
+        position = {node["name"]: node for node in layout["nodes"]}
+        self.assertLess(position["物质分类"]["y"], position["物质的量"]["y"])
+        self.assertLess(position["物质的量"]["y"], position["物质的量浓度"]["y"])
+        self.assertEqual(len(layout["edges"]), 2)
+        self.assertFalse(layout["truncated"])
+        self.assertGreaterEqual(layout["width"], 320)
+
+    def test_layered_graph_handles_cycles(self):
+        first = self._node("甲")
+        second = self._node("乙")
+        self._edge(first, second)
+        self._edge(second, first)
+        layout = kg.layered_graph(self.con, 1)
+        self.assertTrue(layout["has_cycle"])
+        self.assertEqual(len(layout["nodes"]), 2)
+
+    def test_layered_graph_limits_nodes(self):
+        for number in range(5):
+            self._node(f"概念{number}")
+        layout = kg.layered_graph(self.con, 1, limit=3)
+        self.assertTrue(layout["truncated"])
+        self.assertEqual(len(layout["nodes"]), 3)
+        self.assertEqual(layout["hidden_nodes"], 2)
+
+    def test_concept_neighbors_groups_directions(self):
+        basic = self._node("物质分类")
+        current = self._node("物质的量")
+        advanced = self._node("物质的量浓度")
+        self._edge(basic, current)
+        self._edge(current, advanced)
+        self._edge(advanced, current, "related")
+        detail = kg.concept_neighbors(self.con, 1, current)
+        self.assertEqual([item["name"] for item in detail["prerequisites"]],
+                         ["物质分类"])
+        self.assertEqual([item["name"] for item in detail["dependents"]],
+                         ["物质的量浓度"])
+        self.assertEqual(len(detail["others"]), 1)
+        self.assertEqual(detail["others"][0]["direction"], "←")
+        self.assertIsNone(kg.concept_neighbors(self.con, 1, 999))
+
     def test_extract_and_build_material_from_text(self):
         fd, path = tempfile.mkstemp(suffix=".txt")
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -366,10 +426,10 @@ class KGRouteTest(unittest.TestCase):
         self.assertIn("处理中", html)
         self.assertIn("已完成", html)
         self.assertIn("处理失败", html)
-        self.assertIn("已完成 <b>1</b>", html)
-        self.assertIn("待处理 <b>1</b>", html)
-        self.assertIn("处理中 <b>1</b>", html)
-        self.assertIn("失败 <b>1</b>", html)
+        self.assertIn('data-status-count="done">1</b>', html)
+        self.assertIn('data-status-count="pending">1</b>', html)
+        self.assertIn('data-status-count="building">1</b>', html)
+        self.assertIn('data-status-count="failed">1</b>', html)
         self.assertIn('name="files" multiple', html)
         self.assertIn("file-icon pdf", html)
 
@@ -415,6 +475,72 @@ class KGRouteTest(unittest.TestCase):
             for thread in threads:
                 thread.join(timeout=5)
         self.assertEqual(state["peak"], 1)
+
+    def test_detail_renders_layered_svg_and_concept_links(self):
+        graph = self._create_graph()
+        basic = self._concept(graph["id"], "物质分类")
+        middle = self._concept(graph["id"], "物质的量")
+        advanced = self._concept(graph["id"], "物质的量浓度")
+        self._link(graph["id"], basic, middle)
+        self._link(graph["id"], middle, advanced)
+        html = self.client.get(
+            self.url("knowledge_graph_detail", gid=graph["id"])).get_data(as_text=True)
+        self.assertIn("前置关系分层图", html)
+        self.assertIn("<svg", html)
+        self.assertIn('class="kg-node"', html)
+        self.assertIn("kg-arrow", html)
+        self.assertIn(self.url("knowledge_graph_concept", gid=graph["id"],
+                               nid=middle), html)
+
+    def test_concept_page_shows_neighbors(self):
+        graph = self._create_graph()
+        basic = self._concept(graph["id"], "物质分类")
+        middle = self._concept(graph["id"], "物质的量")
+        advanced = self._concept(graph["id"], "物质的量浓度")
+        self._link(graph["id"], basic, middle)
+        self._link(graph["id"], middle, advanced)
+        resp = self.client.get(
+            self.url("knowledge_graph_concept", gid=graph["id"], nid=middle))
+        self.assertEqual(resp.status_code, 200)
+        html = resp.get_data(as_text=True)
+        self.assertIn("物质分类", html)
+        self.assertIn("物质的量浓度", html)
+        self.assertIn("直接前置", html)
+        self.assertIn("直接延伸", html)
+        self.assertIn("教材原句", html)
+        self.assertIn("物质的量的定义", html)
+
+    def test_concept_page_rejects_node_from_other_graph(self):
+        first = self._create_graph()
+        second = self._create_graph()
+        node_id = self._concept(first["id"], "物质的量")
+        resp = self.client.get(
+            self.url("knowledge_graph_concept", gid=second["id"], nid=node_id))
+        self.assertEqual(resp.status_code, 404)
+
+    def test_student_cannot_open_concept_page(self):
+        graph = self._create_graph()
+        node_id = self._concept(graph["id"], "物质的量")
+        resp = self.login(4).get(
+            self.url("knowledge_graph_concept", gid=graph["id"], nid=node_id))
+        self.assertEqual(resp.status_code, 403)
+
+    def _concept(self, graph_id, name, category="概念"):
+        con = self._db()
+        cur = con.execute(
+            "INSERT INTO kg_nodes(graph_id,name,normalized,category,aliases,definition,confidence)"
+            " VALUES(?,?,?,?,?,?,0.9)", (graph_id, name, name, category, "[]", f"{name}的定义"))
+        con.commit()
+        con.close()
+        return cur.lastrowid
+
+    def _link(self, graph_id, src, dst, relation="prerequisite"):
+        con = self._db()
+        con.execute(
+            "INSERT INTO kg_edges(graph_id,src_id,dst_id,relation,evidence,confidence)"
+            " VALUES(?,?,?,?,?,0.8)", (graph_id, src, dst, relation, "教材原句"))
+        con.commit()
+        con.close()
 
     def test_create_requires_subject_and_name(self):
         self._post("knowledge_graph_create", {"subject": "", "name": "x"})
@@ -627,14 +753,14 @@ class KGRouteTest(unittest.TestCase):
 
     def test_oversized_upload_is_rejected_before_processing(self):
         graph = self._create_graph()
-        with mock.patch.object(app_module.cfg, "MAX_UPLOAD_MB", 0.000001), \
+        with mock.patch.object(app_module.cfg, "KG_MAX_UPLOAD_MB", 0.000001), \
                 mock.patch.object(app_module, "_kg_start_build") as start:
             resp = self.client.post(
                 self.url("knowledge_graph_upload", gid=graph["id"]),
                 data={"_csrf": "test-token",
                       "files": (io.BytesIO(b"payload"), "big.txt")},
                 content_type="multipart/form-data")
-        # 全局请求体上限先于路由生效，超大文件不会被落盘或消耗 AI
+        # 知识图谱资料用独立上限，超限时全局请求体拦截先于路由生效
         self.assertEqual(resp.status_code, 413)
         start.assert_not_called()
         con = self._db()
@@ -643,6 +769,71 @@ class KGRouteTest(unittest.TestCase):
         con.close()
         abs_dir = os.path.join(app_module.UPLOAD_DIR, "kg", str(graph["id"]))
         self.assertEqual(os.listdir(abs_dir) if os.path.isdir(abs_dir) else [], [])
+
+    def test_kg_upload_ignores_general_upload_cap(self):
+        graph = self._create_graph()
+        with mock.patch.object(app_module.cfg, "MAX_UPLOAD_MB", 0.000001), \
+                mock.patch.object(app_module, "_kg_start_build") as start:
+            resp = self.client.post(
+                self.url("knowledge_graph_upload", gid=graph["id"]),
+                data={"_csrf": "test-token",
+                      "files": (io.BytesIO(b"\xe7\x9f\xa5\xe8\xaf\x86"), "a.txt")},
+                content_type="multipart/form-data")
+        self.assertEqual(resp.status_code, 302)
+        start.assert_called_once()
+        con = self._db()
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM kg_materials").fetchone()[0], 1)
+        con.close()
+
+    def test_status_endpoint_reports_progress(self):
+        graph = self._create_graph()
+        con = self._db()
+        for number, status in enumerate([kg.STATUS_PENDING, kg.STATUS_DONE]):
+            con.execute(
+                "INSERT INTO kg_materials(id,graph_id,filename,stored_name,sha256,"
+                "status,uploaded_by,error) VALUES(?,?,?,?,?,?,?,?)",
+                (70 + number, graph["id"], f"{number}.txt",
+                 f"kg/{graph['id']}/{number}.txt", str(number) * 64,
+                 status, 2, "出错了" if number else ""))
+        con.commit()
+        con.close()
+        resp = self.client.get(self.url("knowledge_graph_status", gid=graph["id"]))
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data["building"])
+        self.assertEqual(data["status_counts"]["pending"], 1)
+        self.assertEqual(data["status_counts"]["done"], 1)
+        self.assertEqual(len(data["materials"]), 2)
+        self.assertEqual(data["materials"][0]["label"], "已完成")
+
+        con = self._db()
+        con.execute("UPDATE kg_materials SET status=? WHERE graph_id=?",
+                    (kg.STATUS_DONE, graph["id"]))
+        con.commit()
+        con.close()
+        data = self.client.get(
+            self.url("knowledge_graph_status", gid=graph["id"])).get_json()
+        self.assertFalse(data["building"])
+
+    def test_detail_uses_polling_and_collapsible_sections(self):
+        graph = self._create_graph()
+        con = self._db()
+        con.execute(
+            "INSERT INTO kg_materials(id,graph_id,filename,stored_name,sha256,"
+            "status,uploaded_by) VALUES(?,?,?,?,?,?,?)",
+            (80, graph["id"], "a.pdf", f"kg/{graph['id']}/a.pdf",
+             "b" * 64, kg.STATUS_PENDING, 2))
+        con.commit()
+        con.close()
+        html = self.client.get(
+            self.url("knowledge_graph_detail", gid=graph["id"])).get_data(as_text=True)
+        self.assertIn("status.json", html)
+        self.assertIn("data-material-id", html)
+        self.assertIn("kg-refresh-hint", html)
+        self.assertIn('<details class="card kg-fold"', html)
+        self.assertIn("建图过程中也可以继续上传", html)
+        self.assertNotIn("window.location.reload()", html)
 
     def test_background_worker_marks_failed_without_ai_config(self):
         graph = self._create_graph()

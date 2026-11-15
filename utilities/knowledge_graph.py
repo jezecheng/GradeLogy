@@ -428,3 +428,148 @@ def list_edges(db, graph_id, limit=200):
         "WHERE e.graph_id=? ORDER BY e.confidence DESC, e.id LIMIT ?",
         (graph_id, limit)).fetchall()
 
+
+NODE_W, NODE_H, GAP_X, GAP_Y, PAD = 150, 44, 26, 78, 28
+NODE_PALETTE = (("#eef2ff", "#c7d2fe"), ("#ecfdf5", "#a7f3d0"),
+                ("#fff7ed", "#fed7aa"), ("#fdf2f8", "#fbcfe8"),
+                ("#f0f9ff", "#bae6fd"), ("#fefce8", "#fde68a"))
+
+
+def _node_color(category):
+    if not category:
+        return NODE_PALETTE[0]
+    return NODE_PALETTE[sum(ord(ch) for ch in category) % len(NODE_PALETTE)]
+
+
+def layered_graph(db, graph_id, limit=80):
+    """按 prerequisite 关系做分层布局，供页面用纯 SVG 渲染。
+
+    layer 越大表示越靠后的衍生知识；成环的节点单独放在最后一层并标记。
+    """
+    rows = db.execute(
+        "SELECT id,name,category,confidence FROM kg_nodes WHERE graph_id=? "
+        "ORDER BY id", (graph_id,)).fetchall()
+    edge_rows = db.execute(
+        "SELECT src_id,dst_id,relation,evidence,confidence FROM kg_edges "
+        "WHERE graph_id=?", (graph_id,)).fetchall()
+    total_nodes = len(rows)
+    prereq = [e for e in edge_rows if e["relation"] == "prerequisite"]
+    degree = {}
+    for edge in prereq:
+        degree[edge["src_id"]] = degree.get(edge["src_id"], 0) + 1
+        degree[edge["dst_id"]] = degree.get(edge["dst_id"], 0) + 1
+    if len(rows) > limit:
+        rows = sorted(rows, key=lambda n: (-degree.get(n["id"], 0), n["id"]))[:limit]
+    keep = {n["id"] for n in rows}
+    visible_edges = [e for e in edge_rows
+                     if e["src_id"] in keep and e["dst_id"] in keep]
+    visible_prereq = [e for e in prereq
+                      if e["src_id"] in keep and e["dst_id"] in keep]
+
+    outgoing, indegree = {}, {}
+    for node_id in keep:
+        outgoing[node_id], indegree[node_id] = [], 0
+    for edge in visible_prereq:
+        outgoing[edge["src_id"]].append(edge["dst_id"])
+        indegree[edge["dst_id"]] += 1
+
+    layer = {node_id: 0 for node_id in keep}
+    queue = sorted(node_id for node_id, value in indegree.items() if value == 0)
+    visited = 0
+    while queue:
+        current = queue.pop(0)
+        visited += 1
+        for target in outgoing[current]:
+            layer[target] = max(layer[target], layer[current] + 1)
+            indegree[target] -= 1
+            if indegree[target] == 0:
+                queue.append(target)
+    has_cycle = visited < len(keep)
+    if has_cycle:
+        # 成环部分不参与拓扑分层，统一放到末尾，避免无限回溯
+        cycle_layer = max(layer.values(), default=0) + 1
+        for node_id, value in indegree.items():
+            if value > 0:
+                layer[node_id] = cycle_layer
+
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(layer[row["id"]], []).append(row)
+    for items in grouped.values():
+        items.sort(key=lambda n: (n["category"] or "", n["name"]))
+    max_layer = max(grouped, default=0)
+    max_count = max((len(items) for items in grouped.values()), default=0)
+    width = max(PAD * 2 + max_count * (NODE_W + GAP_X) - GAP_X, 320)
+    height = PAD * 2 + (max_layer + 1) * (NODE_H + GAP_Y) - GAP_Y
+
+    placed = {}
+    for level in sorted(grouped):
+        items = grouped[level]
+        row_width = len(items) * (NODE_W + GAP_X) - GAP_X
+        start_x = (width - row_width) / 2
+        for index, row in enumerate(items):
+            fill, stroke = _node_color(row["category"])
+            placed[row["id"]] = {
+                "id": row["id"], "name": row["name"],
+                "category": row["category"] or "",
+                "x": round(start_x + index * (NODE_W + GAP_X), 1),
+                "y": round(PAD + level * (NODE_H + GAP_Y), 1),
+                "w": NODE_W, "h": NODE_H,
+                "cx": round(start_x + index * (NODE_W + GAP_X) + NODE_W / 2, 1),
+                "cy": round(PAD + level * (NODE_H + GAP_Y) + NODE_H / 2, 1),
+                "fill": fill, "stroke": stroke,
+            }
+
+    paths = []
+    for edge in visible_edges:
+        source, target = placed[edge["src_id"]], placed[edge["dst_id"]]
+        if source["y"] == target["y"]:
+            path = (f"M {source['cx']} {source['cy']} "
+                    f"C {source['cx']} {source['cy'] - 34}, "
+                    f"{target['cx']} {target['cy'] - 34}, "
+                    f"{target['cx']} {target['cy']}")
+        else:
+            bend = max(24, abs(target["y"] - source["y"]) / 3)
+            path = (f"M {source['cx']} {source['y'] + NODE_H} "
+                    f"C {source['cx']} {source['y'] + NODE_H + bend}, "
+                    f"{target['cx']} {target['y'] - bend}, "
+                    f"{target['cx']} {target['y']}")
+        paths.append({"path": path, "relation": edge["relation"],
+                      "evidence": edge["evidence"] or ""})
+    return {
+        "nodes": [placed[row["id"]] for row in rows],
+        "edges": paths,
+        "width": round(width), "height": round(height),
+        "layers": max_layer + 1,
+        "truncated": total_nodes > limit,
+        "hidden_nodes": max(0, total_nodes - limit),
+        "has_cycle": has_cycle,
+    }
+
+
+def concept_neighbors(db, graph_id, node_id):
+    """概念本身与它直接相邻的前置、延伸、包含/相关节点。"""
+    node = db.execute("SELECT * FROM kg_nodes WHERE id=? AND graph_id=?",
+                      (node_id, graph_id)).fetchone()
+    if not node:
+        return None
+    rows = db.execute(
+        "SELECT e.*, s.name AS src_name, d.name AS dst_name FROM kg_edges e "
+        "JOIN kg_nodes s ON s.id=e.src_id JOIN kg_nodes d ON d.id=e.dst_id "
+        "WHERE e.graph_id=? AND (e.src_id=? OR e.dst_id=?) "
+        "ORDER BY e.confidence DESC, e.id", (graph_id, node_id, node_id)).fetchall()
+    prerequisites, dependents, others = [], [], []
+    for edge in rows:
+        incoming = edge["dst_id"] == node_id
+        item = {"id": edge["src_id"] if incoming else edge["dst_id"],
+                "name": edge["src_name"] if incoming else edge["dst_name"],
+                "evidence": edge["evidence"] or "", "confidence": edge["confidence"],
+                "relation": edge["relation"]}
+        if edge["relation"] == "prerequisite":
+            (prerequisites if incoming else dependents).append(item)
+        else:
+            item["direction"] = "←" if incoming else "→"
+            others.append(item)
+    return {"node": node, "prerequisites": prerequisites,
+            "dependents": dependents, "others": others}
+

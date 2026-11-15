@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}{{ detail.node.name }} · 知识图谱{% endblock %}
+{% block content %}
+<style>
+.kg-crumb { color: #6b7280; font-size: 13px; margin-bottom: 10px; }
+.kg-crumb a { color: inherit; }
+.kg-neighbors { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.2fr) minmax(180px, 1fr);
+  gap: 16px; margin: 16px 0; align-items: start; }
+.kg-neighbors section { background: #f8f9fb; border-radius: 12px; padding: 14px; }
+.kg-neighbors h3 { margin: 0 0 10px; font-size: 13px; color: #6b7280; font-weight: 500; }
+.kg-neighbors .current { background: #fff; border: 1px solid #e5e7eb; }
+.kg-current-name { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+.kg-chip { display: block; background: #fff; border: 1px solid #e5e7eb; border-radius: 9px;
+  padding: 8px 10px; margin-bottom: 8px; text-decoration: none; color: inherit; }
+.kg-chip:hover { border-color: #1456f0; color: #1456f0; }
+.kg-chip b { font-weight: 600; font-size: 14px; }
+.kg-chip span { display: block; color: #8a8f99; font-size: 12px; margin-top: 3px; }
+.kg-empty { color: #9ca3af; font-size: 13px; }
+.kg-others { background: #f8f9fb; border-radius: 12px; padding: 14px; }
+.kg-others h3 { margin: 0 0 10px; font-size: 13px; color: #6b7280; font-weight: 500; }
+@media (max-width: 860px) {
+  .kg-neighbors { grid-template-columns: 1fr; }
+}
+</style>
+
+<p class="kg-crumb">
+  <a href="{{ url_for('knowledge_graph_detail', gid=graph.id) }}">← {{ graph.name }}</a>
+  · {{ graph.subject }}
+</p>
+
+<div class="kg-neighbors">
+  <section>
+    <h3>直接前置（学它之前应掌握）</h3>
+    {% if detail.prerequisites %}
+      {% for item in detail.prerequisites %}
+      <a class="kg-chip" href="{{ url_for('knowledge_graph_concept', gid=graph.id, nid=item.id) }}">
+        <b>{{ item.name }}</b>
+        {% if item.evidence %}<span>{{ item.evidence }}</span>{% endif %}
+      </a>
+      {% endfor %}
+    {% else %}
+    <p class="kg-empty">图谱中暂未记录它的前置概念。</p>
+    {% endif %}
+  </section>
+
+  <section class="current">
+    <h3>当前概念</h3>
+    <div class="kg-current-name">{{ detail.node.name }}</div>
+    <p class="muted small">
+      {% if detail.node.category %}分类：{{ detail.node.category }} · {% endif %}
+      置信度 {{ ((detail.node.confidence or 0) * 100) | round(0) | int }}%
+    </p>
+    {% if detail.node.definition %}
+    <p>{{ detail.node.definition }}</p>
+    {% else %}
+    <p class="kg-empty">暂无定义。</p>
+    {% endif %}
+    {% set alias_list = detail.node.aliases | fromjson if detail.node.aliases else [] %}
+    {% if alias_list %}
+    <p class="muted small">别名：{{ alias_list | join('、') }}</p>
+    {% endif %}
+  </section>
+
+  <section>
+    <h3>直接延伸（掌握它之后可学）</h3>
+    {% if detail.dependents %}
+      {% for item in detail.dependents %}
+      <a class="kg-chip" href="{{ url_for('knowledge_graph_concept', gid=graph.id, nid=item.id) }}">
+        <b>{{ item.name }}</b>
+        {% if item.evidence %}<span>{{ item.evidence }}</span>{% endif %}
+      </a>
+      {% endfor %}
+    {% else %}
+    <p class="kg-empty">图谱中还没有以它为前置的后续概念。</p>
+    {% endif %}
+  </section>
+</div>
+
+<div class="kg-others">
+  <h3>包含 / 相关概念</h3>
+  {% if detail.others %}
+    {% for item in detail.others %}
+    <a class="kg-chip" href="{{ url_for('knowledge_graph_concept', gid=graph.id, nid=item.id) }}">
+      <b>{{ item.direction }} {{ item.name }}</b>
+      <span>{{ relation_label.get(item.relation, item.relation) }}{% if item.evidence %} · {{ item.evidence }}{% endif %}</span>
+    </a>
+    {% endfor %}
+  {% else %}
+  <p class="kg-empty">暂无包含或相关关系。</p>
+  {% endif %}
+</div>
+{% endblock %}
