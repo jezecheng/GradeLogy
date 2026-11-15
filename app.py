@@ -3,6 +3,8 @@
 结构：课程 → 讲次（作业 + AI 批阅）/ 考试（只录分数）
 角色：admin（用户管理）/ teacher（课程、讲次、考试、批改、AI 设置）/ student（提交与查看批改）
 """
+import base64
+import fcntl
 import io
 import json
 import logging
@@ -17,6 +19,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -64,50 +67,366 @@ except ImportError:
 
 ROLE_LABEL = {"admin": "管理员", "teacher": "老师", "student": "学生"}
 
-# 腾讯云 TokenHub 常用的、支持图片理解的模型（价格为 2025.11 公开价目，单位：元/百万 token；
-# 高峰时段（通常 9:00-12:00 / 14:00-18:00）大约翻倍，仅供参考）
-MODEL_PRESETS = [
+# 按「API 入口（基地址）」分组的模型清单。价格单位为元/百万 token，来源为各服务商公开价目；
+# 只有腾讯云 TokenHub 的价目已核对，其余入口价格字段留空，页面显示「未收录」。
+# 之所以用静态清单：TokenHub 的 /v1/models 只返回模型 ID、不返回价格，价格只能人工维护；
+# 且 _start_ai_operation 的逐次调用成本快照已依赖这份清单，避免出现第二套价格口径。
+# 模型清单每天由后台线程通过 /v1/models 自动同步；价格可在设置页上传价目截图识别后写入 model_prices 覆盖这里。
+# 服务商调价时也可以直接改这里：设置页展示和逐次调用费用估算会同时生效。
+MODEL_CATALOG = [
     {
-        "model": "deepseek-v4.1-flash",
-        "vendor": "DeepSeek",
-        "tags": ["图片理解", "1M 上下文", "性价比高"],
-        "price_in": 1.0,
-        "price_out": 4.0,
-        "note": "vision-exp 的继任者，与旧版同价，能力全面升级",
+        "name": "腾讯云 TokenHub",
+        "base_url": "https://tokenhub.tencentmaas.com/v1",
+        "hosts": ["tokenhub.tencentmaas.com"],
+        "price_source": "腾讯云 TokenHub 公开价目（2025.11）",
+        "models": [
+            {
+                "model": "deepseek-v4.1-flash",
+                "vendor": "DeepSeek",
+                "tags": ["图片理解", "1M 上下文", "性价比高"],
+                "price_in": 1.0,
+                "price_out": 4.0,
+                "note": "vision-exp 的继任者，与旧版同价，能力全面升级",
+            },
+            {
+                "model": "glm-5.3-flash",
+                "vendor": "智谱",
+                "tags": ["图片理解", "最便宜", "128k 上下文"],
+                "price_in": 0.8,
+                "price_out": 2.8,
+                "note": "TokenHub 上价格最低的多模态模型",
+            },
+            {
+                "model": "minimax-m3.1-flash",
+                "vendor": "MiniMax",
+                "tags": ["图片理解", "1M 上下文"],
+                "price_in": 1.0,
+                "price_out": 4.0,
+                "note": "与 DeepSeek-V4.1-Flash 同价，1M 上下文",
+            },
+            {
+                "model": "deepseek-v4-pro",
+                "vendor": "DeepSeek",
+                "tags": ["图片理解", "旗舰", "1M 上下文"],
+                "price_in": 4.5,
+                "price_out": 13.5,
+                "note": "贵 4.5 倍，推理能力更强，但批阅速度相近",
+            },
+            {
+                "model": "kimi-k3.1-pro",
+                "vendor": "Kimi (月之暗面)",
+                "tags": ["图片+视频", "旗舰", "1M 上下文"],
+                "price_in": 13.0,
+                "price_out": 68.0,
+                "note": "最贵，支持视频输入，一般作业批阅用不上",
+            },
+        ],
     },
     {
-        "model": "glm-5.3-flash",
-        "vendor": "智谱",
-        "tags": ["图片理解", "最便宜", "128k 上下文"],
-        "price_in": 0.8,
-        "price_out": 2.8,
-        "note": "TokenHub 上价格最低的多模态模型",
+        "name": "智谱 AI",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "hosts": ["open.bigmodel.cn"],
+        "price_source": "",
+        "models": [
+            {"model": "glm-4.6v-flash", "vendor": "智谱", "tags": ["图片理解", "有免费模型"],
+             "price_in": None, "price_out": None, "note": "价格以智谱公开价目为准"},
+        ],
     },
     {
-        "model": "minimax-m3.1-flash",
-        "vendor": "MiniMax",
-        "tags": ["图片理解", "1M 上下文"],
-        "price_in": 1.0,
-        "price_out": 4.0,
-        "note": "与 DeepSeek-V4.1-Flash 同价，1M 上下文",
+        "name": "腾讯混元",
+        "base_url": "https://api.hunyuan.cloud.tencent.com/v1",
+        "hosts": ["api.hunyuan.cloud.tencent.com"],
+        "price_source": "",
+        "models": [
+            {"model": "hunyuan-vision", "vendor": "腾讯", "tags": ["图片理解"],
+             "price_in": None, "price_out": None, "note": "价格以腾讯云公开价目为准"},
+        ],
     },
     {
-        "model": "deepseek-v4-pro",
-        "vendor": "DeepSeek",
-        "tags": ["图片理解", "旗舰", "1M 上下文"],
-        "price_in": 4.5,
-        "price_out": 13.5,
-        "note": "贵 4.5 倍，推理能力更强，但批阅速度相近",
+        "name": "阿里百炼",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "hosts": ["dashscope.aliyuncs.com"],
+        "price_source": "",
+        "models": [
+            {"model": "qwen-vl-max", "vendor": "阿里", "tags": ["图片理解", "有免费额度"],
+             "price_in": None, "price_out": None, "note": "价格以阿里云公开价目为准"},
+        ],
     },
     {
-        "model": "kimi-k3.1-pro",
-        "vendor": "Kimi (月之暗面)",
-        "tags": ["图片+视频", "旗舰", "1M 上下文"],
-        "price_in": 13.0,
-        "price_out": 68.0,
-        "note": "最贵，支持视频输入，一般作业批阅用不上",
+        "name": "硅基流动",
+        "base_url": "https://api.siliconflow.cn/v1",
+        "hosts": ["api.siliconflow.cn"],
+        "price_source": "",
+        "models": [
+            {"model": "Qwen/Qwen2.5-VL-7B-Instruct", "vendor": "Qwen", "tags": ["图片理解", "开源模型"],
+             "price_in": None, "price_out": None, "note": "价格以硅基流动公开价目为准"},
+        ],
+    },
+    {
+        "name": "OpenAI",
+        "base_url": "https://api.openai.com/v1",
+        "hosts": ["api.openai.com"],
+        "price_source": "",
+        "models": [
+            {"model": "gpt-4o", "vendor": "OpenAI", "tags": ["图片理解"],
+             "price_in": None, "price_out": None, "note": "价格以 OpenAI 公开价目为准"},
+        ],
+    },
+    {
+        "name": "本地 Ollama",
+        "base_url": "http://localhost:11434/v1",
+        "hosts": ["localhost:11434", "127.0.0.1:11434"],
+        "price_source": "",
+        "models": [
+            {"model": "qwen2.5vl:7b", "vendor": "本地", "tags": ["图片理解", "本地运行"],
+             "price_in": None, "price_out": None, "note": "本地运行不产生按 token 计费；API Key 随便填"},
+        ],
     },
 ]
+
+# 扁平清单供成本核算（_start_ai_operation）按模型名查价
+MODEL_PRESETS = [m for entry in MODEL_CATALOG for m in entry["models"]]
+
+
+def model_entry_for_url(url):
+    """按基地址匹配已收录的入口；无法识别返回 None。
+
+    hosts 里带端口时按 host:port 比较（如本地 Ollama），否则只比主机名。
+    """
+    try:
+        parts = urllib.parse.urlsplit((url or "").strip())
+        host = (parts.hostname or "").lower()
+        port = parts.port
+    except ValueError:  # 端口非法等
+        return None
+    if not host:
+        return None
+    if port and not ((parts.scheme == "https" and port == 443) or
+                     (parts.scheme == "http" and port == 80)):
+        host = f"{host}:{port}"
+    for entry in MODEL_CATALOG:
+        if host in entry["hosts"]:
+            return entry
+    return None
+
+
+# TokenHub 各站点域名：只有这些入口支持 GET /v1/models 的每日同步
+TOKENHUB_SYNC_HOSTS = ("tokenhub.tencentmaas.com", "tokenhub-intl.tencentmaas.com",
+                       "tokenhub.tencentmaas.cn", "tokenhub-intl.tencentmaas.cn")
+
+
+def _is_tokenhub_url(url):
+    try:
+        host = (urllib.parse.urlsplit((url or "").strip()).hostname or "").lower()
+    except ValueError:
+        return False
+    return any(host == h or host.endswith("." + h) for h in TOKENHUB_SYNC_HOSTS)
+
+
+def _now_text():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def fetch_available_models(base_url, api_key, timeout=20):
+    """调用 OpenAI 兼容的 GET /v1/models，返回 [{model_id, display_name, status}]。"""
+    req = urllib.request.Request(
+        (base_url or "").rstrip("/") + "/models",
+        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    rows = []
+    for item in payload.get("data") or []:
+        mid = str(item.get("id") or "").strip()
+        if not mid:
+            continue
+        rows.append({
+            "model_id": mid,
+            "display_name": str(item.get("name") or mid).strip(),
+            "status": str(item.get("status") or "").strip(),
+        })
+    return rows
+
+
+def _sync_error_text(exc):
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code == 401:
+            return "HTTP 401：API Key 无效或无权查询模型列表"
+        if exc.code == 403:
+            return "HTTP 403：该 Key 无查询模型列表的权限"
+        return f"HTTP {exc.code}：{exc.reason}"
+    if isinstance(exc, urllib.error.URLError):
+        return f"网络不通：{exc.reason}"
+    return f"{type(exc).__name__}: {exc}"
+
+
+def sync_models_for_teacher(teacher_id, force=False):
+    """把某老师配置入口的可用模型同步进缓存。
+
+    返回 (模型数, 错误文本)：未到期时模型数为 -1 且无错误。
+    """
+    conf = llm.resolve_config(teacher_id)
+    base_url, api_key = conf["api_url"].rstrip("/"), conf["api_key"]
+    if not base_url or not api_key:
+        return 0, "未配置接口基地址或 API Key"
+    if not _is_tokenhub_url(base_url):
+        return 0, "当前入口不是腾讯云 TokenHub，跳过自动同步"
+
+    con = sqlite3.connect(DB_PATH, timeout=10)
+    con.row_factory = sqlite3.Row
+    try:
+        if not force:
+            st = con.execute(
+                "SELECT MAX(fetched_at) AS last FROM model_sync WHERE teacher_id=? AND base_url=?",
+                (teacher_id, base_url)).fetchone()
+            if st and st["last"]:
+                try:
+                    last = datetime.strptime(st["last"], "%Y-%m-%d %H:%M:%S")
+                    if datetime.now() - last < timedelta(hours=cfg.MODEL_SYNC_HOURS):
+                        return -1, ""
+                except ValueError:
+                    pass
+        try:
+            models = fetch_available_models(base_url, api_key)
+        except Exception as exc:  # 网络/鉴权失败只记录，保留上次结果，下一轮继续重试
+            msg = _sync_error_text(exc)[:300]
+            logger.warning("模型清单同步失败 teacher=%s: %s", teacher_id, msg)
+            con.execute(
+                "INSERT INTO model_sync_state(teacher_id,base_url,fetched_at,model_count,error) "
+                "VALUES(?,?,?,0,?) ON CONFLICT(teacher_id,base_url) DO UPDATE SET "
+                "error=excluded.error",
+                (teacher_id, base_url, _now_text(), msg))
+            con.commit()
+            return 0, msg
+
+        now = _now_text()
+        con.execute("DELETE FROM model_sync WHERE teacher_id=? AND base_url=?",
+                    (teacher_id, base_url))
+        con.executemany(
+            "INSERT INTO model_sync(teacher_id,base_url,model_id,display_name,status,fetched_at) "
+            "VALUES(?,?,?,?,?,?)",
+            [(teacher_id, base_url, m["model_id"], m["display_name"], m["status"], now)
+             for m in models])
+        con.execute(
+            "INSERT INTO model_sync_state(teacher_id,base_url,fetched_at,model_count,error) "
+            "VALUES(?,?,?,?,?) ON CONFLICT(teacher_id,base_url) DO UPDATE SET "
+            "fetched_at=excluded.fetched_at, model_count=excluded.model_count, error=''",
+            (teacher_id, base_url, now, len(models), ""))
+        con.commit()
+        return len(models), ""
+    finally:
+        con.close()
+
+
+def build_model_rows(teacher_id, base_url, con=None):
+    """把「静态清单 + 接口同步结果 + 截图录入价目」合并成设置页展示的一行行模型。"""
+    own = con is None
+    if own:
+        con = sqlite3.connect(DB_PATH, timeout=10)
+        con.row_factory = sqlite3.Row
+    try:
+        entry = model_entry_for_url(base_url)
+        synced, state = {}, None
+        if teacher_id:
+            synced = {r["model_id"]: dict(r) for r in con.execute(
+                "SELECT * FROM model_sync WHERE teacher_id=? AND base_url=?",
+                (teacher_id, base_url))}
+            st = con.execute(
+                "SELECT * FROM model_sync_state WHERE teacher_id=? AND base_url=?",
+                (teacher_id, base_url)).fetchone()
+            state = dict(st) if st else None
+        prices = {r["model"]: dict(r) for r in con.execute(
+            "SELECT model,price_in,price_out,unit,source,updated_at FROM model_prices")}
+    finally:
+        if own:
+            con.close()
+
+    static = [dict(m) for m in (entry["models"] if entry else [])]
+    rows, seen = [], set()
+
+    def add(base, sync_row):
+        mid = base.get("model") or sync_row["model_id"]
+        seen.add(mid)
+        override = prices.get(mid) or {}
+        price_in = override.get("price_in")
+        price_out = override.get("price_out")
+        if price_in is None:
+            price_in = base.get("price_in")
+        if price_out is None:
+            price_out = base.get("price_out")
+        rows.append({
+            "model": mid,
+            "display_name": (sync_row or {}).get("display_name") or mid,
+            "vendor": base.get("vendor") or "",
+            "tags": list(base.get("tags") or []),
+            "note": base.get("note") or "",
+            "price_in": price_in,
+            "price_out": price_out,
+            "price_source": (override.get("source") or "") if override.get("price_in") is not None else "",
+            "price_updated_at": override.get("updated_at") or "",
+            "known": bool(base),
+            "status": (sync_row or {}).get("status") or "",
+        })
+
+    for m in static:
+        add(m, synced.get(m["model"]))
+    for mid in sorted(synced):
+        if mid not in seen:
+            add({}, synced[mid])
+
+    return {
+        "rows": rows,
+        "entry": entry,
+        "state": state,
+        "title": entry["name"] if entry else "当前接口",
+        "synced": bool(synced),
+        "sync_supported": _is_tokenhub_url(base_url),
+        "has_unknown": any(not r["known"] for r in rows),
+        "price_sources": sorted({r["price_source"] for r in rows if r["price_source"]}),
+    }
+
+
+def _model_sync_loop():
+    """每小时醒一次，按 MODEL_SYNC_HOURS 节流逐个老师同步可用模型。"""
+    while True:
+        try:
+            con = sqlite3.connect(DB_PATH, timeout=10)
+            try:
+                ids = [r[0] for r in con.execute(
+                    "SELECT id FROM users WHERE role='teacher' AND active=1")]
+            finally:
+                con.close()
+            for tid in ids:
+                try:
+                    sync_models_for_teacher(tid)
+                except Exception:
+                    logger.exception("模型清单同步异常 teacher=%s", tid)
+        except Exception:
+            logger.exception("模型清单自动同步循环异常")
+        time.sleep(3600)
+
+
+_sync_thread_started = False
+_sync_lock_file = None
+
+
+def start_model_sync():
+    """启动每日模型清单同步线程；多进程部署时只让抢到文件锁的进程跑。"""
+    global _sync_thread_started, _sync_lock_file
+    if _sync_thread_started or not cfg.AUTO_MODEL_SYNC:
+        return
+    _sync_thread_started = True
+    try:
+        os.makedirs(cfg.DATA_DIR, exist_ok=True)
+        _sync_lock_file = open(os.path.join(cfg.DATA_DIR, ".model_sync.lock"), "w")
+        fcntl.flock(_sync_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        _sync_thread_started = False   # 别的进程已经在同步
+        if _sync_lock_file:
+            _sync_lock_file.close()
+            _sync_lock_file = None
+        return
+    threading.Thread(target=_model_sync_loop, daemon=True, name="model-sync").start()
+
 
 # 一份典型作业（约 26 页图片 + 答案）的估算 token 量
 # 144dpi 的 A4 页经视觉模型切块后每页约 2000-2500 token
@@ -512,6 +831,30 @@ CREATE INDEX IF NOT EXISTS idx_ai_operations_teacher ON ai_operations(teacher_id
 CREATE INDEX IF NOT EXISTS idx_ai_operations_lecture ON ai_operations(lecture_id, id);
 CREATE INDEX IF NOT EXISTS idx_ai_operations_submission ON ai_operations(submission_id, id);
 CREATE INDEX IF NOT EXISTS idx_ai_usage_operation ON ai_usage_events(operation_id, attempt);
+-- 每个老师、每个入口最近一次从 /v1/models 拉到的可用模型
+CREATE TABLE IF NOT EXISTS model_sync(
+  teacher_id INTEGER NOT NULL,
+  base_url TEXT NOT NULL,
+  model_id TEXT NOT NULL,
+  display_name TEXT DEFAULT '',
+  status TEXT DEFAULT '',
+  fetched_at TEXT NOT NULL,
+  PRIMARY KEY(teacher_id, base_url, model_id));
+CREATE TABLE IF NOT EXISTS model_sync_state(
+  teacher_id INTEGER NOT NULL,
+  base_url TEXT NOT NULL,
+  fetched_at TEXT NOT NULL,
+  model_count INTEGER DEFAULT 0,
+  error TEXT DEFAULT '',
+  PRIMARY KEY(teacher_id, base_url));
+-- 价目表：静态清单之外的覆盖值（目前由价目截图识别后确认写入），按模型 ID 全局生效
+CREATE TABLE IF NOT EXISTS model_prices(
+  model TEXT PRIMARY KEY,
+  price_in REAL,
+  price_out REAL,
+  unit TEXT DEFAULT '元/百万 token',
+  source TEXT DEFAULT '',
+  updated_at TEXT NOT NULL);
 """
 
 # ---------- 数据库 ----------
@@ -717,6 +1060,7 @@ AI_OPERATION_LABEL = {
     "lecture_summary": "讲次汇总",
     "report_generate": "批改报告评价",
     "report_comment": "重新生成总评",
+    "price_import": "价目截图识别",
 }
 AI_STATUS_LABEL = {"running": "进行中", "success": "成功", "failed": "失败"}
 
@@ -725,14 +1069,24 @@ def _start_ai_operation(teacher_id, operation_type, model, course_id=None,
                         lecture_id=None, submission_id=None):
     """创建一次用户操作；每次点击/重试都使用新的 operation_id。"""
     preset = next((m for m in MODEL_PRESETS if m["model"] == model), None)
+    price_in = preset["price_in"] if preset else None
+    price_out = preset["price_out"] if preset else None
+    price_source = "MODEL_PRESETS"
+    try:  # 截图录入的价目优先于内置清单
+        row = get_db().execute(
+            "SELECT price_in,price_out FROM model_prices WHERE model=?", (model,)).fetchone()
+        if row is not None and row["price_in"] is not None:
+            price_in, price_out, price_source = row["price_in"], row["price_out"], "截图价目"
+    except Exception:
+        pass
     peak = _now_in_peak()[0]
     pricing = {
-        "price_in": preset["price_in"] if preset else None,
-        "price_out": preset["price_out"] if preset else None,
+        "price_in": price_in,
+        "price_out": price_out,
         "peak_multiplier": 2 if peak else 1,
         "currency": "CNY",
         "unit": "元/百万 token",
-        "source": "MODEL_PRESETS",
+        "source": price_source,
     }
     started_at = datetime.now().isoformat(sep=" ", timespec="milliseconds")
     db = get_db()
@@ -2748,6 +3102,25 @@ def course_prompts_save(cid):
 
 
 # ---------- 老师：AI 设置 ----------
+def _settings_context(extra=None):
+    conf = {k: get_setting(g.user["id"], k)
+            for k in ("ai_api_url", "ai_api_key", "ai_model", "ai_demo", "ai_offpeak_only")}
+    view = build_model_rows(g.user["id"], conf["ai_api_url"], get_db())
+    ctx = {
+        "cfg": conf,
+        "env_keys": [k for k, v in ENV_AI_SETTINGS.items() if v],
+        "model_catalog": MODEL_CATALOG,
+        "model_view": view,
+        "model_rows": view["rows"],
+        "est_tokens_input": EST_TOKENS_INPUT,
+        "est_tokens_output": EST_TOKENS_OUTPUT,
+        "price_import": None,
+    }
+    if extra:
+        ctx.update(extra)
+    return ctx
+
+
 @app.route("/settings", methods=["GET", "POST"])
 @role_required("teacher")
 def settings_page():
@@ -2767,12 +3140,149 @@ def settings_page():
         get_db().commit()
         flash("已保存")
         return redirect(url_for("settings_page"))
-    cfg = {k: get_setting(g.user["id"], k)
-           for k in ("ai_api_url", "ai_api_key", "ai_model", "ai_demo", "ai_offpeak_only")}
-    return render_template("settings.html", cfg=cfg, env_keys=[k for k, v in ENV_AI_SETTINGS.items() if v],
-                           model_presets=MODEL_PRESETS,
-                           est_tokens_input=EST_TOKENS_INPUT,
-                           est_tokens_output=EST_TOKENS_OUTPUT)
+    return render_template("settings.html", **_settings_context())
+
+
+@app.route("/settings/models/sync", methods=["POST"])
+@role_required("teacher")
+def settings_models_sync():
+    """按当前配置立即拉一次 GET /v1/models，刷新可用模型。"""
+    count, err = sync_models_for_teacher(g.user["id"], force=True)
+    if err:
+        flash(f"模型同步失败：{err}")
+    elif count == 0:
+        flash("接口返回的模型列表为空，已保留上次结果")
+    else:
+        flash(f"已同步 {count} 个可用模型")
+    return redirect(url_for("settings_page"))
+
+
+PRICE_IMAGE_PROMPT = """你在帮一个作业批改系统维护大模型价目表。请读取这张价目截图中清晰可读的模型价格。
+
+只输出一个 JSON 对象，不要解释：
+{"rows":[{"model":"模型 ID","price_in":输入单价,"price_out":输出单价}],"unclear":["看不清或信息不全的模型"]}
+
+规则：
+1. model 必须是图中出现的模型 ID（如 deepseek-v4.1-flash），不要翻译、改写，也不要用你记忆里的模型替代。
+2. price_in / price_out 统一换算成「元/百万 token」的数字，不要带单位；若图中单位是元/千 token，乘以 1000 后再填。
+3. 只取输入价和输出价；图中没有明确标出的价格不要猜，把该模型放进 unclear。
+4. 行被截断、数字模糊、只有单个价格、或是套餐/积分价格而非 token 单价的，全部放进 unclear。
+5. 宁可少识别，也不要编造图中没有的模型或价格。"""
+
+
+def _image_mime(raw):
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp"
+    return ""
+
+
+def _valid_model_name(name):
+    return bool(re.fullmatch(r"[A-Za-z0-9._/\-:]{1,120}", name or ""))
+
+
+@app.route("/settings/prices/extract", methods=["POST"])
+@role_required("teacher")
+def settings_prices_extract():
+    """上传价目截图，调用当前视觉模型抽出模型单价，先给用户确认再入库。"""
+    file = request.files.get("price_image")
+    if file is None or not file.filename:
+        flash("请先选择一张价目截图")
+        return redirect(url_for("settings_page"))
+    raw = file.read()
+    if len(raw) > 8 * 1024 * 1024:
+        flash("截图超过 8MB，请压缩后再上传")
+        return redirect(url_for("settings_page"))
+    mime = _image_mime(raw)
+    if not mime:
+        flash("仅支持 PNG / JPG / WebP 截图")
+        return redirect(url_for("settings_page"))
+
+    conf = llm.resolve_config(g.user["id"])
+    if get_setting(g.user["id"], "ai_demo") == "1":
+        flash("演示模式无法识别截图，请先切换到真实接口")
+        return redirect(url_for("settings_page"))
+    if not (conf["api_url"] and conf["api_key"] and conf["model"]):
+        flash("请先配置并保存真实接口的基地址、API Key 和模型")
+        return redirect(url_for("settings_page"))
+
+    data_url = f"data:{mime};base64," + base64.b64encode(raw).decode()
+    operation = _start_ai_operation(g.user["id"], "price_import", conf["model"])
+    reply, finish, err = llm.chat(
+        conf["api_url"], conf["api_key"], conf["model"],
+        [{"type": "text", "text": PRICE_IMAGE_PROMPT},
+         {"type": "image_url", "image_url": {"url": data_url}}],
+        max_tokens=2000, timeout=120, retries=2, usage_hook=operation["usage_hook"])
+    if err:
+        _finish_ai_operation(operation, "failed", err)
+        flash(f"截图识别失败：{err}")
+        return redirect(url_for("settings_page"))
+    payload = llm.extract_json(reply)
+    if not isinstance(payload, dict):
+        _finish_ai_operation(operation, "failed", "模型未返回可解析的 JSON")
+        flash("模型没有返回可解析的价目 JSON，请换一张更清晰的截图或稍后重试")
+        return redirect(url_for("settings_page"))
+
+    rows, seen = [], set()
+    for item in payload.get("rows") or []:
+        if not isinstance(item, dict):
+            continue
+        model = str(item.get("model") or "").strip()
+        try:
+            price_in, price_out = float(item.get("price_in")), float(item.get("price_out"))
+        except (TypeError, ValueError):
+            continue
+        if not _valid_model_name(model) or model in seen:
+            continue
+        if not (0 <= price_in <= 100000 and 0 <= price_out <= 100000):
+            continue
+        seen.add(model)
+        rows.append({"model": model, "price_in": round(price_in, 4), "price_out": round(price_out, 4)})
+    unclear = [str(x)[:60] for x in (payload.get("unclear") or [])][:20]
+    _finish_ai_operation(operation, "success")
+
+    if not rows:
+        flash("没有识别到清晰的价格行，请确认截图包含模型名和输入/输出单价")
+        return redirect(url_for("settings_page"))
+    return render_template("settings.html", **_settings_context({
+        "price_import": {"rows": rows, "unclear": unclear,
+                         "filename": secure_filename(file.filename) or "价目截图"},
+    }))
+
+
+@app.route("/settings/prices/save", methods=["POST"])
+@role_required("teacher")
+def settings_prices_save():
+    """保存用户在预览里确认过的价目；按模型 ID 全局生效。"""
+    models = request.form.getlist("model")
+    pins = request.form.getlist("price_in")
+    pouts = request.form.getlist("price_out")
+    db = get_db()
+    now = _now_text()
+    saved = 0
+    for model, pin, pout in zip(models, pins, pouts):
+        model = model.strip()
+        if not _valid_model_name(model):
+            continue
+        try:
+            price_in, price_out = float(pin), float(pout)
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= price_in <= 100000 and 0 <= price_out <= 100000):
+            continue
+        db.execute(
+            "INSERT INTO model_prices(model,price_in,price_out,unit,source,updated_at) "
+            "VALUES(?,?,?,?,?,?) ON CONFLICT(model) DO UPDATE SET "
+            "price_in=excluded.price_in, price_out=excluded.price_out, "
+            "source=excluded.source, updated_at=excluded.updated_at",
+            (model, price_in, price_out, "元/百万 token", "截图识别", now))
+        saved += 1
+    db.commit()
+    flash(f"已更新 {saved} 个模型的价格（对所有老师生效）" if saved else "没有可保存的价格行")
+    return redirect(url_for("settings_page"))
 
 
 @app.route("/assistant/chat", methods=["POST"])
@@ -3960,6 +4470,7 @@ def _lan_ip():
 # 模块导入时即完成建表与迁移，gunicorn 直接加载 app:app 也能拿到完整 schema
 init_db()
 start_auto_backup()
+start_model_sync()
 
 
 if __name__ == "__main__":

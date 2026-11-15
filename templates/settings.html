@@ -5,20 +5,35 @@
 .model-select-row { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 6px; }
 .model-select-row label { flex: 1; }
 .model-select-row input { width: auto; flex: 0 0 200px; margin-top: 1px; }
-.model-help { margin-top: 6px; }
-.model-cost { display: inline-block; padding: 2px 8px; border-radius: 999px;
-              font-size: 12px; background: #eef1f5; color: #5b6472; margin-top: 4px; }
-.model-cost.ok { background: #e6f6ec; color: #18794e; }
-.model-cost.warn { background: #fff4e0; color: #b25e09; }
-.model-cost.bad { background: #fdecec; color: #c93338; }
-.model-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+.model-picker { background: #f8f9fb; border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; }
+.model-picker-head { display: flex; align-items: baseline; justify-content: space-between;
+                     gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
+.card.narrow { max-width: 780px; }  /* 模型价格表需要比默认 520px 更宽 */
+.model-table-wrap { overflow-x: auto; margin-top: 8px; }
+.model-table { width: 100%; border-collapse: collapse; margin-top: 0; font-size: 13px; }
 .model-table th, .model-table td { border-bottom: 1px solid #eef0f3; padding: 6px 8px; vertical-align: top; }
 .model-table th { color: #8a8f99; font-weight: 500; text-align: left; }
-.model-table td code { background: #f4f6f8; padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+.model-table td:first-child { min-width: 170px; }
+.model-table td code { background: #fff; padding: 1px 6px; border-radius: 4px; font-size: 12px;
+                       white-space: nowrap; }
+.model-picker-head .tag-chip { margin-left: 6px; }
+.model-table tr[data-model] { cursor: pointer; }
+.model-table tr[data-model]:hover { background: #f2f5fa; }
 .model-table .tags { margin-top: 2px; }
 .model-table .tag-chip { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 999px;
                          background: #eef2ff; color: #1456f0; margin-right: 3px; }
 .model-table .cur-row { background: #fff9e0; }
+.model-table .cur-row:hover { background: #fff3c4; }
+.model-table .tag-chip.ok { background: #e6f6ec; color: #18794e; }
+.model-table .tag-chip.warn { background: #fff4e0; color: #b25e09; }
+.model-table .off-row td { opacity: .55; }
+.price-na { color: #a0a6b0; }
+.warn-text { color: #c93338; }
+.sync-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.price-preview { margin-top: 14px; border-top: 1px solid #eef0f3; padding-top: 12px; }
+.price-preview table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 8px; }
+.price-preview th, .price-preview td { padding: 5px 6px; border-bottom: 1px solid #eef0f3; text-align: left; }
+.price-preview input[type=number] { width: 110px; padding: 4px 6px; }
 .cost-est { background: #f8f9fb; border-radius: 8px; padding: 12px 14px; margin-top: 10px; font-size: 13px; }
 .cost-est b { color: #1456f0; }
 .cost-est .per-submit { font-size: 16px; font-weight: 700; color: #1456f0; }
@@ -54,13 +69,18 @@
   <p class="muted small">纯文本模型无法读取扫描件；模型输出上限建议 ≥32k，否则长作业容易被截断。</p>
   <table class="small">
     <tr><th>服务</th><th>基地址</th><th>模型示例（需支持图片）</th></tr>
-    <tr><td>智谱（有免费模型）</td><td>https://open.bigmodel.cn/api/paas/v4</td><td>glm-4.6v-flash</td></tr>
-    <tr><td>腾讯混元</td><td>https://api.hunyuan.cloud.tencent.com/v1</td><td>hunyuan-vision</td></tr>
-    <tr><td>阿里百炼（有免费额度）</td><td>https://dashscope.aliyuncs.com/compatible-mode/v1</td><td>qwen-vl-max</td></tr>
-    <tr><td>硅基流动</td><td>https://api.siliconflow.cn/v1</td><td>Qwen/Qwen2.5-VL-7B-Instruct</td></tr>
-    <tr><td>OpenAI</td><td>https://api.openai.com/v1</td><td>gpt-4o</td></tr>
-    <tr><td>本地 Ollama</td><td>http://localhost:11434/v1</td><td>qwen2.5vl:7b（Key 随便填）</td></tr>
+    {% for entry in model_catalog %}
+    <tr>
+      <td>{{ entry.name }}</td>
+      <td>{{ entry.base_url }}</td>
+      <td>
+        {{ entry.models[0].model }}
+        {%- if entry.models|length > 1 %} 等 {{ entry.models|length }} 个{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
   </table>
+  <p class="muted small">下方会根据当前基地址识别入口，直接列出该入口的全部模型与单价，无需逐个试。</p>
   <form method="post" class="stack-form" style="margin-top:14px">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <label>接口基地址
@@ -70,23 +90,120 @@
       <input name="ai_api_key" type="password" value=""
              placeholder="{% if cfg.ai_api_key %}已保存（留空则不修改）{% else %}粘贴 API Key{% endif %}">
     </label>
+    {% set row_models = model_rows|map(attribute='model')|list %}
+    <section class="model-picker" aria-label="当前入口的模型与价格">
+      <div class="model-picker-head">
+        <div>
+          <strong>{{ model_view.title }}</strong>
+          {% if model_view.entry %}<span class="muted small">· 基地址已匹配此入口</span>{% endif %}
+          {% if model_view.synced %}<span class="tag-chip ok">接口已同步</span>{% endif %}
+        </div>
+        <div class="muted small">
+          共 {{ model_rows|length }} 个模型，单价单位「元/百万 token」
+          {%- if model_view.state and model_view.state.error %}
+          · <span class="warn-text">上次同步失败：{{ model_view.state.error }}</span>
+          {%- elif model_view.state %}
+          · 清单更新于 {{ model_view.state.fetched_at }}
+          {%- endif %}
+        </div>
+      </div>
+      {% if model_rows %}
+      {% if model_view.has_unknown %}
+      <p class="muted small" style="margin:6px 0 0">
+        标「新发现」的模型来自接口实时清单，尚未验证图片能力、也未收录价目；用于批改前建议先点「测试连接」确认。
+      </p>
+      {% endif %}
+      <div class="model-table-wrap">
+      <table class="model-table">
+        <thead>
+          <tr>
+            <th>模型</th>
+            <th class="nowrap">输入价</th>
+            <th class="nowrap">输出价</th>
+            <th class="nowrap">一份作业约</th>
+            <th>特点 / 备注</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for m in model_rows %}
+          <tr data-model="{{ m.model }}"
+              class="{% if cfg.ai_model == m.model %}cur-row{% endif %}{% if m.status == 'pre-offline' %} off-row{% endif %}">
+            <td>
+              {% if m.vendor %}<strong>{{ m.vendor }}</strong><br>{% endif %}
+              <code>{{ m.model }}</code>
+            </td>
+            <td class="nowrap">
+              {% if m.price_in is not none %}{{ "%g"|format(m.price_in) }}{% else %}<span class="price-na">未收录</span>{% endif %}
+            </td>
+            <td class="nowrap">
+              {% if m.price_out is not none %}{{ "%g"|format(m.price_out) }}{% else %}<span class="price-na">未收录</span>{% endif %}
+            </td>
+            <td class="nowrap">
+              {% if m.price_in is not none and m.price_out is not none %}
+              {{ "%.3f"|format((m.price_in * est_tokens_input + m.price_out * est_tokens_output) / 1000000) }} 元
+              {% else %}<span class="price-na">—</span>{% endif %}
+            </td>
+            <td>
+              <div class="tags">
+                {% for t in m.tags %}<span class="tag-chip">{{ t }}</span>{% endfor %}
+                {% if not m.known %}<span class="tag-chip warn">新发现</span>{% endif %}
+                {% if m.status == 'pre-offline' %}<span class="tag-chip warn">即将下线</span>{% endif %}
+              </div>
+              <div class="muted small">
+                {% if m.note %}{{ m.note }}{% elif not m.known %}接口已列出，但价格与图片能力未收录{% endif %}
+                {% if m.price_source %} · 价目来源：{{ m.price_source }} {{ m.price_updated_at[:10] }}{% endif %}
+              </div>
+            </td>
+            <td class="nowrap">
+              <button type="button" class="ghost small pick-model" data-model="{{ m.model }}">
+                {% if cfg.ai_model == m.model %}已选{% else %}选用{% endif %}
+              </button>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      {% else %}
+      <p class="muted small" style="margin:6px 0 0">
+        {% if model_view.sync_supported %}
+        当前入口还没有模型信息：先保存基地址与 API Key，再点下方「立即同步」从接口拉取可用模型。
+        {% else %}
+        当前入口未收录模型清单：保存基地址后，如果属于已收录入口会自动列出模型与价格；否则可直接手动填写模型名。
+        {% endif %}
+      </p>
+      {% endif %}
+      <p class="muted small" style="margin:6px 0 0">
+        「一份作业约」按典型 26 页学生卷 + 20 页答案（约 {{ (est_tokens_input/1000)|round|int }}k 输入 /
+        {{ (est_tokens_output/1000)|round|int }}k 输出 token）估算；高峰时段（工作日 9:00-12:00、14:00-18:00）价格约为 2 倍。
+      </p>
+      {% if model_view.sync_supported %}
+      <div class="sync-row">
+        <button class="ghost small" formmethod="post"
+                formaction="{{ url_for('settings_models_sync') }}"
+                formnovalidate>立即同步模型清单</button>
+        <span class="muted small">每天自动同步一次；同步的是已保存的基地址与 Key，新增模型会自动出现在上表</span>
+      </div>
+      {% endif %}
+    </section>
     <div class="model-select-row">
       <label>模型
         <select name="ai_model_select" id="modelSelect" style="flex:1">
-          <option value="">—— 从腾讯云 TokenHub 选一个模型 ——</option>
-          {% for m in model_presets %}
+          <option value="">—— 从 {{ model_view.title }} 选择模型 ——</option>
+          {% for m in model_rows %}
           <option value="{{ m.model }}" {% if cfg.ai_model == m.model %}selected{% endif %}>
-            {{ m.vendor }} · {{ m.model }}（入 {{ "%.1f"|format(m.price_in) }} / 出 {{ "%.1f"|format(m.price_out) }} 元/百万）
+            {% if m.vendor %}{{ m.vendor }} · {% endif %}{{ m.model }}{% if m.price_in is not none %}（入 {{ "%g"|format(m.price_in) }} / 出 {{ "%g"|format(m.price_out) }} 元/百万）{% else %}（价格未收录）{% endif %}
           </option>
           {% endfor %}
-          <option value="__custom__" {% if cfg.ai_model and cfg.ai_model not in model_presets|map(attribute='model') %}selected{% endif %}>
+          <option value="__custom__" {% if cfg.ai_model and cfg.ai_model not in row_models %}selected{% endif %}>
             手动输入其它模型…
           </option>
         </select>
       </label>
       <input name="ai_model" id="modelCustom" value="{{ cfg.ai_model }}"
              placeholder="例如 glm-4.6v-flash"
-             style="display:none" {% if cfg.ai_model and cfg.ai_model not in model_presets|map(attribute='model') %}data-force-show{% endif %}>
+             style="display:none" {% if cfg.ai_model and cfg.ai_model not in row_models %}data-force-show{% endif %}>
     </div>
     <div class="cost-est" id="costEst" style="display:none">
       <div><b>单次作业批阅成本估算</b>（按典型 26 页学生卷 + 20 页答案算）</div>
@@ -99,13 +216,13 @@
         <ul>
           <li>输入：每页 144dpi A4 经视觉切块 ≈ 1300 token，合计 46 页 ≈ {{ est_tokens_input }}</li>
           <li>输出：逐题 JSON + 每题评语 ≈ {{ est_tokens_output }} token</li>
-          <li>价格来源：腾讯云 TokenHub 公开价目（2025.11），高峰时段约翻倍</li>
+          <li>价格来源：内置价目与截图识别价目（以最新一次更新为准），高峰时段约翻倍</li>
         </ul>
       </details>
     </div>
     <script>
     (function(){
-      var presets = {{ model_presets|tojson }};
+      var presets = {{ model_rows|tojson }};
       var select = document.getElementById('modelSelect');
       var custom = document.getElementById('modelCustom');
       var costEst = document.getElementById('costEst');
@@ -114,24 +231,57 @@
 
       function findPreset(name) { return presets.find(function(m){ return m.model === name; }); }
 
+      // 模型卡片与下拉框保持同步：选中的行高亮，按钮文案变为「已选」
+      function syncPicker(name) {
+        Array.prototype.forEach.call(document.querySelectorAll('tr[data-model]'), function(tr){
+          var on = tr.dataset.model === name;
+          tr.classList.toggle('cur-row', on);
+          var btn = tr.querySelector('.pick-model');
+          if (btn) btn.textContent = on ? '已选' : '选用';
+        });
+      }
+
       function apply() {
-        var v = select.value;
+        var v = select.value, current = '';
         if (v === '__custom__') {
           custom.style.display = 'block';
           costEst.style.display = 'none';
-          custom.focus();
         } else if (v) {
           custom.style.display = 'none';
           custom.value = v;   // 把选中的值同步到真正提交的 input
+          current = v;
           var m = findPreset(v);
           costEst.style.display = 'block';
-          var yuan = (m.price_in * est_in + m.price_out * est_out) / 1000000;
-          costPer.textContent = '约 ' + yuan.toFixed(3) + ' 元';
+          if (m && m.price_in !== null && m.price_out !== null) {
+            var yuan = (m.price_in * estIn + m.price_out * estOut) / 1000000;
+            costPer.textContent = '约 ' + yuan.toFixed(3) + ' 元';
+          } else {
+            costPer.textContent = '价格未收录';
+          }
         } else {
           custom.style.display = 'none';
           costEst.style.display = 'none';
         }
+        syncPicker(current);
       }
+
+      Array.prototype.forEach.call(document.querySelectorAll('tr[data-model]'), function(tr){
+        tr.addEventListener('click', function(e){
+          if (e.target.closest('button')) return;
+          var btn = tr.querySelector('.pick-model');
+          if (btn) btn.click();
+        });
+      });
+
+      Array.prototype.forEach.call(document.querySelectorAll('.pick-model'), function(btn){
+        btn.addEventListener('click', function(){
+          var name = btn.dataset.model;
+          select.value = name;
+          if (select.value !== name) select.value = '__custom__';
+          apply();
+        });
+      });
+
       select.addEventListener('change', apply);
       // 如果当前值不在下拉里，强制展示 custom input
       if (custom.dataset.forceShow !== undefined) {
@@ -141,41 +291,6 @@
     })();
     </script>
 
-    <details class="model-help">
-      <summary>查看所有可选模型对比（含价格与特点）</summary>
-      <table class="model-table">
-        <thead>
-          <tr>
-            <th style="width:110px">厂商</th>
-            <th>model 参数（复制填入）</th>
-            <th style="width:70px">输入价</th>
-            <th style="width:70px">输出价</th>
-            <th>特点 / 备注</th>
-          </tr>
-        </thead>
-        <tbody>
-        {% for m in model_presets %}
-        <tr class="{% if cfg.ai_model == m.model %}cur-row{% endif %}">
-          <td><strong>{{ m.vendor }}</strong></td>
-          <td><code>{{ m.model }}</code></td>
-          <td>{{ m.price_in }} 元/百万</td>
-          <td>{{ m.price_out }} 元/百万</td>
-          <td>
-            <div class="tags">
-              {% for t in m.tags %}<span class="tag-chip">{{ t }}</span>{% endfor %}
-            </div>
-            <div class="muted small">{{ m.note }}</div>
-          </td>
-        </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-      <p class="muted small">
-        以上模型均为腾讯云 TokenHub 上**支持图片理解**的多模态模型，直接把 model 参数填入即可调用。
-        价格为公开价目，高峰时段（通常工作日白天）约翻倍。选哪个都能完成作业批阅，
-        实际效果差异更多取决于你愿意花多少钱。
-      </p>
-    </details>
     <label class="check-line">
       <input type="checkbox" name="ai_demo" value="1" {% if cfg.ai_demo == '1' %}checked{% endif %}
              style="width:auto">
@@ -201,5 +316,54 @@
     批改作业与生成报告所用的提示词已独立管理：<a href="{{ url_for('prompts_page') }}">我的提示词</a>，
     可在具体课程页为每门课程选择使用哪一条。
   </p>
+</div>
+
+<div class="card narrow">
+  <h2>价目表更新（截图识别）</h2>
+  <p class="muted small">
+    TokenHub 没有公开的价目查询接口，价格通过上传官方价目截图识别更新：识别结果会先列出来，
+    你核对无误后再保存。保存后对所有老师生效，并用于成本估算。
+  </p>
+  <form method="post" action="{{ url_for('settings_prices_extract') }}"
+        enctype="multipart/form-data" class="stack-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <label>价目截图（PNG / JPG / WebP，≤8MB）
+      <input type="file" name="price_image" accept="image/png,image/jpeg,image/webp">
+    </label>
+    <button class="small" type="submit">识别截图中的价格</button>
+    <span class="muted small">使用当前已保存的视觉模型识别，会产生一次很小的 AI 调用费用</span>
+  </form>
+
+  {% if price_import %}
+  <div class="price-preview">
+    <p>
+      <strong>识别结果</strong>
+      <span class="muted small">来自 {{ price_import.filename }}，共 {{ price_import.rows|length }} 行；可直接改数字，确认后保存。</span>
+    </p>
+    <form method="post" action="{{ url_for('settings_prices_save') }}">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <table>
+        <thead>
+          <tr><th>模型 ID</th><th>输入价（元/百万）</th><th>输出价（元/百万）</th></tr>
+        </thead>
+        <tbody>
+        {% for r in price_import.rows %}
+          <tr>
+            <td><code>{{ r.model }}</code><input type="hidden" name="model" value="{{ r.model }}"></td>
+            <td><input type="number" name="price_in" value="{{ r.price_in }}" min="0" step="0.001"></td>
+            <td><input type="number" name="price_out" value="{{ r.price_out }}" min="0" step="0.001"></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% if price_import.unclear %}
+      <p class="muted small">
+        以下内容不清晰或信息不全，未写入，请自行核对：{{ price_import.unclear|join('、') }}
+      </p>
+      {% endif %}
+      <button class="small" type="submit">确认保存这些价格</button>
+    </form>
+  </div>
+  {% endif %}
 </div>
 {% endblock %}

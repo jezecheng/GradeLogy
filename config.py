@@ -64,6 +64,9 @@ AI_MODEL = _env("AI_MODEL", "")
 BACKUP_DIR = os.path.abspath(_env("BACKUP_DIR", os.path.join(DATA_DIR, "backups")))
 BACKUP_KEEP = int(_env("BACKUP_KEEP", "7"))
 AUTO_BACKUP = _env("AUTO_BACKUP", "1").lower() not in ("0", "false", "no", "off")
+# 模型清单自动同步：每天通过 GET /v1/models 刷新一次各老师 TokenHub 入口的可用模型
+AUTO_MODEL_SYNC = _env("AUTO_MODEL_SYNC", "1").lower() not in ("0", "false", "no", "off")
+MODEL_SYNC_HOURS = float(_env("MODEL_SYNC_HOURS", "24"))
 
 
 def ensure_dirs():
