@@ -73,4 +73,25 @@
   {% endfor %}
 </div>
 {% endfor %}
+
+<script>
+(function () {
+  document.querySelectorAll('[data-dialog-open]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var dlg = document.getElementById(btn.dataset.dialogOpen);
+      if (!dlg) return;
+      dlg.showModal();
+      var first = dlg.querySelector('input:not([type=hidden]), textarea');
+      if (first) first.focus();
+    });
+  });
+  document.querySelectorAll('dialog.modal').forEach(function (dlg) {
+    dlg.querySelectorAll('[data-dialog-close]').forEach(function (btn) {
+      btn.addEventListener('click', function () { dlg.close(); });
+    });
+    // 点击遮罩区域关闭：命中 dialog 本身而非其内部表单
+    dlg.addEventListener('click', function (e) { if (e.target === dlg) dlg.close(); });
+  });
+})();
+</script>
 {% endblock %}

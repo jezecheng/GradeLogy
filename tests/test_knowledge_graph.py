@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 
 try:
@@ -165,6 +166,57 @@ class KGLogicTest(unittest.TestCase):
         finally:
             os.remove(path)
 
+    def test_relations_to_unknown_nodes_and_self_loops_are_ignored(self):
+        nodes, edges, _new_nodes, _new_edges = kg.merge_extraction(
+            self.con, 1, 101,
+            [{"name": "氧化还原反应", "category": "", "definition": "",
+              "aliases": [], "confidence": 0.8}],
+            [{"from": "氧化还原反应", "to": "未收录概念", "relation": "related",
+              "evidence": "", "confidence": 0.5},
+             {"from": "氧化还原反应", "to": "氧化还原反应", "relation": "related",
+              "evidence": "", "confidence": 0.5}])
+        self.assertEqual((nodes, edges), (1, 0))
+
+    def test_build_material_marks_failed_when_no_concepts(self):
+        material_id = self._material()
+        self.con.execute("INSERT INTO kg_chunks(graph_id,material_id,content)"
+                         " VALUES(1,?,'内容')", (material_id,))
+        self.con.commit()
+        with mock.patch.object(kg, "analyze_batch", return_value=([], [], "")):
+            result = kg.build_material(self.con, material_id, "u", "k", "m")
+        self.assertIsNone(result)
+        row = self.con.execute("SELECT * FROM kg_materials WHERE id=?",
+                               (material_id,)).fetchone()
+        self.assertEqual(row["status"], kg.STATUS_FAILED)
+        self.assertIn("未抽取到任何概念", row["error"])
+
+    def test_build_material_records_partial_batch_failure(self):
+        material_id = self._material()
+        for number in range(2):
+            self.con.execute(
+                "INSERT INTO kg_chunks(graph_id,material_id,chunk_no,content)"
+                " VALUES(1,?,?,?)", (material_id, number, "甲" * 9000))
+        self.con.commit()
+        concepts = [{"name": "氧化还原反应", "category": "", "definition": "",
+                     "aliases": [], "confidence": 0.8}]
+        with mock.patch.object(kg, "analyze_batch",
+                               side_effect=[(concepts, [], ""), ([], [], "超时")]):
+            result = kg.build_material(self.con, material_id, "u", "k", "m")
+        self.assertEqual(result["new_nodes"], 1)
+        self.assertEqual(result["errors"], 1)
+        row = self.con.execute("SELECT * FROM kg_materials WHERE id=?",
+                               (material_id,)).fetchone()
+        self.assertEqual(row["status"], kg.STATUS_DONE)
+        self.assertIn("部分片段失败", row["error"])
+
+    def test_build_material_without_chunks_marks_failed(self):
+        material_id = self._material()
+        self.assertIsNone(kg.build_material(self.con, material_id, "u", "k", "m"))
+        row = self.con.execute("SELECT * FROM kg_materials WHERE id=?",
+                               (material_id,)).fetchone()
+        self.assertEqual(row["status"], kg.STATUS_FAILED)
+        self.assertIn("没有可用的资料文本", row["error"])
+
     def test_extract_material_without_text_marks_failed(self):
         fd, path = tempfile.mkstemp(suffix=".txt")
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -220,7 +272,8 @@ class KGRouteTest(unittest.TestCase):
             "must_change_password) VALUES(?,?, 'x',?,?,1,0)",
             [(1, "admin", "管理员", "admin"),
              (2, "teacher", "老师", "teacher"),
-             (3, "other", "别的老师", "teacher")])
+             (3, "other", "别的老师", "teacher"),
+             (4, "student", "学生", "student")])
         con.commit()
         con.close()
 
@@ -375,6 +428,173 @@ class KGRouteTest(unittest.TestCase):
         self.assertEqual(con.execute(
             "SELECT COUNT(*) FROM knowledge_graphs").fetchone()[0], 0)
         con.close()
+
+    def test_list_page_wires_dialog_script(self):
+        """回归：新建图谱按钮必须绑定弹窗脚本，否则点击无反应。"""
+        resp = self.client.get(self.url("knowledge_graphs"))
+        html = resp.get_data(as_text=True)
+        self.assertIn('data-dialog-open="kg-create"', html)
+        self.assertIn('id="kg-create"', html)
+        self.assertIn("showModal", html)
+        self.assertIn("data-dialog-close", html)
+
+    def test_guest_is_redirected_to_login(self):
+        guest = app_module.app.test_client()
+        resp = guest.get(self.url("knowledge_graphs"))
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("/login", resp.headers["Location"])
+
+    def test_student_cannot_access_knowledge_graphs(self):
+        student = self.login(4)
+        self.assertEqual(student.get(self.url("knowledge_graphs")).status_code, 403)
+
+    def test_admin_can_upload_to_others_graph(self):
+        graph = self._create_graph()
+        admin = self.login(1)
+        with mock.patch.object(app_module, "_kg_start_build") as start:
+            resp = admin.post(
+                self.url("knowledge_graph_upload", gid=graph["id"]),
+                data={"_csrf": "test-token",
+                      "files": (io.BytesIO(b"admin upload"), "notes.txt")},
+                content_type="multipart/form-data")
+        self.assertEqual(resp.status_code, 302)
+        start.assert_called_once()
+        con = self._db()
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM kg_materials").fetchone()[0], 1)
+        con.close()
+
+    def test_other_teacher_cannot_delete_material(self):
+        graph = self._create_graph()
+        con = self._db()
+        con.execute(
+            "INSERT INTO kg_materials(id,graph_id,filename,stored_name,sha256,"
+            "uploaded_by) VALUES(70,?,?,?,?,2)",
+            (graph["id"], "x.txt", f"kg/{graph['id']}/x.txt", "b" * 64))
+        con.commit()
+        con.close()
+        other = self.login(3)
+        resp = other.post(self.url("knowledge_graph_material_delete", mid=70),
+                          data={"_csrf": "test-token"})
+        self.assertEqual(resp.status_code, 403)
+        con = self._db()
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM kg_materials").fetchone()[0], 1)
+        con.close()
+
+    def test_other_teacher_cannot_delete_graph(self):
+        graph = self._create_graph()
+        other = self.login(3)
+        resp = other.post(self.url("knowledge_graph_delete", gid=graph["id"]),
+                          data={"_csrf": "test-token"})
+        self.assertEqual(resp.status_code, 403)
+        con = self._db()
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM knowledge_graphs").fetchone()[0], 1)
+        con.close()
+
+    def test_mixed_upload_imports_only_supported_files(self):
+        graph = self._create_graph()
+        with mock.patch.object(app_module, "_kg_start_build") as start:
+            self.client.post(
+                self.url("knowledge_graph_upload", gid=graph["id"]),
+                data={"_csrf": "test-token",
+                      "files": [(io.BytesIO(b"good"), "good.txt"),
+                                (io.BytesIO(b"bad"), "bad.docx")]},
+                content_type="multipart/form-data")
+        self.assertEqual(start.call_count, 1)
+        con = self._db()
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM kg_materials").fetchone()[0], 1)
+        con.close()
+
+    def test_empty_text_file_fails_without_starting_build(self):
+        graph = self._create_graph()
+        with mock.patch.object(app_module, "_kg_start_build") as start:
+            resp = self.client.post(
+                self.url("knowledge_graph_upload", gid=graph["id"]),
+                data={"_csrf": "test-token",
+                      "files": (io.BytesIO(b"   \n\n "), "blank.txt")},
+                content_type="multipart/form-data")
+        self.assertEqual(resp.status_code, 302)
+        start.assert_not_called()
+        con = self._db()
+        row = con.execute("SELECT * FROM kg_materials").fetchone()
+        con.close()
+        self.assertEqual(row["status"], kg.STATUS_FAILED)
+        self.assertIn("扫描版", row["error"])
+
+    def test_oversized_upload_is_rejected_before_processing(self):
+        graph = self._create_graph()
+        with mock.patch.object(app_module.cfg, "MAX_UPLOAD_MB", 0.000001), \
+                mock.patch.object(app_module, "_kg_start_build") as start:
+            resp = self.client.post(
+                self.url("knowledge_graph_upload", gid=graph["id"]),
+                data={"_csrf": "test-token",
+                      "files": (io.BytesIO(b"payload"), "big.txt")},
+                content_type="multipart/form-data")
+        # 全局请求体上限先于路由生效，超大文件不会被落盘或消耗 AI
+        self.assertEqual(resp.status_code, 413)
+        start.assert_not_called()
+        con = self._db()
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM kg_materials").fetchone()[0], 0)
+        con.close()
+        abs_dir = os.path.join(app_module.UPLOAD_DIR, "kg", str(graph["id"]))
+        self.assertEqual(os.listdir(abs_dir) if os.path.isdir(abs_dir) else [], [])
+
+    def test_background_worker_marks_failed_without_ai_config(self):
+        graph = self._create_graph()
+        con = self._db()
+        con.execute(
+            "INSERT INTO kg_materials(id,graph_id,filename,stored_name,sha256,"
+            "uploaded_by) VALUES(71,?,?,?,?,2)",
+            (graph["id"], "x.txt", f"kg/{graph['id']}/x.txt", "c" * 64))
+        con.commit()
+        con.close()
+        with mock.patch.object(app_module, "_ai_endpoint",
+                               return_value=("", "", "", "未配置 AI")):
+            app_module._kg_build_worker(graph["id"], 71, 2)
+        con = self._db()
+        row = con.execute("SELECT * FROM kg_materials WHERE id=71").fetchone()
+        con.close()
+        self.assertEqual(row["status"], kg.STATUS_FAILED)
+        self.assertIn("未配置 AI", row["error"])
+
+    def test_backup_includes_graph_tables_and_materials(self):
+        graph = self._create_graph()
+        abs_dir = os.path.join(app_module.UPLOAD_DIR, "kg", str(graph["id"]))
+        os.makedirs(abs_dir, exist_ok=True)
+        with open(os.path.join(abs_dir, "source.txt"), "w", encoding="utf-8") as fh:
+            fh.write("氧化还原")
+        con = self._db()
+        con.execute(
+            "INSERT INTO kg_materials(id,graph_id,filename,stored_name,sha256,"
+            "uploaded_by) VALUES(72,?,?,?,?,2)",
+            (graph["id"], "source.txt", f"kg/{graph['id']}/source.txt", "d" * 64))
+        con.execute("INSERT INTO kg_nodes(id,graph_id,name,normalized,source_materials)"
+                    " VALUES(80,?,'氧化还原反应','氧化还原反应',',72,')", (graph["id"],))
+        con.execute("INSERT INTO kg_nodes(id,graph_id,name,normalized,source_materials)"
+                    " VALUES(81,?,'氧化还原','氧化还原','')", (graph["id"],))
+        con.execute(
+            "INSERT INTO kg_edges(graph_id,src_id,dst_id,relation,source_materials)"
+            " VALUES(?,81,80,'related',',72,')", (graph["id"],))
+        con.commit()
+        con.close()
+        handle = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        handle.close()
+        try:
+            manifest = app_module._build_backup_zip(handle.name)
+            self.assertEqual(manifest["counts"]["knowledge_graphs"], 1)
+            self.assertEqual(manifest["counts"]["kg_materials"], 1)
+            self.assertEqual(manifest["counts"]["kg_nodes"], 2)
+            self.assertEqual(manifest["counts"]["kg_edges"], 1)
+            with zipfile.ZipFile(handle.name) as archive:
+                names = archive.namelist()
+            self.assertIn("data.sqlite", names)
+            self.assertIn(f"uploads/kg/{graph['id']}/source.txt", names)
+        finally:
+            os.remove(handle.name)
 
 
 if __name__ == "__main__":
