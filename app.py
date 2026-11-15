@@ -3,7 +3,6 @@
 结构：课程 → 讲次（作业 + AI 批阅）/ 考试（只录分数）
 角色：admin（用户管理）/ teacher（课程、讲次、考试、批改、AI 设置）/ student（提交与查看批改）
 """
-import base64
 import fcntl
 import gzip
 import io
@@ -24,7 +23,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from html.parser import HTMLParser
@@ -41,7 +39,12 @@ from werkzeug.routing import BaseConverter, ValidationError
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
+import ai_routes
 import config as cfg
+import db as database
+from ai_config import AI_SETTING_KEYS, ENV_AI_SETTINGS, get_ai_setting
+from db import DB_PATH, close_db, get_db
+from grading_service import GradingQueue, latest_operation
 from utilities import assistant, course_export, llm, logview, roster, storage
 from utilities.pdfgrade import (DEFAULT_GRADE_PROMPT, DEFAULT_REPORT_PROMPT,
                                 ai_lecture_summary, ai_report_comment,
@@ -53,7 +56,6 @@ cfg.setup_logging()
 
 BASE_DIR = cfg.BASE_DIR
 UPLOAD_DIR = cfg.STORAGE_DIR
-DB_PATH = cfg.DB_PATH
 BACKUP_DIR = cfg.BACKUP_DIR
 BACKUP_RE = re.compile(r"gradelogy_\d{8}_\d{6}\.zip")
 # 课程备份包：course_<课程ID>_<生成时间>[_序号].zip，保留 24 小时
@@ -698,16 +700,62 @@ def load_secret_key():
     return key
 
 
-app = Flask(__name__)
-app.config["SECRET_KEY"] = cfg.SECRET_KEY or load_secret_key()
-app.config["MAX_CONTENT_LENGTH"] = max(cfg.MAX_UPLOAD_MB, cfg.MAX_RESTORE_MB) * 1024 * 1024
-# Cookie 加固：禁止 JS 读取；SameSite 阻断跨站携带；HTTPS 部署时用 COOKIE_SECURE=1 打开 Secure
-app.config["SESSION_COOKIE_HTTPONLY"] = True
-app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-app.config["SESSION_COOKIE_SECURE"] = cfg.COOKIE_SECURE
-# 会话空闲 8 小时过期：每次请求自动续期，长时间不操作需重新登录
-app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=8)
-app.config["SESSION_REFRESH_EACH_REQUEST"] = True
+class AppRoutes:
+    """延迟注册路由与请求钩子，由 create_app() 绑定到具体的 app 实例。
+
+    endpoint 一律取视图函数名，因此 url_for("...") 的写法与拆分前完全一致。
+    """
+
+    def __init__(self):
+        self._items = []
+
+    def route(self, rule, **options):
+        def decorator(fn):
+            self._items.append(("route", (rule,), options, fn))
+            return fn
+        return decorator
+
+    def before_request(self, fn):
+        self._items.append(("before_request", (), {}, fn))
+        return fn
+
+    def after_request(self, fn):
+        self._items.append(("after_request", (), {}, fn))
+        return fn
+
+    def errorhandler(self, code):
+        def decorator(fn):
+            self._items.append(("errorhandler", (code,), {}, fn))
+            return fn
+        return decorator
+
+    def context_processor(self, fn):
+        self._items.append(("context_processor", (), {}, fn))
+        return fn
+
+    def template_filter(self, name):
+        def decorator(fn):
+            self._items.append(("template_filter", (name,), {}, fn))
+            return fn
+        return decorator
+
+    def apply(self, app):
+        for kind, args, options, fn in self._items:
+            if kind == "route":
+                app.add_url_rule(args[0], endpoint=fn.__name__, view_func=fn, **options)
+            elif kind == "before_request":
+                app.before_request(fn)
+            elif kind == "after_request":
+                app.after_request(fn)
+            elif kind == "errorhandler":
+                app.register_error_handler(args[0], fn)
+            elif kind == "context_processor":
+                app.context_processor(fn)
+            elif kind == "template_filter":
+                app.template_filter(args[0])(fn)
+
+
+_routes = AppRoutes()
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
@@ -732,8 +780,7 @@ class SignedIdConverter(BaseConverter):
         return _id_signer.dumps(int(value))
 
 
-_id_signer = URLSafeSerializer(app.config["SECRET_KEY"], salt="gradelogy-url-id")
-app.url_map.converters["oid"] = SignedIdConverter
+_id_signer = None   # 由 create_app() 按应用密钥初始化
 
 log = logging.getLogger("gradelogy")
 
@@ -781,7 +828,7 @@ HELP_DOCS = {
 }
 
 
-@app.context_processor
+@_routes.context_processor
 def _inject_app_meta():
     user = getattr(g, "user", None)
     role = user["role"] if user else ""
@@ -805,9 +852,6 @@ def _json_or_none(value):
         return None
 
 
-app.jinja_env.filters["fromjson"] = _json_or_none
-
-
 def file_list(value):
     """submissions.file_path 兼容单文件与 JSON 数组（一次提交多张图片/多页）。"""
     if not value:
@@ -822,18 +866,12 @@ def file_list(value):
     return [text]
 
 
-app.jinja_env.filters["file_list"] = file_list
-
-
 def accuracy_text(n_right, n_partial, n_wrong):
     """作业正确率 = 完全答对题数 / 已判定题数；半对、无法判定不计为正确。"""
     judged = (n_right or 0) + (n_partial or 0) + (n_wrong or 0)
     if not judged:
         return ""
     return f"{round(n_right * 100 / judged)}%"
-
-
-app.jinja_env.globals["accuracy"] = accuracy_text
 
 
 def _question_no_key(value):
@@ -865,10 +903,7 @@ def _md_safe(md):
     return render_markdown(md)
 
 
-app.jinja_env.filters["markdown_safe"] = _md_safe
-
-
-@app.template_filter("localtime")
+@_routes.template_filter("localtime")
 def _localtime(value):
     """SQLite CURRENT_TIMESTAMP 存 UTC，展示时转成本机时区。"""
     if not value:
@@ -889,208 +924,10 @@ def csrf_token():
     return token
 
 
-app.jinja_env.globals["csrf_token"] = csrf_token
-
 # 无需 CSRF 校验的端点：健康检查（只读）、静态资源
 CSRF_EXEMPT = {"healthz", "static"}
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS users(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  username TEXT UNIQUE NOT NULL,
-  password_hash TEXT NOT NULL,
-  display_name TEXT NOT NULL,
-  role TEXT NOT NULL CHECK(role IN ('admin','teacher','student')),
-  student_no TEXT DEFAULT '',
-  active INTEGER NOT NULL DEFAULT 1,
-  last_login_at TEXT DEFAULT '',
-  must_change_password INTEGER DEFAULT 0,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS courses(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  description TEXT DEFAULT '',
-  teacher_id INTEGER NOT NULL REFERENCES users(id),
-  grade_prompt_id INTEGER DEFAULT 0,
-  report_prompt_id INTEGER DEFAULT 0,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS enrollments(
-  course_id INTEGER NOT NULL REFERENCES courses(id),
-  student_id INTEGER NOT NULL REFERENCES users(id),
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY(course_id, student_id));
-CREATE TABLE IF NOT EXISTS course_teachers(
-  course_id INTEGER NOT NULL REFERENCES courses(id),
-  teacher_id INTEGER NOT NULL REFERENCES users(id),
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY(course_id, teacher_id));
-CREATE TABLE IF NOT EXISTS lectures(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  course_id INTEGER NOT NULL REFERENCES courses(id),
-  title TEXT NOT NULL,
-  description TEXT DEFAULT '',
-  deadline TEXT DEFAULT '',
-  answer_pdf TEXT DEFAULT '',
-  answer_pages TEXT DEFAULT '',
-  student_pdf TEXT DEFAULT '',
-  scope_candidates TEXT DEFAULT '',
-  scope_selected TEXT DEFAULT '',
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS exams(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  course_id INTEGER NOT NULL REFERENCES courses(id),
-  title TEXT NOT NULL,
-  description TEXT DEFAULT '',
-  exam_date TEXT DEFAULT '',
-  full_score REAL DEFAULT 100,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS exam_scores(
-  exam_id INTEGER NOT NULL REFERENCES exams(id),
-  student_id INTEGER NOT NULL REFERENCES users(id),
-  score TEXT DEFAULT '',
-  comment TEXT DEFAULT '',
-  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY(exam_id, student_id));
-CREATE TABLE IF NOT EXISTS submissions(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  lecture_id INTEGER NOT NULL REFERENCES lectures(id),
-  student_id INTEGER NOT NULL REFERENCES users(id),
-  file_path TEXT NOT NULL,
-  status TEXT DEFAULT '已提交',
-  score TEXT DEFAULT '',
-  feedback TEXT DEFAULT '',
-  grader TEXT DEFAULT '',
-  ai_summary TEXT DEFAULT '',
-  report_md TEXT DEFAULT '',
-  report_detail TEXT DEFAULT '',
-  report_published INTEGER DEFAULT 0,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS questions(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  submission_id INTEGER NOT NULL REFERENCES submissions(id),
-  no TEXT DEFAULT '',
-  page_no INTEGER DEFAULT 1,
-  image_path TEXT DEFAULT '',
-  ocr_text TEXT DEFAULT '',
-  standard_answer TEXT DEFAULT '',
-  score TEXT DEFAULT '',
-  note TEXT DEFAULT '',
-  max_score REAL DEFAULT 0,
-  verdict TEXT DEFAULT '',
-  ai_comment TEXT DEFAULT '',
-  reviewed INTEGER DEFAULT 0,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS lesson_plans(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  course_id INTEGER NOT NULL REFERENCES courses(id),
-  title TEXT NOT NULL,
-  content TEXT DEFAULT '',
-  updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS prompts(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  teacher_id INTEGER NOT NULL DEFAULT 0,
-  kind TEXT NOT NULL CHECK(kind IN ('grade','report')),
-  name TEXT NOT NULL,
-  content TEXT DEFAULT '',
-  is_default INTEGER DEFAULT 0,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS settings(
-  teacher_id INTEGER NOT NULL,
-  key TEXT NOT NULL,
-  value TEXT DEFAULT '',
-  PRIMARY KEY(teacher_id, key));
--- 老师可保存多个 AI API Key，is_active=1 的那条会被写入 settings 的 ai_api_url/ai_api_key，
--- 这样批改、同步模型、测试连接等既有调用链不需要感知多 Key。
-CREATE TABLE IF NOT EXISTS ai_api_keys(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  teacher_id INTEGER NOT NULL,
-  name TEXT DEFAULT '',
-  base_url TEXT NOT NULL DEFAULT '',
-  api_key TEXT NOT NULL,
-  model TEXT DEFAULT '',
-  is_active INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE INDEX IF NOT EXISTS idx_ai_api_keys_teacher ON ai_api_keys(teacher_id, is_active);
-CREATE TABLE IF NOT EXISTS ai_operations(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  teacher_id INTEGER NOT NULL REFERENCES users(id),
-  operation_type TEXT NOT NULL,
-  course_id INTEGER,
-  lecture_id INTEGER,
-  submission_id INTEGER,
-  model TEXT DEFAULT '',
-  status TEXT NOT NULL DEFAULT 'running',
-  started_at TEXT NOT NULL,
-  finished_at TEXT,
-  error TEXT DEFAULT '');
-CREATE TABLE IF NOT EXISTS ai_usage_events(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  operation_id INTEGER NOT NULL REFERENCES ai_operations(id),
-  attempt INTEGER NOT NULL,
-  provider_request_id TEXT,
-  model TEXT DEFAULT '',
-  prompt_tokens INTEGER,
-  completion_tokens INTEGER,
-  total_tokens INTEGER,
-  cached_tokens INTEGER,
-  reasoning_tokens INTEGER,
-  latency_ms INTEGER,
-  finish_reason TEXT DEFAULT '',
-  estimated_cost REAL,
-  pricing_json TEXT DEFAULT '',
-  usage_json TEXT DEFAULT '',
-  status TEXT NOT NULL,
-  error TEXT DEFAULT '',
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE INDEX IF NOT EXISTS idx_ai_operations_started ON ai_operations(started_at, id);
-CREATE INDEX IF NOT EXISTS idx_ai_operations_teacher ON ai_operations(teacher_id, id);
-CREATE INDEX IF NOT EXISTS idx_ai_operations_lecture ON ai_operations(lecture_id, id);
-CREATE INDEX IF NOT EXISTS idx_ai_operations_submission ON ai_operations(submission_id, id);
-CREATE INDEX IF NOT EXISTS idx_ai_usage_operation ON ai_usage_events(operation_id, attempt);
--- 每个老师、每个入口最近一次从 /v1/models 拉到的可用模型
-CREATE TABLE IF NOT EXISTS model_sync(
-  teacher_id INTEGER NOT NULL,
-  base_url TEXT NOT NULL,
-  model_id TEXT NOT NULL,
-  display_name TEXT DEFAULT '',
-  status TEXT DEFAULT '',
-  fetched_at TEXT NOT NULL,
-  PRIMARY KEY(teacher_id, base_url, model_id));
-CREATE TABLE IF NOT EXISTS model_sync_state(
-  teacher_id INTEGER NOT NULL,
-  base_url TEXT NOT NULL,
-  fetched_at TEXT NOT NULL,
-  model_count INTEGER DEFAULT 0,
-  error TEXT DEFAULT '',
-  PRIMARY KEY(teacher_id, base_url));
--- 价目表：静态清单之外的覆盖值（目前由价目截图识别后确认写入），按模型 ID 全局生效
-CREATE TABLE IF NOT EXISTS model_prices(
-  model TEXT PRIMARY KEY,
-  price_in REAL,
-  price_out REAL,
-  unit TEXT DEFAULT '元/百万 token',
-  source TEXT DEFAULT '',
-  updated_at TEXT NOT NULL);
-"""
-
 # ---------- 数据库 ----------
-def get_db():
-    if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH, timeout=10)
-        g.db.row_factory = sqlite3.Row
-    return g.db
-
-
-@app.teardown_appcontext
-def close_db(_=None):
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
-
-
 def _migrate_upload_layout(con):
     """把旧版平铺在 uploads/ 下的附件迁入分层目录，并更新数据库引用。
 
@@ -1143,167 +980,21 @@ def _migrate_upload_layout(con):
 
 
 def init_db():
-    # 旧版（无账号体系）数据库与本版不兼容，备份后重建；旧库当时仅有测试数据
-    con = sqlite3.connect(DB_PATH)
-    # WAL 允许读写并发（长批改占线程时页面仍可访问），busy_timeout 避免瞬时锁直接报错
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA busy_timeout=5000")
-    cols = {r[1] for r in con.execute("PRAGMA table_info(homeworks)")}
-    if "token" in cols:
-        con.close()
-        os.replace(DB_PATH, DB_PATH + ".v1.bak")
-        con = sqlite3.connect(DB_PATH)
-    # 课程下的「作业」更名为「讲次」：一次作业即一讲，旧数据直接改名沿用
-    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    if "homeworks" in tables and "lectures" not in tables:
-        con.execute("ALTER TABLE homeworks RENAME TO lectures")
-    if "submissions" in tables:
-        scols_now = {r[1] for r in con.execute("PRAGMA table_info(submissions)")}
-        if "homework_id" in scols_now and "lecture_id" not in scols_now:
-            con.execute("ALTER TABLE submissions RENAME COLUMN homework_id TO lecture_id")
-    con.executescript(SCHEMA)
-    # 轻量迁移：早期版本没有 page_no 列
-    qcols = {r[1] for r in con.execute("PRAGMA table_info(questions)")}
-    if "page_no" not in qcols:
-        con.execute("ALTER TABLE questions ADD COLUMN page_no INTEGER DEFAULT 1")
-    # 轻量迁移：接入逐题 AI 批改后新增的字段
-    for col, ddl in (("max_score", "REAL DEFAULT 0"),
-                     ("verdict", "TEXT DEFAULT ''"),
-                     ("ai_comment", "TEXT DEFAULT ''"),
-                     ("reviewed", "INTEGER DEFAULT 0")):
-        if col not in qcols:
-            con.execute(f"ALTER TABLE questions ADD COLUMN {col} {ddl}")
-    scols = {r[1] for r in con.execute("PRAGMA table_info(submissions)")}
-    if "ai_summary" not in scols:
-        con.execute("ALTER TABLE submissions ADD COLUMN ai_summary TEXT DEFAULT ''")
-    # 轻量迁移：批改报告（Markdown）与发布状态
-    if "report_md" not in scols:
-        con.execute("ALTER TABLE submissions ADD COLUMN report_md TEXT DEFAULT ''")
-    if "report_detail" not in scols:
-        con.execute("ALTER TABLE submissions ADD COLUMN report_detail TEXT DEFAULT ''")
-    if "report_published" not in scols:
-        con.execute("ALTER TABLE submissions ADD COLUMN report_published INTEGER DEFAULT 0")
-    # 轻量迁移：讲次新增「学生版」讲义 PDF，与「教师版」标准答案并存
-    lcols = {r[1] for r in con.execute("PRAGMA table_info(lectures)")}
-    if "student_pdf" not in lcols:
-        con.execute("ALTER TABLE lectures ADD COLUMN student_pdf TEXT DEFAULT ''")
-    # 轻量迁移：作业范围（AI 识别的题目清单 + 老师勾选的批阅范围）
-    for col in ("scope_candidates", "scope_selected"):
-        if col not in lcols:
-            con.execute(f"ALTER TABLE lectures ADD COLUMN {col} TEXT DEFAULT ''")
-    # 轻量迁移：教师版 PDF 只发送指定页码（逗号分隔的 1 起页码）
-    if "answer_pages" not in lcols:
-        con.execute("ALTER TABLE lectures ADD COLUMN answer_pages TEXT DEFAULT ''")
-    # 轻量迁移：讲次级别的整体统计 summary（每题 AI 评语汇总 + 整体 summary）
-    for col in ("summary_md", "summary_at"):
-        if col not in lcols:
-            con.execute(f"ALTER TABLE lectures ADD COLUMN {col} TEXT DEFAULT ''")
-    # 轻量迁移：课程级提示词配置（0 表示使用系统内置默认提示词）
-    ccols = {r[1] for r in con.execute("PRAGMA table_info(courses)")}
-    for col in ("grade_prompt_id", "report_prompt_id"):
-        if col not in ccols:
-            con.execute(f"ALTER TABLE courses ADD COLUMN {col} INTEGER DEFAULT 0")
-    # 系统内置提示词：全局可用、不可删除，代码升级时内容随之更新
-    for kind, name, content in (("grade", "默认批改提示词", DEFAULT_GRADE_PROMPT),
-                                ("report", "默认报告提示词", DEFAULT_REPORT_PROMPT)):
-        row = con.execute("SELECT id FROM prompts WHERE is_default=1 AND kind=?",
-                          (kind,)).fetchone()
-        if row:
-            con.execute("UPDATE prompts SET name=?, content=?, updated_at=CURRENT_TIMESTAMP "
-                        "WHERE id=?", (name, content, row[0]))
-        else:
-            con.execute("INSERT INTO prompts(teacher_id,kind,name,content,is_default) "
-                        "VALUES(0,?,?,?,1)", (kind, name, content))
-    # 轻量迁移：仍在使用初始密码的账号，登录后强制先改密码
-    ucols = {r[1] for r in con.execute("PRAGMA table_info(users)")}
-    if "must_change_password" not in ucols:
-        con.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0")
-        for r in con.execute("SELECT id, password_hash FROM users").fetchall():
-            if any(check_password_hash(r[1], p) for p in DEFAULT_PASSWORDS):
-                con.execute("UPDATE users SET must_change_password=1 WHERE id=?", (r[0],))
-    # 轻量迁移：学籍号（与登录用户名分离）与末次登录时间
-    if "student_no" not in ucols:
-        con.execute("ALTER TABLE users ADD COLUMN student_no TEXT DEFAULT ''")
-    if "last_login_at" not in ucols:
-        con.execute("ALTER TABLE users ADD COLUMN last_login_at TEXT DEFAULT ''")
-    # 轻量迁移：账号启用状态（停用后不能登录，也不会被加入新课程）
-    if "active" not in ucols:
-        con.execute("ALTER TABLE users ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
-    # 课程可多名老师共同管理：把每门课的原创建者补进 course_teachers
-    con.execute("INSERT OR IGNORE INTO course_teachers(course_id, teacher_id) "
-                "SELECT id, teacher_id FROM courses")
-    # 轻量迁移：旧的单条 AI 配置导入多 Key 列表，页面改为在 ai_api_keys 中管理
-    legacy = con.execute(
-        "SELECT teacher_id, "
-        "MAX(CASE WHEN key='ai_api_url' THEN value END), "
-        "MAX(CASE WHEN key='ai_api_key' THEN value END) "
-        "FROM settings WHERE key IN ('ai_api_url','ai_api_key') GROUP BY teacher_id").fetchall()
-    for teacher_id, base_url, api_key in legacy:
-        has_key = con.execute("SELECT 1 FROM ai_api_keys WHERE teacher_id=? LIMIT 1",
-                              (teacher_id,)).fetchone()
-        if not has_key and (api_key or "").strip():
-            model_row = con.execute(
-                "SELECT value FROM settings WHERE teacher_id=? AND key='ai_model'",
-                (teacher_id,)).fetchone()
-            con.execute(
-                "INSERT INTO ai_api_keys(teacher_id,name,base_url,api_key,model,is_active) "
-                "VALUES(?,?,?,?,?,1)",
-                (teacher_id, "默认配置", base_url or "", api_key,
-                 model_row[0] if model_row else ""))
-    # 轻量迁移：多 Key 增加每组独立的模型字段
-    key_cols = {r[1] for r in con.execute("PRAGMA table_info(ai_api_keys)")}
-    if "model" not in key_cols:
-        con.execute("ALTER TABLE ai_api_keys ADD COLUMN model TEXT DEFAULT ''")
-    if con.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
-        con.execute("INSERT INTO users(username,password_hash,display_name,role,must_change_password) "
-                    "VALUES(?,?,?,?,1)",
-                    ("admin", generate_password_hash("admin123"), "系统管理员", "admin"))
-    # 附件目录结构：把旧版平铺文件迁入 course_<id>/lecture_<id>[/student_<id>]/
-    try:
-        _migrate_upload_layout(con)
-    except OSError:
-        log.exception("附件目录迁移失败，旧路径仍可用")
-    # 上次进程退出时未完成的批阅任务无法恢复，标记失败以便老师重新提交
-    con.execute("UPDATE ai_operations SET status='failed', error=?, "
-                "finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running')",
-                ("服务重启，批阅任务已中断，请重新提交",))
-    con.commit()
-    con.close()
-    try:
-        os.chmod(DB_PATH, 0o600)  # 数据库含账号哈希与 API Key，仅当前用户可读写
-    except OSError:
-        pass
+    """兼容入口：建表与迁移已收敛到 db.py，附件目录与提示词仍由本层提供。"""
+    database.init_db(
+        upload_migrator=_migrate_upload_layout,
+        default_prompts=(("grade", "默认批改提示词", DEFAULT_GRADE_PROMPT),
+                         ("report", "默认报告提示词", DEFAULT_REPORT_PROMPT)),
+        default_passwords=DEFAULT_PASSWORDS)
 
 
-# 环境变量优先于数据库：容器部署时把 Key 放在环境里，库里就不必留明文
-ENV_AI_SETTINGS = {
-    "ai_api_url": cfg.AI_API_URL,
-    "ai_api_key": cfg.AI_API_KEY,
-    "ai_model": cfg.AI_MODEL,
-}
+
 
 
 def get_setting(teacher_id, key, default=""):
-    # 多组 Key 的「当前使用」优先于页面设置；只有环境变量完整接管 Key 时例外，
-    # 这样老师配置了阿里云、腾讯云等多套入口也能各自独立生效。
-    if key in ("ai_api_url", "ai_api_key", "ai_model"):
-        env_takes_over = key in ("ai_api_url", "ai_api_key") and bool(ENV_AI_SETTINGS.get("ai_api_key"))
-        try:
-            row = None if env_takes_over else get_db().execute(
-                "SELECT base_url,api_key,model FROM ai_api_keys "
-                "WHERE teacher_id=? AND is_active=1 ORDER BY id DESC LIMIT 1",
-                (teacher_id,)).fetchone()
-        except sqlite3.Error:
-            row = None
-        if row is not None:
-            value = {"ai_api_url": row["base_url"], "ai_api_key": row["api_key"],
-                     "ai_model": row["model"]}[key] or ""
-            if key == "ai_api_url":
-                value = value.rstrip("/")
-            if value:
-                return value
-    if key in ENV_AI_SETTINGS and ENV_AI_SETTINGS[key]:
-        return ENV_AI_SETTINGS[key]
+    # AI 配置的优先级（环境变量 / 多套 Key / 旧版 settings）统一由 ai_config 解析
+    if key in AI_SETTING_KEYS:
+        return get_ai_setting(teacher_id, key, default, db=get_db())
     row = get_db().execute("SELECT value FROM settings WHERE teacher_id=? AND key=?",
                            (teacher_id, key)).fetchone()
     return row["value"] if row else default
@@ -1354,10 +1045,6 @@ def _activate_api_key(teacher_id, key_id):
     if row["model"]:
         save_setting(teacher_id, "ai_model", row["model"])
     return True
-
-
-def _valid_api_base_url(value):
-    return bool(re.fullmatch(r"https?://[^\s]{3,500}", value or ""))
 
 
 # ---------- AI 操作与逐次调用用量 ----------
@@ -1536,12 +1223,6 @@ def _token_axis_max(value):
         if magnitude * factor >= value:
             return magnitude * factor
     return 1
-
-
-app.jinja_env.globals["ai_operation_label"] = AI_OPERATION_LABEL.get
-app.jinja_env.globals["ai_status_label"] = AI_STATUS_LABEL.get
-app.jinja_env.globals["ai_usage_text"] = _ai_usage_text
-app.jinja_env.globals["compact_number"] = _compact_number
 
 
 def _ai_dashboard_data(filters):
@@ -1798,12 +1479,12 @@ def _prompt_options(course_id, kind):
 
 
 # ---------- 访问日志 ----------
-@app.before_request
+@_routes.before_request
 def _mark_request_start():
     g.request_started = time.perf_counter()
 
 
-@app.after_request
+@_routes.after_request
 def _access_log(resp):
     """每个请求写入一条访问日志；静态资源与健康检查跳过，避免轮询刷屏。"""
     if request.endpoint in ("static", "healthz", "admin_logs_tail"):
@@ -1820,7 +1501,7 @@ def _access_log(resp):
     return resp
 
 
-@app.after_request
+@_routes.after_request
 def security_headers(resp):
     """统一补安全响应头：防 MIME 嗅探、防被第三方站点 iframe 嵌套、限制外链与内联资源来源。"""
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -1838,7 +1519,7 @@ def security_headers(resp):
 
 
 # ---------- 登录与权限 ----------
-@app.before_request
+@_routes.before_request
 def load_user():
     uid = session.get("uid")
     g.user = None
@@ -1850,7 +1531,7 @@ def load_user():
             g.user = None
 
 
-@app.before_request
+@_routes.before_request
 def limit_body_size():
     """按端点限制请求体大小：恢复备份走大上限，其余（学生上传等）仍用 MAX_UPLOAD_MB。
 
@@ -1861,7 +1542,7 @@ def limit_body_size():
         abort(413, description=f"上传内容超过 {cap}MB 限制。")
 
 
-@app.before_request
+@_routes.before_request
 def csrf_protect():
     """所有写操作必须带本次会话的 CSRF token（表单隐藏域 _csrf 或请求头 X-CSRF-Token）。"""
     if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
@@ -1877,7 +1558,7 @@ def csrf_protect():
     return None
 
 
-@app.before_request
+@_routes.before_request
 def require_password_change():
     """仍在使用初始密码的账号，先改密码才能访问其他页面。"""
     if not g.user or not g.user["must_change_password"]:
@@ -1910,24 +1591,24 @@ def role_required(*roles):
     return deco
 
 
-@app.errorhandler(400)
+@_routes.errorhandler(400)
 def bad_request(e):
     msg = getattr(e, "description", "") or "请求无效。"
     return render_template("error.html", code=400, msg=msg), 400
 
 
-@app.errorhandler(413)
+@_routes.errorhandler(413)
 def too_large(e):
     msg = getattr(e, "description", "") or "上传内容过大。"
     return render_template("error.html", code=413, msg=msg), 413
 
 
-@app.errorhandler(403)
+@_routes.errorhandler(403)
 def forbidden(_):
     return render_template("error.html", code=403, msg="你没有访问该页面的权限。"), 403
 
 
-@app.errorhandler(404)
+@_routes.errorhandler(404)
 def not_found(_):
     return render_template("error.html", code=404, msg="页面或资源不存在。"), 404
 
@@ -1937,7 +1618,7 @@ def _safe_next(target):
     return target if target and target.startswith("/") and not target.startswith("//") else ""
 
 
-@app.route("/login", methods=["GET", "POST"])
+@_routes.route("/login", methods=["GET", "POST"])
 def login():
     if g.user:
         return redirect(url_for("index"))
@@ -1963,13 +1644,13 @@ def login():
     return render_template("login.html")
 
 
-@app.route("/logout")
+@_routes.route("/logout")
 def logout():
     session.clear()
     return redirect(url_for("login"))
 
 
-@app.route("/password", methods=["GET", "POST"])
+@_routes.route("/password", methods=["GET", "POST"])
 @login_required
 def change_password():
     if request.method == "POST":
@@ -1991,7 +1672,7 @@ def change_password():
     return render_template("password.html")
 
 
-@app.route("/")
+@_routes.route("/")
 def index():
     if not g.user:
         return redirect(url_for("login"))
@@ -1999,7 +1680,7 @@ def index():
                              "student": "student_home"}[g.user["role"]]))
 
 
-@app.route("/help/<name>")
+@_routes.route("/help/<name>")
 @login_required
 def help_doc(name):
     """站内渲染 docs/*.md，内网/离线部署也能看使用说明。"""
@@ -2015,9 +1696,9 @@ def help_doc(name):
     return render_template("help.html", doc_title=meta[0], body=body)
 
 
-@app.route("/student_home")
-@app.route("/teacher_home")
-@app.route("/teacher")
+@_routes.route("/student_home")
+@_routes.route("/teacher_home")
+@_routes.route("/teacher")
 def home_alias():
     """兼容手输的首页地址，统一按角色跳转到各自首页。"""
     return redirect(url_for("index"))
@@ -2076,7 +1757,7 @@ def _admin_user_query():
     return users, filters
 
 
-@app.route("/admin/users")
+@_routes.route("/admin/users")
 @role_required("admin")
 def admin_users():
     users, filters = _admin_user_query()
@@ -2084,45 +1765,7 @@ def admin_users():
                            pristine=_is_pristine())
 
 
-@app.route("/admin/ai-usage")
-@role_required("admin")
-def admin_ai_usage():
-    period = request.args.get("period", "30")
-    period_labels = {"1": "今天", "7": "近 7 天", "30": "近 30 天",
-                     "90": "近 90 天", "all": "全部时间"}
-    if period not in period_labels:
-        period = "30"
-
-    def optional_id(name):
-        try:
-            value = int(request.args.get(name, ""))
-            return value if value > 0 else ""
-        except (TypeError, ValueError):
-            return ""
-
-    operation_type = request.args.get("operation_type", "")
-    if operation_type not in AI_OPERATION_LABEL:
-        operation_type = ""
-    status = request.args.get("status", "")
-    if status not in AI_STATUS_LABEL:
-        status = ""
-    filters = {
-        "period": period,
-        "teacher_id": optional_id("teacher_id"),
-        "course_id": optional_id("course_id"),
-        "operation_type": operation_type,
-        "model": request.args.get("model", "").strip()[:200],
-        "status": status,
-        "q": request.args.get("q", "").strip()[:200],
-    }
-    period_links = {value: url_for("admin_ai_usage", **{**filters, "period": value})
-                    for value in period_labels}
-    return render_template("admin_ai_usage.html", filters=filters,
-                           period_labels=period_labels, period_links=period_links,
-                           **_ai_dashboard_data(filters))
-
-
-@app.route("/admin/logs")
+@_routes.route("/admin/logs")
 @role_required("admin")
 def admin_logs_page():
     files = []
@@ -2139,7 +1782,7 @@ def admin_logs_page():
     return resp, 200, {"Cache-Control": "no-store"}
 
 
-@app.route("/admin/logs/tail")
+@_routes.route("/admin/logs/tail")
 @role_required("admin")
 def admin_logs_tail():
     name = request.args.get("name", "app.log")
@@ -2160,7 +1803,7 @@ def admin_logs_tail():
     return resp
 
 
-@app.route("/admin/logs/download/<name>")
+@_routes.route("/admin/logs/download/<name>")
 @role_required("admin")
 def admin_logs_download(name):
     try:
@@ -2173,13 +1816,13 @@ def admin_logs_download(name):
     return resp
 
 
-@app.route("/admin_users")
+@_routes.route("/admin_users")
 def admin_users_alias():
     """兼容手输下划线的地址。"""
     return redirect(url_for("admin_users"))
 
 
-@app.route("/admin/users/create", methods=["POST"])
+@_routes.route("/admin/users/create", methods=["POST"])
 @role_required("admin")
 def admin_user_create():
     username = request.form.get("username", "").strip()
@@ -2222,7 +1865,7 @@ def _unique_username(db, base, used):
     return candidate
 
 
-@app.route("/admin/users/import", methods=["POST"])
+@_routes.route("/admin/users/import", methods=["POST"])
 @role_required("admin")
 def admin_users_import():
     """批量建号：CSV 单列姓名，按拼音自动生成用户名。"""
@@ -2268,7 +1911,7 @@ def admin_users_import():
 
 
 
-@app.route("/admin/users/<int:uid>/reset", methods=["POST"])
+@_routes.route("/admin/users/<int:uid>/reset", methods=["POST"])
 @role_required("admin")
 def admin_user_reset(uid):
     password = request.form.get("password", "").strip() or "123456"
@@ -2281,7 +1924,7 @@ def admin_user_reset(uid):
     return redirect(url_for("admin_users"))
 
 
-@app.route("/admin/users/<int:uid>/edit", methods=["POST"])
+@_routes.route("/admin/users/<int:uid>/edit", methods=["POST"])
 @role_required("admin")
 def admin_user_edit(uid):
     """修改账号主数据（姓名、学籍号），由管理员统一维护。"""
@@ -2306,7 +1949,7 @@ def admin_user_edit(uid):
     return redirect(url_for("admin_users"))
 
 
-@app.route("/admin/users/<int:uid>/toggle", methods=["POST"])
+@_routes.route("/admin/users/<int:uid>/toggle", methods=["POST"])
 @role_required("admin")
 def admin_user_toggle(uid):
     """启用 / 停用账号。停用后无法登录，也不会出现在课程的可选学生里。"""
@@ -2333,7 +1976,7 @@ def admin_user_toggle(uid):
     return redirect(url_for("admin_users"))
 
 
-@app.route("/admin/users/<int:uid>/delete", methods=["POST"])
+@_routes.route("/admin/users/<int:uid>/delete", methods=["POST"])
 @role_required("admin")
 def admin_user_delete(uid):
     if uid == g.user["id"]:
@@ -2390,7 +2033,7 @@ def is_course_owner(course):
     return g.user["role"] == "admin" or course["teacher_id"] == g.user["id"]
 
 
-@app.route("/courses")
+@_routes.route("/courses")
 @role_required("teacher")
 def courses():
     rows = get_db().execute("""
@@ -2407,7 +2050,7 @@ def courses():
     return render_template("courses.html", courses=rows)
 
 
-@app.route("/course/create", methods=["POST"])
+@_routes.route("/course/create", methods=["POST"])
 @role_required("teacher")
 def course_create():
     name = request.form.get("name", "").strip()
@@ -2422,7 +2065,7 @@ def course_create():
     return redirect(url_for("courses"))
 
 
-@app.route("/course/<oid:cid>/edit", methods=["POST"])
+@_routes.route("/course/<oid:cid>/edit", methods=["POST"])
 @role_required("teacher", "admin")
 def course_edit(cid):
     course = own_course(cid)
@@ -2502,7 +2145,7 @@ def _course_export_lectures(cid):
             for lecture in lectures]
 
 
-@app.route("/course/<oid:cid>")
+@_routes.route("/course/<oid:cid>")
 @role_required("teacher", "admin")
 def course_detail(cid):
     db = get_db()
@@ -2551,7 +2194,7 @@ def course_detail(cid):
                            can_manage_teachers=is_course_owner(course))
 
 
-@app.route("/course/<oid:cid>/export", methods=["POST"])
+@_routes.route("/course/<oid:cid>/export", methods=["POST"])
 @role_required("teacher", "admin")
 def course_export_start(cid):
     """生成整个课程的备份 zip 并直接下载，服务器保留 24 小时。"""
@@ -2582,7 +2225,7 @@ def course_export_start(cid):
     return send_file(path, as_attachment=True, download_name=download)
 
 
-@app.route("/course/<oid:cid>/export/<name>")
+@_routes.route("/course/<oid:cid>/export/<name>")
 @role_required("teacher", "admin")
 def course_export_file(cid, name):
     """下载 24 小时内生成的课程备份包，仅限本课程老师。"""
@@ -2598,7 +2241,7 @@ def course_export_file(cid, name):
     return send_file(path, as_attachment=True, download_name=download)
 
 
-@app.route("/course/<oid:cid>/teachers", methods=["POST"])
+@_routes.route("/course/<oid:cid>/teachers", methods=["POST"])
 @role_required("teacher")
 def course_teacher_add(cid):
     """把另一名老师加入课程共同管理（仅创建者或管理员可操作）。"""
@@ -2621,7 +2264,7 @@ def course_teacher_add(cid):
     return redirect(url_for("course_detail", cid=cid))
 
 
-@app.route("/course/<oid:cid>/teachers/<oid:tid>/delete", methods=["POST"])
+@_routes.route("/course/<oid:cid>/teachers/<oid:tid>/delete", methods=["POST"])
 @role_required("teacher")
 def course_teacher_remove(cid, tid):
     course = own_course(cid)
@@ -2637,7 +2280,7 @@ def course_teacher_remove(cid, tid):
     return redirect(url_for("course_detail", cid=cid))
 
 
-@app.route("/course/<oid:cid>/delete", methods=["POST"])
+@_routes.route("/course/<oid:cid>/delete", methods=["POST"])
 @role_required("teacher")
 def course_delete(cid):
     course = own_course(cid)
@@ -2657,7 +2300,7 @@ def course_delete(cid):
     return redirect(url_for("courses"))
 
 
-@app.route("/course/<oid:cid>/enroll", methods=["POST"])
+@_routes.route("/course/<oid:cid>/enroll", methods=["POST"])
 @role_required("teacher")
 def course_enroll(cid):
     own_course(cid)
@@ -2677,7 +2320,7 @@ def course_enroll(cid):
     return redirect(url_for("course_detail", cid=cid))
 
 
-@app.route("/course/<oid:cid>/unenroll/<oid:sid>", methods=["POST"])
+@_routes.route("/course/<oid:cid>/unenroll/<oid:sid>", methods=["POST"])
 @role_required("teacher")
 def course_unenroll(cid, sid):
     """把学生移出课程：数据库层面删除该生在本课程内的全部记录（不可恢复）。"""
@@ -2710,7 +2353,7 @@ def course_unenroll(cid, sid):
 
 
 # ---------- 老师：讲次 ----------
-@app.route("/course/<oid:cid>/lecture/create", methods=["POST"])
+@_routes.route("/course/<oid:cid>/lecture/create", methods=["POST"])
 @role_required("teacher")
 def lecture_create(cid):
     own_course(cid)
@@ -2759,7 +2402,7 @@ def _page_list(value):
     return sorted(p for p in out if p >= 1)
 
 
-@app.route("/lecture/<oid:hid>")
+@_routes.route("/lecture/<oid:hid>")
 @role_required("teacher")
 def lecture_detail(hid):
     db = get_db()
@@ -2820,7 +2463,7 @@ def lecture_detail(hid):
                            acc_by=acc_by, ai_operations=_ai_operation_history(lecture_id=hid, limit=8))
 
 
-@app.route("/lecture/<oid:hid>/upload-for", methods=["POST"])
+@_routes.route("/lecture/<oid:hid>/upload-for", methods=["POST"])
 @role_required("teacher")
 def lecture_upload_for(hid):
     """老师代学生上传：把扫描件记到指定学生的提交里，后续照样走 AI 批阅。"""
@@ -2862,7 +2505,7 @@ def lecture_upload_for(hid):
 
 
 
-@app.route("/lecture/<oid:hid>/edit", methods=["POST"])
+@_routes.route("/lecture/<oid:hid>/edit", methods=["POST"])
 @role_required("teacher")
 def lecture_edit(hid):
     db = get_db()
@@ -2879,7 +2522,7 @@ def lecture_edit(hid):
     return redirect(url_for("lecture_detail", hid=hid))
 
 
-@app.route("/lecture/<oid:hid>/answer", methods=["POST"])
+@_routes.route("/lecture/<oid:hid>/answer", methods=["POST"])
 @role_required("teacher")
 def lecture_answer(hid):
     db = get_db()
@@ -2938,7 +2581,7 @@ def _analyze_scope(hw, pages):
     return questions, err, usage_text
 
 
-@app.route("/lecture/<oid:hid>/answer/pages", methods=["POST"])
+@_routes.route("/lecture/<oid:hid>/answer/pages", methods=["POST"])
 @role_required("teacher")
 def lecture_answer_pages(hid):
     """保存教师要发送给模型的页码，并立即用这些页生成题目清单。"""
@@ -2973,7 +2616,7 @@ def lecture_answer_pages(hid):
     return redirect(url_for("lecture_detail", hid=hid))
 
 
-@app.route("/lecture/<oid:hid>/answer/page/<int:no>.jpg")
+@_routes.route("/lecture/<oid:hid>/answer/page/<int:no>.jpg")
 @role_required("teacher")
 def lecture_answer_preview(hid, no):
     """页码选择界面的缩略图：按需渲染教师版 PDF 的某一页。"""
@@ -2991,7 +2634,7 @@ def lecture_answer_preview(hid, no):
     return resp
 
 
-@app.route("/lecture/<oid:hid>/student-pdf", methods=["POST"])
+@_routes.route("/lecture/<oid:hid>/student-pdf", methods=["POST"])
 @role_required("teacher")
 def lecture_student_pdf(hid):
     db = get_db()
@@ -3012,7 +2655,7 @@ def lecture_student_pdf(hid):
     return redirect(url_for("lecture_detail", hid=hid))
 
 
-@app.route("/lecture/<oid:hid>/scope/save", methods=["POST"])
+@_routes.route("/lecture/<oid:hid>/scope/save", methods=["POST"])
 @role_required("teacher")
 def lecture_scope_save(hid):
     """保存勾选的作业范围；至少勾选一道题，AI 批阅只处理勾选的题目。"""
@@ -3032,7 +2675,7 @@ def lecture_scope_save(hid):
     return redirect(url_for("lecture_detail", hid=hid))
 
 
-@app.route("/lecture/<oid:hid>/summary/generate", methods=["POST"])
+@_routes.route("/lecture/<oid:hid>/summary/generate", methods=["POST"])
 @role_required("teacher")
 def lecture_summary_generate(hid):
     """AI 聚合全班逐题判定与评语，生成讲次 summary（每题要点 + 整体总结）。"""
@@ -3104,7 +2747,7 @@ def lecture_summary_generate(hid):
     return redirect(url_for("lecture_detail", hid=hid))
 
 
-@app.route("/lecture/<oid:hid>/delete", methods=["POST"])
+@_routes.route("/lecture/<oid:hid>/delete", methods=["POST"])
 @role_required("teacher")
 def lecture_delete(hid):
     db = get_db()
@@ -3130,7 +2773,7 @@ def own_student(cid, sid):
     return row
 
 
-@app.route("/course/<oid:cid>/student/<oid:sid>")
+@_routes.route("/course/<oid:cid>/student/<oid:sid>")
 @role_required("teacher")
 def student_detail(cid, sid):
     db = get_db()
@@ -3164,7 +2807,7 @@ def own_exam(eid):
     return exam
 
 
-@app.route("/course/<oid:cid>/exam/create", methods=["POST"])
+@_routes.route("/course/<oid:cid>/exam/create", methods=["POST"])
 @role_required("teacher")
 def exam_create(cid):
     own_course(cid)
@@ -3183,7 +2826,7 @@ def exam_create(cid):
     return redirect(url_for("course_detail", cid=cid))
 
 
-@app.route("/exam/<int:eid>")
+@_routes.route("/exam/<int:eid>")
 @role_required("teacher")
 def exam_detail(eid):
     db = get_db()
@@ -3199,7 +2842,7 @@ def exam_detail(eid):
     return render_template("exam.html", exam=exam, course=course, rows=rows)
 
 
-@app.route("/exam/<int:eid>/scores", methods=["POST"])
+@_routes.route("/exam/<int:eid>/scores", methods=["POST"])
 @role_required("teacher")
 def exam_scores_save(eid):
     db = get_db()
@@ -3224,7 +2867,7 @@ def exam_scores_save(eid):
     return redirect(url_for("exam_detail", eid=eid))
 
 
-@app.route("/exam/<int:eid>/delete", methods=["POST"])
+@_routes.route("/exam/<int:eid>/delete", methods=["POST"])
 @role_required("teacher")
 def exam_delete(eid):
     db = get_db()
@@ -3236,30 +2879,7 @@ def exam_delete(eid):
 
 
 # ---------- 批改：学生作业与标准答案一起交给 AI，老师逐题核对 ----------
-# 同一份作业同时只允许一个批阅任务，避免重复点击重复消耗模型调用
-_GRADING = set()
-_GRADING_LOCK = threading.Lock()
-
-
-def _grading_concurrency():
-    try:
-        return max(1, min(4, int(os.environ.get("GRADING_CONCURRENCY", "2"))))
-    except (TypeError, ValueError):
-        return 2
-
-
-# 真实批阅放到后台线程池：提交后立即返回，关闭浏览器不影响任务继续。
-# 默认并发 2，避免同时打满模型服务的限流。
-_GRADING_POOL = ThreadPoolExecutor(max_workers=_grading_concurrency(),
-                                   thread_name_prefix="grading")
-
-
-def _latest_grade_job(db, sid):
-    return db.execute(
-        "SELECT status,error FROM ai_operations WHERE submission_id=? "
-        "AND operation_type='grade' ORDER BY id DESC LIMIT 1", (sid,)).fetchone()
-
-
+# 队列调度（去重、线程池、定时扫描）在 grading_service.py，这里只保留批阅业务
 def _save_grading_result(db, sid, gen):
     """把模型返回的逐题结果写入数据库；演示模式和后台任务共用。"""
     db.execute("DELETE FROM questions WHERE submission_id=?", (sid,))
@@ -3278,7 +2898,10 @@ def _save_grading_result(db, sid, gen):
 
 
 def _run_grading_job(teacher_id, sid, operation):
-    """后台批阅：不依赖任何浏览器请求，完成后直接把结果写入数据库。"""
+    """后台批阅：不依赖任何浏览器请求，完成后直接把结果写入数据库。
+
+    去重状态由 GradingQueue 在任务结束后统一清理。
+    """
     with app.app_context():
         try:
             db = get_db()
@@ -3318,42 +2941,39 @@ def _run_grading_job(teacher_id, sid, operation):
         except Exception as e:
             log.exception("后台批阅异常 submission=%s", sid)
             _finish_ai_operation(operation, "failed", str(e))
-        finally:
-            with _GRADING_LOCK:
-                _GRADING.discard(sid)
+
+
+def _settings_for_service(teacher_id, key, default=""):
+    """延迟解析模块全局 get_setting，测试中替换 app.get_setting 仍然生效。"""
+    return get_setting(teacher_id, key, default)
+
+
+def _offpeak_for_service(teacher_id):
+    return _offpeak_block_if_enabled(teacher_id)
+
+
+def _service_app_context():
+    """延迟取当前 app 实例，便于 create_app() 在模块末尾才创建应用。"""
+    return app.app_context()
+
+
+_grading_queue = GradingQueue(
+    get_db=get_db,
+    get_setting=_settings_for_service,
+    start_operation=_start_ai_operation,
+    finish_operation=_finish_ai_operation,
+    run_job=_run_grading_job,
+    app_context=_service_app_context,
+    offpeak_block=_offpeak_for_service,
+)
 
 
 def _enqueue_grading(teacher_id, sid, course_id, lecture_id):
     """统一入队入口：手动点击和定时扫描共用，返回 (operation, 错误提示)。"""
-    db = get_db()
-    with _GRADING_LOCK:
-        if sid in _GRADING:
-            return None, "这份作业已在批阅队列中，请等待完成后再操作。"
-        _GRADING.add(sid)
-
-    active = _latest_grade_job(db, sid)
-    if active is not None and active["status"] in ("queued", "running"):
-        with _GRADING_LOCK:
-            _GRADING.discard(sid)
-        return None, "这份作业已在批阅队列中，请等待完成后再操作。"
-
-    operation = None
-    try:
-        operation = _start_ai_operation(
-            teacher_id, "grade", get_setting(teacher_id, "ai_model"),
-            course_id=course_id, lecture_id=lecture_id,
-            submission_id=sid, status="queued")
-        _GRADING_POOL.submit(_run_grading_job, teacher_id, sid, operation)
-    except Exception as e:
-        log.exception("加入批阅队列失败 submission=%s", sid)
-        _finish_ai_operation(operation, "failed", str(e))
-        with _GRADING_LOCK:
-            _GRADING.discard(sid)
-        return None, "加入批阅队列失败：" + str(e)
-    return operation, None
+    return _grading_queue.enqueue(teacher_id, sid, course_id, lecture_id)
 
 
-@app.route("/submission/<oid:sid>/grade", methods=["POST"])
+@_routes.route("/submission/<oid:sid>/grade", methods=["POST"])
 @role_required("teacher")
 def submission_grade(sid):
     """提交批阅任务：真实批阅在后台队列执行，提交后即可离开页面。"""
@@ -3412,7 +3032,7 @@ def submission_grade(sid):
     return _back_to_page()
 
 
-@app.route("/lecture/<oid:hid>/grading-status")
+@_routes.route("/lecture/<oid:hid>/grading-status")
 @role_required("teacher")
 def lecture_grading_status(hid):
     """讲次页轮询：返回本讲每份作业最近的批阅状态。"""
@@ -3434,7 +3054,7 @@ def lecture_grading_status(hid):
     })
 
 
-@app.route("/submission/<oid:sid>/grading-status")
+@_routes.route("/submission/<oid:sid>/grading-status")
 @role_required("teacher")
 def submission_grading_status(sid):
     """核对页轮询：返回这一份作业最近的批阅状态。"""
@@ -3445,7 +3065,7 @@ def submission_grading_status(sid):
     hw = db.execute("SELECT course_id FROM lectures WHERE id=?",
                     (sub["lecture_id"],)).fetchone()
     own_course(hw["course_id"])
-    row = _latest_grade_job(db, sid)
+    row = latest_operation(db, sid)
     status = row["status"] if row else ""
     return jsonify({
         "status": status,
@@ -3454,7 +3074,7 @@ def submission_grading_status(sid):
     })
 
 
-@app.route("/grading-queue")
+@_routes.route("/grading-queue")
 @role_required("teacher")
 def grading_queue():
     """教师导航栏的后台批改队列：只返回自己名下排队中/进行中的任务。"""
@@ -3486,86 +3106,17 @@ def grading_queue():
 
 
 def _auto_grade_scan():
-    """扫描「已提交」且讲次已上传教师版答案的作业，自动加入后台批阅队列。
-
-    只处理从未批阅过的作业（status='已提交'）；没有答案 PDF 或还没划定作业范围
-    的讲次一律跳过。演示模式、未配置 API Key、以及开启「仅闲时批阅」但正处
-    高峰时段的老师也会跳过，避免无谓的失败记录和费用。
-    """
-    db = get_db()
-    rows = db.execute(
-        "SELECT s.id,s.lecture_id,l.course_id,c.teacher_id "
-        "FROM submissions s JOIN lectures l ON l.id=s.lecture_id "
-        "JOIN courses c ON c.id=l.course_id JOIN users t ON t.id=c.teacher_id "
-        "WHERE s.status='已提交' AND t.role='teacher' AND t.active=1 "
-        "AND TRIM(COALESCE(l.answer_pdf,''))<>'' "
-        "AND TRIM(COALESCE(l.scope_candidates,''))<>'' "
-        "AND TRIM(COALESCE(l.scope_selected,''))<>'' "
-        "ORDER BY s.id").fetchall()
-
-    teacher_block = {}   # teacher_id -> 跳过原因，缓存后避免逐份作业重复查设置
-    queued = 0
-    for r in rows:
-        tid = r["teacher_id"]
-        if tid not in teacher_block:
-            if get_setting(tid, "ai_demo") == "1":
-                reason = "演示模式不调用 AI"
-            elif not (get_setting(tid, "ai_api_key") or "").strip():
-                reason = "未配置 AI API Key"
-            else:
-                reason = _offpeak_block_if_enabled(tid) or ""
-            teacher_block[tid] = reason
-        if teacher_block[tid]:
-            continue
-        _, err = _enqueue_grading(tid, r["id"], r["course_id"], r["lecture_id"])
-        if err:
-            log.info("自动批阅跳过 submission=%s：%s", r["id"], err)
-        else:
-            queued += 1
-            log.info("自动批阅入队 submission=%s lecture=%s teacher=%s",
-                     r["id"], r["lecture_id"], tid)
-    if queued:
-        log.info("自动批阅扫描完成：新入队 %s 份", queued)
-    return queued
-
-
-_auto_grade_lock_file = None
-_auto_grade_started = False
-
-
-def _auto_grade_loop():
-    interval = max(0.1, float(cfg.AUTO_GRADE_HOURS)) * 3600
-    while True:
-        try:
-            with app.app_context():
-                _auto_grade_scan()
-        except Exception:
-            log.exception("自动批阅扫描异常")
-        time.sleep(interval)
+    """扫描并自动入队待批阅作业，返回本次新入队数量。"""
+    return _grading_queue.scan()
 
 
 def start_auto_grade():
     """启动自动批阅线程；多进程部署时只让抢到文件锁的进程跑。"""
-    global _auto_grade_started, _auto_grade_lock_file
-    if _auto_grade_started or not cfg.AUTO_GRADE:
-        return
-    _auto_grade_started = True
-    try:
-        os.makedirs(cfg.DATA_DIR, exist_ok=True)
-        _auto_grade_lock_file = open(os.path.join(cfg.DATA_DIR, ".auto_grade.lock"), "w")
-        fcntl.flock(_auto_grade_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        _auto_grade_started = False   # 别的进程已经在扫描
-        if _auto_grade_lock_file:
-            _auto_grade_lock_file.close()
-            _auto_grade_lock_file = None
-        return
-    threading.Thread(target=_auto_grade_loop, daemon=True, name="auto-grade").start()
-    log.info("自动批阅已启用：每 %s 小时检查一次已提交且已上传答案的作业",
-             cfg.AUTO_GRADE_HOURS)
+    _grading_queue.start(enabled=cfg.AUTO_GRADE, interval_hours=cfg.AUTO_GRADE_HOURS,
+                         lock_dir=cfg.DATA_DIR)
 
 
-@app.route("/submission/<oid:sid>/review")
+@_routes.route("/submission/<oid:sid>/review")
 @role_required("teacher")
 def submission_review(sid):
     db = get_db()
@@ -3579,11 +3130,11 @@ def submission_review(sid):
     questions = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
                            (sid,)).fetchall()
     return render_template("review.html", sub=sub, hw=hw, course=course, questions=questions,
-                           grade_job=_latest_grade_job(db, sid),
+                           grade_job=latest_operation(db, sid),
                            ai_operations=_ai_operation_history(submission_id=sid, limit=5))
 
 
-@app.route("/submission/<oid:sid>/review/save", methods=["POST"])
+@_routes.route("/submission/<oid:sid>/review/save", methods=["POST"])
 @role_required("teacher")
 def submission_review_save(sid):
     """保存逐题的 OCR 文本、判定、评语，以及总评；作业不再单独赋分。"""
@@ -3627,7 +3178,7 @@ def submission_review_save(sid):
     return redirect(url_for("submission_review", sid=sid))
 
 
-@app.route("/question/<int:qid>/reviewed", methods=["POST"])
+@_routes.route("/question/<int:qid>/reviewed", methods=["POST"])
 @role_required("teacher")
 def question_reviewed(qid):
     """单题的「已审核」标记，随点随存，供折起的题目显示审核进度。"""
@@ -3647,7 +3198,7 @@ def question_reviewed(qid):
 
 
 # ---------- 教案 ----------
-@app.route("/course/<oid:cid>/plan/create", methods=["POST"])
+@_routes.route("/course/<oid:cid>/plan/create", methods=["POST"])
 @role_required("teacher")
 def plan_create(cid):
     own_course(cid)
@@ -3659,7 +3210,7 @@ def plan_create(cid):
     return redirect(url_for("course_detail", cid=cid))
 
 
-@app.route("/plan/<int:pid>/edit", methods=["GET", "POST"])
+@_routes.route("/plan/<int:pid>/edit", methods=["GET", "POST"])
 @role_required("teacher")
 def plan_edit(pid):
     db = get_db()
@@ -3676,7 +3227,7 @@ def plan_edit(pid):
     return render_template("plan_edit.html", plan=plan)
 
 
-@app.route("/plan/<int:pid>/delete", methods=["POST"])
+@_routes.route("/plan/<int:pid>/delete", methods=["POST"])
 @role_required("teacher")
 def plan_delete(pid):
     db = get_db()
@@ -3690,7 +3241,7 @@ def plan_delete(pid):
 
 
 # ---------- 老师：我的提示词 ----------
-@app.route("/prompts")
+@_routes.route("/prompts")
 @role_required("teacher")
 def prompts_page():
     db = get_db()
@@ -3701,7 +3252,7 @@ def prompts_page():
                            kind_label=PROMPT_KIND_LABEL)
 
 
-@app.route("/prompts/create", methods=["POST"])
+@_routes.route("/prompts/create", methods=["POST"])
 @role_required("teacher")
 def prompt_create():
     kind = request.form.get("kind", "")
@@ -3735,7 +3286,7 @@ def _editable_prompt(pid):
     return row
 
 
-@app.route("/prompts/<oid:pid>/save", methods=["POST"])
+@_routes.route("/prompts/<oid:pid>/save", methods=["POST"])
 @role_required("teacher")
 def prompt_save(pid):
     row = _editable_prompt(pid)
@@ -3754,7 +3305,7 @@ def prompt_save(pid):
     return redirect(url_for("prompts_page") + f"#prompt-{pid}")
 
 
-@app.route("/prompts/<oid:pid>/copy", methods=["POST"])
+@_routes.route("/prompts/<oid:pid>/copy", methods=["POST"])
 @role_required("teacher")
 def prompt_copy(pid):
     """复制成自己的副本，便于在副本上随意修改、测试。"""
@@ -3772,7 +3323,7 @@ def prompt_copy(pid):
     return redirect(url_for("prompts_page") + f"#prompt-{cur.lastrowid}")
 
 
-@app.route("/prompts/<oid:pid>/delete", methods=["POST"])
+@_routes.route("/prompts/<oid:pid>/delete", methods=["POST"])
 @role_required("teacher")
 def prompt_delete(pid):
     row = _editable_prompt(pid)
@@ -3788,7 +3339,7 @@ def prompt_delete(pid):
     return redirect(url_for("prompts_page"))
 
 
-@app.route("/course/<oid:cid>/prompts", methods=["POST"])
+@_routes.route("/course/<oid:cid>/prompts", methods=["POST"])
 @role_required("teacher")
 def course_prompts_save(cid):
     """为整门课程选定批改 / 报告提示词。"""
@@ -3809,285 +3360,7 @@ def course_prompts_save(cid):
     return redirect(url_for("course_detail", cid=cid))
 
 
-# ---------- 老师：AI 设置 ----------
-def _settings_context(extra=None):
-    conf = {k: get_setting(g.user["id"], k)
-            for k in ("ai_api_url", "ai_api_key", "ai_model", "ai_demo", "ai_offpeak_only")}
-    view = build_model_rows(g.user["id"], conf["ai_api_url"], get_db())
-    api_keys = _api_key_rows(g.user["id"])
-    ctx = {
-        "cfg": conf,
-        "env_keys": [k for k, v in ENV_AI_SETTINGS.items() if v],
-        "model_catalog": MODEL_CATALOG,
-        "model_view": view,
-        "model_rows": view["rows"],
-        "est_tokens_input": EST_TOKENS_INPUT,
-        "est_tokens_output": EST_TOKENS_OUTPUT,
-        "price_import": None,
-        "api_keys": api_keys,
-        "active_api_key": next((k for k in api_keys if k["is_active"]), None),
-        "api_configured": bool(conf["ai_api_key"]),
-        # 只有环境变量接管了 Key 才禁用页面管理；仅注入 AI_API_URL 时仍可保存多套配置
-        "api_env_managed": bool(ENV_AI_SETTINGS.get("ai_api_key")),
-    }
-    if extra:
-        ctx.update(extra)
-    return ctx
-
-
-@app.route("/settings", methods=["GET", "POST"])
-@role_required("teacher")
-def settings_page():
-    if request.method == "POST":
-        if request.form.get("demo_only"):
-            save_setting(g.user["id"], "ai_demo", "1" if request.form.get("ai_demo") else "")
-        else:
-            # 模型由每套 API 配置单独保存，这里只维护批阅开关
-            save_setting(g.user["id"], "ai_demo", "1" if request.form.get("ai_demo") else "")
-            save_setting(g.user["id"], "ai_offpeak_only", "1" if request.form.get("ai_offpeak_only") else "")
-        get_db().commit()
-        flash("已保存")
-        return redirect(url_for("settings_page"))
-    return render_template("settings.html", **_settings_context())
-
-
-@app.route("/settings/api-keys/add", methods=["POST"])
-@role_required("teacher")
-def settings_api_key_add():
-    if ENV_AI_SETTINGS.get("ai_api_key"):
-        flash("API Key 已由环境变量注入，页面上的 Key 管理不会生效")
-        return redirect(url_for("settings_page"))
-    name = (request.form.get("name") or "").strip()[:60]
-    base_url = (request.form.get("base_url") or "").strip().rstrip("/")
-    api_key = (request.form.get("api_key") or "").strip()
-    model = (request.form.get("model") or "").strip()[:120]
-    if not _valid_api_base_url(base_url):
-        flash("接口基地址需要以 http:// 或 https:// 开头")
-        return redirect(url_for("settings_page"))
-    if not api_key:
-        flash("请填写 API Key")
-        return redirect(url_for("settings_page"))
-    db = get_db()
-    cur = db.execute(
-        "INSERT INTO ai_api_keys(teacher_id,name,base_url,api_key,model) VALUES(?,?,?,?,?)",
-        (g.user["id"], name or "未命名 Key", base_url, api_key, model))
-    # 勾选「保存后立即使用」或当前还没有可用 Key 时，新 Key 直接生效
-    if request.form.get("use_now") or not any(k["is_active"] for k in _api_key_rows(g.user["id"])):
-        _activate_api_key(g.user["id"], cur.lastrowid)
-    db.commit()
-    flash("已保存 API Key")
-    return redirect(url_for("settings_page"))
-
-
-@app.route("/settings/api-keys/<int:key_id>/activate", methods=["POST"])
-@role_required("teacher")
-def settings_api_key_activate(key_id):
-    if ENV_AI_SETTINGS.get("ai_api_key"):
-        flash("API Key 已由环境变量注入，页面上的 Key 管理不会生效")
-        return redirect(url_for("settings_page"))
-    if _activate_api_key(g.user["id"], key_id):
-        get_db().commit()
-        flash("已切换当前使用的 AI API")
-    else:
-        flash("未找到该 API Key")
-    return redirect(url_for("settings_page"))
-
-
-@app.route("/settings/api-keys/<int:key_id>/model", methods=["POST"])
-@role_required("teacher")
-def settings_api_key_model(key_id):
-    """每套 API 配置单独保存模型，切换 Key 时互不影响。"""
-    if ENV_AI_SETTINGS.get("ai_api_key"):
-        flash("API Key 已由环境变量注入，模型请通过环境变量配置")
-        return redirect(url_for("settings_page"))
-    model = (request.form.get("model") or "").strip()[:120]
-    db = get_db()
-    row = db.execute("SELECT is_active FROM ai_api_keys WHERE id=? AND teacher_id=?",
-                     (key_id, g.user["id"])).fetchone()
-    if row is None:
-        flash("未找到该 API Key")
-        return redirect(url_for("settings_page"))
-    db.execute("UPDATE ai_api_keys SET model=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-               (model, key_id))
-    if row["is_active"] and not ENV_AI_SETTINGS.get("ai_model"):
-        save_setting(g.user["id"], "ai_model", model)
-    db.commit()
-    flash("已保存该配置的模型")
-    return redirect(url_for("settings_page"))
-
-
-@app.route("/settings/api-keys/<int:key_id>/delete", methods=["POST"])
-@role_required("teacher")
-def settings_api_key_delete(key_id):
-    if ENV_AI_SETTINGS.get("ai_api_key"):
-        flash("API Key 已由环境变量注入，页面上的 Key 管理不会生效")
-        return redirect(url_for("settings_page"))
-    db = get_db()
-    row = db.execute("SELECT is_active FROM ai_api_keys WHERE id=? AND teacher_id=?",
-                     (key_id, g.user["id"])).fetchone()
-    if row is None:
-        flash("未找到该 API Key")
-        return redirect(url_for("settings_page"))
-    db.execute("DELETE FROM ai_api_keys WHERE id=?", (key_id,))
-    if row["is_active"]:
-        # 删除当前 Key 后自动切换到最近保存的一条，避免批改突然无法调用
-        nxt = db.execute("SELECT id FROM ai_api_keys WHERE teacher_id=? "
-                         "ORDER BY id DESC LIMIT 1", (g.user["id"],)).fetchone()
-        db.commit()
-        if nxt:
-            _activate_api_key(g.user["id"], nxt["id"])
-        else:
-            save_setting(g.user["id"], "ai_api_url", "")
-            save_setting(g.user["id"], "ai_api_key", "")
-            save_setting(g.user["id"], "ai_model", "")
-    db.commit()
-    flash("已删除该 API Key")
-    return redirect(url_for("settings_page"))
-
-
-@app.route("/settings/models/sync", methods=["POST"])
-@role_required("teacher")
-def settings_models_sync():
-    """按当前配置立即拉一次 GET /v1/models，刷新可用模型。"""
-    count, err = sync_models_for_teacher(g.user["id"], force=True)
-    if err:
-        flash(f"模型同步失败：{err}")
-    elif count == 0:
-        flash("接口返回的模型列表为空，已保留上次结果")
-    else:
-        flash(f"已同步 {count} 个可用模型")
-    return redirect(url_for("settings_page"))
-
-
-PRICE_IMAGE_PROMPT = """你在帮一个作业批改系统维护大模型价目表。请读取这张价目截图中清晰可读的模型价格。
-
-只输出一个 JSON 对象，不要解释：
-{"rows":[{"model":"模型 ID","price_in":输入单价,"price_out":输出单价}],"unclear":["看不清或信息不全的模型"]}
-
-规则：
-1. model 必须是图中出现的模型 ID（如 deepseek-v4.1-flash），不要翻译、改写，也不要用你记忆里的模型替代。
-2. price_in / price_out 统一换算成「元/百万 token」的数字，不要带单位；若图中单位是元/千 token，乘以 1000 后再填。
-3. 只取输入价和输出价；图中没有明确标出的价格不要猜，把该模型放进 unclear。
-4. 行被截断、数字模糊、只有单个价格、或是套餐/积分价格而非 token 单价的，全部放进 unclear。
-5. 宁可少识别，也不要编造图中没有的模型或价格。"""
-
-
-def _image_mime(raw):
-    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if raw.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
-        return "image/webp"
-    return ""
-
-
-def _valid_model_name(name):
-    return bool(re.fullmatch(r"[A-Za-z0-9._/\-:]{1,120}", name or ""))
-
-
-@app.route("/settings/prices/extract", methods=["POST"])
-@role_required("teacher")
-def settings_prices_extract():
-    """上传价目截图，调用当前视觉模型抽出模型单价，先给用户确认再入库。"""
-    file = request.files.get("price_image")
-    if file is None or not file.filename:
-        flash("请先选择一张价目截图")
-        return redirect(url_for("settings_page"))
-    raw = file.read()
-    if len(raw) > 8 * 1024 * 1024:
-        flash("截图超过 8MB，请压缩后再上传")
-        return redirect(url_for("settings_page"))
-    mime = _image_mime(raw)
-    if not mime:
-        flash("仅支持 PNG / JPG / WebP 截图")
-        return redirect(url_for("settings_page"))
-
-    conf = llm.resolve_config(g.user["id"])
-    if get_setting(g.user["id"], "ai_demo") == "1":
-        flash("演示模式无法识别截图，请先切换到真实接口")
-        return redirect(url_for("settings_page"))
-    if not (conf["api_url"] and conf["api_key"] and conf["model"]):
-        flash("请先配置并保存真实接口的基地址、API Key 和模型")
-        return redirect(url_for("settings_page"))
-
-    data_url = f"data:{mime};base64," + base64.b64encode(raw).decode()
-    operation = _start_ai_operation(g.user["id"], "price_import", conf["model"])
-    reply, finish, err = llm.chat(
-        conf["api_url"], conf["api_key"], conf["model"],
-        [{"type": "text", "text": PRICE_IMAGE_PROMPT},
-         {"type": "image_url", "image_url": {"url": data_url}}],
-        max_tokens=2000, timeout=120, retries=2, usage_hook=operation["usage_hook"])
-    if err:
-        _finish_ai_operation(operation, "failed", err)
-        flash(f"截图识别失败：{err}")
-        return redirect(url_for("settings_page"))
-    payload = llm.extract_json(reply)
-    if not isinstance(payload, dict):
-        _finish_ai_operation(operation, "failed", "模型未返回可解析的 JSON")
-        flash("模型没有返回可解析的价目 JSON，请换一张更清晰的截图或稍后重试")
-        return redirect(url_for("settings_page"))
-
-    rows, seen = [], set()
-    for item in payload.get("rows") or []:
-        if not isinstance(item, dict):
-            continue
-        model = str(item.get("model") or "").strip()
-        try:
-            price_in, price_out = float(item.get("price_in")), float(item.get("price_out"))
-        except (TypeError, ValueError):
-            continue
-        if not _valid_model_name(model) or model in seen:
-            continue
-        if not (0 <= price_in <= 100000 and 0 <= price_out <= 100000):
-            continue
-        seen.add(model)
-        rows.append({"model": model, "price_in": round(price_in, 4), "price_out": round(price_out, 4)})
-    unclear = [str(x)[:60] for x in (payload.get("unclear") or [])][:20]
-    _finish_ai_operation(operation, "success")
-
-    if not rows:
-        flash("没有识别到清晰的价格行，请确认截图包含模型名和输入/输出单价")
-        return redirect(url_for("settings_page"))
-    return render_template("settings.html", **_settings_context({
-        "price_import": {"rows": rows, "unclear": unclear,
-                         "filename": secure_filename(file.filename) or "价目截图"},
-    }))
-
-
-@app.route("/settings/prices/save", methods=["POST"])
-@role_required("teacher")
-def settings_prices_save():
-    """保存用户在预览里确认过的价目；按模型 ID 全局生效。"""
-    models = request.form.getlist("model")
-    pins = request.form.getlist("price_in")
-    pouts = request.form.getlist("price_out")
-    db = get_db()
-    now = _now_text()
-    saved = 0
-    for model, pin, pout in zip(models, pins, pouts):
-        model = model.strip()
-        if not _valid_model_name(model):
-            continue
-        try:
-            price_in, price_out = float(pin), float(pout)
-        except (TypeError, ValueError):
-            continue
-        if not (0 <= price_in <= 100000 and 0 <= price_out <= 100000):
-            continue
-        db.execute(
-            "INSERT INTO model_prices(model,price_in,price_out,unit,source,updated_at) "
-            "VALUES(?,?,?,?,?,?) ON CONFLICT(model) DO UPDATE SET "
-            "price_in=excluded.price_in, price_out=excluded.price_out, "
-            "source=excluded.source, updated_at=excluded.updated_at",
-            (model, price_in, price_out, "元/百万 token", "截图识别", now))
-        saved += 1
-    db.commit()
-    flash(f"已更新 {saved} 个模型的价格（对所有老师生效）" if saved else "没有可保存的价格行")
-    return redirect(url_for("settings_page"))
-
-
-@app.route("/assistant/chat", methods=["POST"])
+@_routes.route("/assistant/chat", methods=["POST"])
 @role_required("teacher")
 def assistant_chat():
     """页面右下角教师助手：带工具调用的多轮对话，只读查询本老师的数据。"""
@@ -4134,31 +3407,6 @@ def _probe_ai_config(api_url, api_key, model):
         return f"连接失败：{e}"
 
 
-@app.route("/settings/test", methods=["POST"])
-@role_required("teacher")
-def settings_test():
-    """发一个最小请求，验证当前生效的接口地址、Key 与模型是否可用。"""
-    flash(_probe_ai_config(get_setting(g.user["id"], "ai_api_url"),
-                           get_setting(g.user["id"], "ai_api_key"),
-                           get_setting(g.user["id"], "ai_model")))
-    return redirect(url_for("settings_page"))
-
-
-@app.route("/settings/api-keys/<int:key_id>/test", methods=["POST"])
-@role_required("teacher")
-def settings_api_key_test(key_id):
-    """单独测试某套配置，不受当前选中项影响，方便逐套完成对接验证。"""
-    row = get_db().execute(
-        "SELECT name,base_url,api_key,model FROM ai_api_keys WHERE id=? AND teacher_id=?",
-        (key_id, g.user["id"])).fetchone()
-    if row is None:
-        flash("未找到该 API Key")
-        return redirect(url_for("settings_page"))
-    model = row["model"] or get_setting(g.user["id"], "ai_model")
-    flash(f"「{row['name']}」" + _probe_ai_config(row["base_url"], row["api_key"], model))
-    return redirect(url_for("settings_page"))
-
-
 # ---------- 学生端 ----------
 def student_lecture(hid):
     db = get_db()
@@ -4174,7 +3422,7 @@ def student_lecture(hid):
     return hw
 
 
-@app.route("/student")
+@_routes.route("/student")
 @role_required("student")
 def student_home():
     db = get_db()
@@ -4219,7 +3467,7 @@ def student_home():
                            exams=exams, acc_by=acc_by)
 
 
-@app.route("/student/lecture/<oid:hid>", methods=["GET", "POST"])
+@_routes.route("/student/lecture/<oid:hid>", methods=["GET", "POST"])
 @role_required("student")
 def student_lecture_page(hid):
     hw = student_lecture(hid)
@@ -4619,7 +3867,7 @@ def own_submission(sid):
     return sub, hw, own_course(hw["course_id"])
 
 
-@app.route("/submission/<oid:sid>/report")
+@_routes.route("/submission/<oid:sid>/report")
 @role_required("teacher")
 def submission_report(sid):
     sub, hw, course = own_submission(sid)
@@ -4632,7 +3880,7 @@ def submission_report(sid):
                            ai_operations=_ai_operation_history(submission_id=sid, limit=5))
 
 
-@app.route("/submission/<oid:sid>/report/build", methods=["POST"])
+@_routes.route("/submission/<oid:sid>/report/build", methods=["POST"])
 @role_required("teacher")
 def submission_report_build(sid):
     sub, hw, _ = own_submission(sid)
@@ -4641,7 +3889,7 @@ def submission_report_build(sid):
     return redirect(url_for("submission_report", sid=sid))
 
 
-@app.route("/submission/<oid:sid>/report/publish", methods=["POST"])
+@_routes.route("/submission/<oid:sid>/report/publish", methods=["POST"])
 @role_required("teacher")
 def submission_report_publish(sid):
     sub, hw, _ = own_submission(sid)
@@ -4655,7 +3903,7 @@ def submission_report_publish(sid):
     return redirect(url_for("submission_report", sid=sid))
 
 
-@app.route("/submission/<oid:sid>/report/comment", methods=["POST"])
+@_routes.route("/submission/<oid:sid>/report/comment", methods=["POST"])
 @role_required("teacher")
 def submission_report_comment(sid):
     """全部题目复核完成后，用 AI 重写一份总评，回填到逐题核对页的文本框继续人工修改。"""
@@ -4699,7 +3947,7 @@ def submission_report_comment(sid):
             "usage": usage_text}
 
 
-@app.route("/submission/<oid:sid>/report/save", methods=["POST"])
+@_routes.route("/submission/<oid:sid>/report/save", methods=["POST"])
 @role_required("teacher")
 def submission_report_save(sid):
     """保存老师在报告页对 Markdown 的手工修改。"""
@@ -4712,7 +3960,7 @@ def submission_report_save(sid):
     return redirect(url_for("submission_report", sid=sid))
 
 
-@app.route("/submission/<oid:sid>/report/download")
+@_routes.route("/submission/<oid:sid>/report/download")
 @role_required("teacher")
 def submission_report_download(sid):
     sub, hw, _ = own_submission(sid)
@@ -4724,7 +3972,7 @@ def submission_report_download(sid):
                      mimetype="text/markdown", as_attachment=True, download_name=name)
 
 
-@app.route("/student/submission/<oid:sid>/report")
+@_routes.route("/student/submission/<oid:sid>/report")
 @role_required("student")
 def student_report(sid):
     db = get_db()
@@ -4773,7 +4021,7 @@ def _consistency_issues():
     return issues
 
 
-@app.route("/admin/consistency")
+@_routes.route("/admin/consistency")
 @role_required("admin")
 def consistency_page():
     stats = {t: get_db().execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
@@ -4793,7 +4041,7 @@ def consistency_page():
                            auto_backup=cfg.AUTO_BACKUP, backup_keep=cfg.BACKUP_KEEP)
 
 
-@app.route("/admin/consistency/fix", methods=["POST"])
+@_routes.route("/admin/consistency/fix", methods=["POST"])
 @role_required("admin")
 def consistency_fix():
     db = get_db()
@@ -4897,7 +4145,7 @@ def start_auto_backup():
     log.info("自动备份已启用：每 30 分钟检查一次，保留最近 %s 份", cfg.BACKUP_KEEP)
 
 
-@app.route("/admin/export")
+@_routes.route("/admin/export")
 @role_required("admin")
 def admin_export():
     """整体导出数据库快照 + 全部附件 + manifest，用于备份或迁移到新机器。"""
@@ -4909,7 +4157,7 @@ def admin_export():
                      download_name=datetime.now().strftime("gradelogy_%Y%m%d_%H%M%S.zip"))
 
 
-@app.route("/admin/backup/now", methods=["POST"])
+@_routes.route("/admin/backup/now", methods=["POST"])
 @role_required("admin")
 def admin_backup_now():
     """立即生成一份备份，存到数据目录的 backups/ 下。"""
@@ -4926,7 +4174,7 @@ def admin_backup_now():
     return redirect(url_for("consistency_page"))
 
 
-@app.route("/admin/backup/<name>")
+@_routes.route("/admin/backup/<name>")
 @role_required("admin")
 def admin_backup_download(name):
     if not BACKUP_RE.fullmatch(name or ""):
@@ -5013,7 +4261,7 @@ def _apply_restore(extract_root):
     return n_users, n_subs, bdir
 
 
-@app.route("/admin/restore", methods=["POST"])
+@_routes.route("/admin/restore", methods=["POST"])
 @role_required("admin")
 def admin_restore():
     """从导出的 zip 恢复：先校验包结构与路径安全，备份当前数据，再替换附件与数据库。"""
@@ -5113,7 +4361,7 @@ def _backup_summary(extract_root):
             "files": n_files, "bytes": total, "manifest": manifest}
 
 
-@app.route("/setup")
+@_routes.route("/setup")
 @role_required("admin")
 def setup_import():
     if not _is_pristine():
@@ -5122,7 +4370,7 @@ def setup_import():
     return render_template("setup_import.html", step="upload")
 
 
-@app.route("/setup/upload", methods=["POST"])
+@_routes.route("/setup/upload", methods=["POST"])
 @role_required("admin")
 def setup_upload():
     if not _is_pristine():
@@ -5157,7 +4405,7 @@ def setup_upload():
     return redirect(url_for("setup_preview"))
 
 
-@app.route("/setup/preview")
+@_routes.route("/setup/preview")
 @role_required("admin")
 def setup_preview():
     stash = session.get("setup_import")
@@ -5171,7 +4419,7 @@ def setup_preview():
     return render_template("setup_import.html", step="preview", summary=stash["summary"])
 
 
-@app.route("/setup/confirm", methods=["POST"])
+@_routes.route("/setup/confirm", methods=["POST"])
 @role_required("admin")
 def setup_confirm():
     stash = session.get("setup_import")
@@ -5204,7 +4452,7 @@ def setup_confirm():
     return redirect(url_for("login"))
 
 
-@app.route("/setup/cancel", methods=["POST"])
+@_routes.route("/setup/cancel", methods=["POST"])
 @role_required("admin")
 def setup_cancel():
     _purge_setup_stash()
@@ -5235,7 +4483,7 @@ def _student_files(uid):
     return paths
 
 
-@app.route("/files/<path:filename>")
+@_routes.route("/files/<path:filename>")
 @login_required
 def uploaded_file(filename):
     if g.user["role"] == "student":
@@ -5258,7 +4506,7 @@ def uploaded_file(filename):
     return send_from_directory(UPLOAD_DIR, filename)
 
 
-@app.route("/healthz")
+@_routes.route("/healthz")
 def healthz():
     """容器健康检查：不要求登录，只报告数据库与存储是否可用。"""
     checks, ok = {}, True
@@ -5287,7 +4535,73 @@ def _lan_ip():
         s.close()
 
 
+def _ai_route_deps():
+    """交给 ai_routes 的依赖。
+
+    可调用项统一包成惰性代理，调用时才从本模块全局取值，
+    这样测试里 patch app.get_setting / app._probe_ai_config 仍然作用于这些路由。
+    """
+    def lazy(name):
+        return lambda *args, **kwargs: globals()[name](*args, **kwargs)
+
+    return {
+        "role_required": role_required,
+        "get_db": lazy("get_db"),
+        "get_setting": lazy("get_setting"),
+        "save_setting": lazy("save_setting"),
+        "now_text": lazy("_now_text"),
+        "api_key_rows": lazy("_api_key_rows"),
+        "activate_api_key": lazy("_activate_api_key"),
+        "build_model_rows": lazy("build_model_rows"),
+        "sync_models_for_teacher": lazy("sync_models_for_teacher"),
+        "start_ai_operation": lazy("_start_ai_operation"),
+        "finish_ai_operation": lazy("_finish_ai_operation"),
+        "probe_ai_config": lazy("_probe_ai_config"),
+        "ai_dashboard_data": lazy("_ai_dashboard_data"),
+        "model_catalog": MODEL_CATALOG,
+        "est_tokens_input": EST_TOKENS_INPUT,
+        "est_tokens_output": EST_TOKENS_OUTPUT,
+        "env_ai_settings": ENV_AI_SETTINGS,
+        "ai_operation_label": AI_OPERATION_LABEL,
+        "ai_status_label": AI_STATUS_LABEL,
+    }
+
+
+def create_app():
+    """应用工厂：集中创建 Flask 实例，并挂载路由、请求钩子与模板扩展。"""
+    global _id_signer
+    app = Flask(__name__)
+    app.config["SECRET_KEY"] = cfg.SECRET_KEY or load_secret_key()
+    app.config["MAX_CONTENT_LENGTH"] = max(cfg.MAX_UPLOAD_MB, cfg.MAX_RESTORE_MB) * 1024 * 1024
+    # Cookie 加固：禁止 JS 读取；SameSite 阻断跨站携带；HTTPS 部署时用 COOKIE_SECURE=1 打开 Secure
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+    app.config["SESSION_COOKIE_SECURE"] = cfg.COOKIE_SECURE
+    # 会话空闲 8 小时过期：每次请求自动续期，长时间不操作需重新登录
+    app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=8)
+    app.config["SESSION_REFRESH_EACH_REQUEST"] = True
+    app.teardown_appcontext(close_db)
+
+    _id_signer = URLSafeSerializer(app.config["SECRET_KEY"], salt="gradelogy-url-id")
+    app.url_map.converters["oid"] = SignedIdConverter
+
+    ai_routes.register(_routes, _ai_route_deps())
+    _routes.apply(app)
+
+    app.jinja_env.filters["fromjson"] = _json_or_none
+    app.jinja_env.filters["file_list"] = file_list
+    app.jinja_env.filters["markdown_safe"] = _md_safe
+    app.jinja_env.globals["accuracy"] = accuracy_text
+    app.jinja_env.globals["csrf_token"] = csrf_token
+    app.jinja_env.globals["ai_operation_label"] = AI_OPERATION_LABEL.get
+    app.jinja_env.globals["ai_status_label"] = AI_STATUS_LABEL.get
+    app.jinja_env.globals["ai_usage_text"] = _ai_usage_text
+    app.jinja_env.globals["compact_number"] = _compact_number
+    return app
+
+
 # 模块导入时即完成建表与迁移，gunicorn 直接加载 app:app 也能拿到完整 schema
+app = create_app()
 init_db()
 start_auto_backup()
 start_model_sync()
