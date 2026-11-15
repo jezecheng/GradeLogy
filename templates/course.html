@@ -1,6 +1,14 @@
 {% extends "base.html" %}
 {% block title %}{{ course.name }}{% endblock %}
 {% block content %}
+<style>
+.kg-assign-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px 14px; margin: 10px 0; }
+.kg-assign-item { display: flex; gap: 8px; align-items: flex-start;
+  border: 1px solid #eef0f3; border-radius: 10px; padding: 8px 10px; }
+.kg-assign-item input { margin-top: 3px; }
+.kg-assign-item strong { font-weight: 600; }
+</style>
 <p><a href="{{ url_for('courses') }}">← 返回课程列表</a></p>
 <div class="card-head">
   <h1>{{ course.name }}</h1>
@@ -128,6 +136,37 @@
     </label>
     <div><button type="submit" class="small">保存提示词配置</button></div>
   </form>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>关联知识图谱</h2>
+    <a class="btn-link" href="{{ url_for('knowledge_graphs') }}">管理知识图谱 →</a>
+  </div>
+  <p class="muted small">为课程关联一个或多个学科知识图谱。关联后可在后续的知识点分析与根因诊断中作为概念和前置关系的参照；不关联不影响批改与报告。</p>
+  {% if kg_options %}
+  <form method="post" action="{{ url_for('course_knowledge_graphs_save', cid=course.id) }}">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <div class="kg-assign-list">
+      {% for kg in kg_options %}
+      <label class="kg-assign-item">
+        <input type="checkbox" name="graph_ids" value="{{ kg.id }}"
+               {% if kg.id in assigned_kg_ids %}checked{% endif %}>
+        <span>
+          <strong>{{ kg.name }}</strong>
+          <span class="subject-badge">{{ kg.subject }}</span>
+          <span class="muted small">
+            {% if kg.grade_level %}{{ kg.grade_level }} · {% endif %}{{ kg.n_nodes }} 个概念
+          </span>
+        </span>
+      </label>
+      {% endfor %}
+    </div>
+    <button type="submit" class="small">保存关联</button>
+  </form>
+  {% else %}
+  <p class="muted small">还没有知识图谱，先到 <a href="{{ url_for('knowledge_graphs') }}">知识图谱</a> 上传资料创建。</p>
+  {% endif %}
 </div>
 
 <div class="card">

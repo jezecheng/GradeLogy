@@ -227,6 +227,13 @@ CREATE TABLE IF NOT EXISTS knowledge_graphs(
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS idx_knowledge_graphs_subject ON knowledge_graphs(subject);
+-- 课程与图谱多对多关联：一个课程可参考多个图谱，一张图谱也可被多门课程使用
+CREATE TABLE IF NOT EXISTS course_knowledge_graphs(
+  course_id INTEGER NOT NULL REFERENCES courses(id),
+  graph_id INTEGER NOT NULL REFERENCES knowledge_graphs(id),
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(course_id, graph_id));
+CREATE INDEX IF NOT EXISTS idx_course_kg_graph ON course_knowledge_graphs(graph_id);
 CREATE TABLE IF NOT EXISTS kg_materials(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   graph_id INTEGER NOT NULL REFERENCES knowledge_graphs(id),

@@ -1026,6 +1026,7 @@ def admin_user_delete(uid):
         db.execute("DELETE FROM exams WHERE course_id=?", (c["id"],))
         db.execute("DELETE FROM enrollments WHERE course_id=?", (c["id"],))
         db.execute("DELETE FROM lesson_plans WHERE course_id=?", (c["id"],))
+        db.execute("DELETE FROM course_knowledge_graphs WHERE course_id=?", (c["id"],))
         db.execute("DELETE FROM courses WHERE id=?", (c["id"],))
     db.execute("DELETE FROM users WHERE id=?", (uid,))
     db.commit()
@@ -1208,10 +1209,17 @@ def course_detail(cid):
         WHERE u.role='teacher' AND u.active=1 AND u.id NOT IN
               (SELECT teacher_id FROM course_teachers WHERE course_id=?)
         ORDER BY u.display_name""", (cid,)).fetchall()
+    kg_options = db.execute("""
+        SELECT g.id, g.subject, g.name, g.grade_level,
+          (SELECT COUNT(*) FROM kg_nodes n WHERE n.graph_id=g.id) AS n_nodes
+        FROM knowledge_graphs g ORDER BY g.subject, g.name COLLATE NOCASE""").fetchall()
+    assigned_kg_ids = {r["graph_id"] for r in db.execute(
+        "SELECT graph_id FROM course_knowledge_graphs WHERE course_id=?", (cid,))}
     return render_template("course.html", course=course, students=students,
                            candidates=candidates, lectures=lectures, exams=exams,
                            plans=plans, teachers=teachers,
                            teacher_candidates=teacher_candidates,
+                           kg_options=kg_options, assigned_kg_ids=assigned_kg_ids,
                            grade_prompts=_prompt_options(cid, "grade"),
                            report_prompts=_prompt_options(cid, "report"),
                            tag_horizontal_prompts=_prompt_options(cid, "tag_horizontal"),
@@ -1316,7 +1324,8 @@ def course_delete(cid):
     db = get_db()
     db.execute("DELETE FROM submissions WHERE lecture_id IN "
                "(SELECT id FROM lectures WHERE course_id=?)", (cid,))
-    for t in ("lectures", "enrollments", "lesson_plans", "course_teachers"):
+    for t in ("lectures", "enrollments", "lesson_plans", "course_teachers",
+              "course_knowledge_graphs"):
         db.execute(f"DELETE FROM {t} WHERE course_id=?", (cid,))
     db.execute("DELETE FROM exam_scores WHERE exam_id IN (SELECT id FROM exams WHERE course_id=?)",
                (cid,))
@@ -2621,6 +2630,29 @@ def course_prompts_save(cid):
     return redirect(url_for("course_detail", cid=cid))
 
 
+@_routes.route("/course/<oid:cid>/knowledge-graphs", methods=["POST"])
+@role_required("teacher", "admin")
+def course_knowledge_graphs_save(cid):
+    """为课程关联一个或多个学科知识图谱；提交空选择即解除全部关联。"""
+    own_course(cid)
+    db = get_db()
+    valid = {r["id"] for r in db.execute("SELECT id FROM knowledge_graphs")}
+    chosen = set()
+    for raw in request.form.getlist("graph_ids"):
+        try:
+            gid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if gid in valid:
+            chosen.add(gid)
+    db.execute("DELETE FROM course_knowledge_graphs WHERE course_id=?", (cid,))
+    db.executemany("INSERT INTO course_knowledge_graphs(course_id, graph_id) VALUES(?,?)",
+                   [(cid, gid) for gid in sorted(chosen)])
+    db.commit()
+    flash(f"已关联 {len(chosen)} 张知识图谱" if chosen else "已解除全部知识图谱关联")
+    return redirect(url_for("course_detail", cid=cid))
+
+
 # ---------- 老师：学科知识图谱 ----------
 def _kg_graph(gid, edit=False):
     """图谱按学科共享：所有老师可查看，仅创建者与管理员可修改。"""
@@ -2905,6 +2937,7 @@ def knowledge_graph_delete(gid):
     db.execute("DELETE FROM kg_edges WHERE graph_id=?", (gid,))
     db.execute("DELETE FROM kg_nodes WHERE graph_id=?", (gid,))
     db.execute("DELETE FROM kg_materials WHERE graph_id=?", (gid,))
+    db.execute("DELETE FROM course_knowledge_graphs WHERE graph_id=?", (gid,))
     db.execute("DELETE FROM knowledge_graphs WHERE id=?", (gid,))
     db.commit()
     shutil.rmtree(os.path.join(UPLOAD_DIR, "kg", str(gid)), ignore_errors=True)
@@ -3420,7 +3453,7 @@ def _build_backup_zip(dest):
         counts = {t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
                   for t in ("users", "courses", "lectures", "exams", "submissions",
                             "questions", "knowledge_graphs", "kg_materials",
-                            "kg_nodes", "kg_edges")}
+                            "kg_nodes", "kg_edges", "course_knowledge_graphs")}
     finally:
         con.close()
     manifest = {"app": "GradeLogy", "version": cfg.APP_VERSION,

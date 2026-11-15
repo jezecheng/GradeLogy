@@ -5,6 +5,8 @@ import sqlite3
 import unittest
 from unittest import mock
 
+from werkzeug.datastructures import MultiDict
+
 try:
     import _env_bootstrap  # noqa: F401  确保 DATA_DIR 在 app 导入前就绪
 except ImportError:
@@ -13,7 +15,8 @@ except ImportError:
 import app as app_module  # noqa: E402
 
 _TABLES = ("tag_analyses", "question_tags", "questions", "submissions", "lectures",
-           "exams", "exam_scores", "enrollments", "course_teachers", "courses",
+           "exams", "exam_scores", "enrollments", "course_teachers",
+           "course_knowledge_graphs", "knowledge_graphs", "courses",
            "users", "ai_usage_events", "ai_operations")
 
 
@@ -338,6 +341,61 @@ class TagRouteTest(unittest.TestCase):
             "SELECT tag_vertical_prompt_id FROM courses WHERE id=10").fetchone()[0]
         con.close()
         self.assertEqual(stored, 0)
+
+    def _assign_graphs(self, graph_ids, client=None, cid=10):
+        payload = MultiDict([("_csrf", "test-token")])
+        for gid in graph_ids:
+            payload.add("graph_ids", str(gid))
+        return (client or self.client).post(
+            self.url("course_knowledge_graphs_save", cid=cid), data=payload)
+
+    def _seed_graphs(self):
+        con = self._db()
+        con.executemany(
+            "INSERT INTO knowledge_graphs(id,subject,name,created_by) VALUES(?,?,?,2)",
+            [(31, "化学", "高中化学主图谱"), (32, "化学", "化学实验图谱")])
+        con.commit()
+        con.close()
+
+    def test_course_can_assign_multiple_graphs(self):
+        self._seed_graphs()
+        resp = self._assign_graphs([31, 32])
+        self.assertEqual(resp.status_code, 302)
+        con = self._db()
+        rows = {r["graph_id"] for r in con.execute(
+            "SELECT graph_id FROM course_knowledge_graphs WHERE course_id=10")}
+        con.close()
+        self.assertEqual(rows, {31, 32})
+        html = self.client.get(self.url("course_detail", cid=10)).get_data(as_text=True)
+        self.assertIn("高中化学主图谱", html)
+        self.assertIn("保存关联", html)
+
+        self._assign_graphs([32])
+        con = self._db()
+        rows = {r["graph_id"] for r in con.execute(
+            "SELECT graph_id FROM course_knowledge_graphs WHERE course_id=10")}
+        con.close()
+        self.assertEqual(rows, {32})
+
+    def test_course_graph_assignment_ignores_unknown_ids(self):
+        self._seed_graphs()
+        self._assign_graphs([9999, "abc", 31])
+        con = self._db()
+        rows = {r["graph_id"] for r in con.execute(
+            "SELECT graph_id FROM course_knowledge_graphs WHERE course_id=10")}
+        con.close()
+        self.assertEqual(rows, {31})
+
+    def test_other_teacher_cannot_assign_graphs(self):
+        self._seed_graphs()
+        other = self.login(3)
+        resp = self._assign_graphs([31], client=other)
+        self.assertEqual(resp.status_code, 403)
+        con = self._db()
+        count = con.execute(
+            "SELECT COUNT(*) FROM course_knowledge_graphs").fetchone()[0]
+        con.close()
+        self.assertEqual(count, 0)
 
 
 if __name__ == "__main__":
