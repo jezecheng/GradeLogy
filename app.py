@@ -2628,6 +2628,10 @@ def _kg_graph(gid, edit=False):
     return row
 
 
+# 多份资料集中上传时串行建图，避免同时打满模型限流
+_kg_build_lock = threading.Lock()
+
+
 def _kg_start_build(graph_id, material_id, teacher_id):
     """后台构建图谱：请求返回后继续跑，资料状态可刷新查看。"""
     threading.Thread(target=_kg_build_worker,
@@ -2635,35 +2639,36 @@ def _kg_start_build(graph_id, material_id, teacher_id):
 
 
 def _kg_build_worker(graph_id, material_id, teacher_id):
-    with app.app_context():
-        db = get_db()
-        try:
-            api_url, api_key, model, err = _ai_endpoint(teacher_id)
-            if err:
-                db.execute("UPDATE kg_materials SET status=?, error=? WHERE id=?",
-                           (kg_utils.STATUS_FAILED, err, material_id))
-                db.commit()
-                return
-            operation = _start_ai_operation(teacher_id, "kg_build", model)
+    with _kg_build_lock:
+        with app.app_context():
+            db = get_db()
             try:
-                result = kg_utils.build_material(
-                    db, material_id, api_url, api_key, model,
-                    usage_hook=operation["usage_hook"])
-            except Exception as e:  # noqa: BLE001 后台任务失败写入资料状态
-                _finish_ai_operation(operation, "failed", str(e))
-                db.execute("UPDATE kg_materials SET status=?, error=? WHERE id=?",
-                           (kg_utils.STATUS_FAILED, str(e)[:500], material_id))
-                db.commit()
-                log.exception("知识图谱构建失败 material=%s", material_id)
-                return
-            if result:
-                _finish_ai_operation(operation, "success", "")
-            else:
-                row = db.execute("SELECT error FROM kg_materials WHERE id=?",
-                                 (material_id,)).fetchone()
-                _finish_ai_operation(operation, "failed", row["error"] if row else "")
-        finally:
-            close_db()
+                api_url, api_key, model, err = _ai_endpoint(teacher_id)
+                if err:
+                    db.execute("UPDATE kg_materials SET status=?, error=? WHERE id=?",
+                               (kg_utils.STATUS_FAILED, err, material_id))
+                    db.commit()
+                    return
+                operation = _start_ai_operation(teacher_id, "kg_build", model)
+                try:
+                    result = kg_utils.build_material(
+                        db, material_id, api_url, api_key, model,
+                        usage_hook=operation["usage_hook"])
+                except Exception as e:  # noqa: BLE001 后台任务失败写入资料状态
+                    _finish_ai_operation(operation, "failed", str(e))
+                    db.execute("UPDATE kg_materials SET status=?, error=? WHERE id=?",
+                               (kg_utils.STATUS_FAILED, str(e)[:500], material_id))
+                    db.commit()
+                    log.exception("知识图谱构建失败 material=%s", material_id)
+                    return
+                if result:
+                    _finish_ai_operation(operation, "success", "")
+                else:
+                    row = db.execute("SELECT error FROM kg_materials WHERE id=?",
+                                     (material_id,)).fetchone()
+                    _finish_ai_operation(operation, "failed", row["error"] if row else "")
+            finally:
+                close_db()
 
 
 @_routes.route("/knowledge-graphs")
@@ -2708,9 +2713,20 @@ def knowledge_graph_detail(gid):
                            "ORDER BY id DESC", (gid,)).fetchall()
     building = any(m["status"] in (kg_utils.STATUS_PENDING, kg_utils.STATUS_BUILDING)
                    for m in materials)
+    status_counts = {"done": 0, "building": 0, "pending": 0, "failed": 0}
+    for item in materials:
+        if item["status"] == kg_utils.STATUS_DONE:
+            status_counts["done"] += 1
+        elif item["status"] == kg_utils.STATUS_BUILDING:
+            status_counts["building"] += 1
+        elif item["status"] == kg_utils.STATUS_FAILED:
+            status_counts["failed"] += 1
+        else:
+            status_counts["pending"] += 1
     return render_template(
         "knowledge_graph.html", graph=graph, materials=materials,
         counts=kg_utils.graph_counts(db, gid),
+        status_counts=status_counts,
         nodes=kg_utils.list_nodes(db, gid), edges=kg_utils.list_edges(db, gid),
         building=building, relation_label=kg_utils.RELATION_LABEL,
         can_edit=g.user["role"] == "admin" or graph["created_by"] == g.user["id"])
@@ -2778,7 +2794,9 @@ def knowledge_graph_upload(gid):
             continue
         _kg_start_build(gid, material["id"], g.user["id"])
         queued += 1
-        flash(f"「{filename}」已解析 {chunks} 个文本块，正在后台构建知识图谱")
+        flash(f"「{filename}」已解析 {chunks} 个文本块，已加入建图队列")
+    if queued > 1:
+        flash(f"共 {queued} 份资料已排队，将逐个建图，可在下方查看每份状态")
     if queued:
         db.execute("UPDATE knowledge_graphs SET updated_at=CURRENT_TIMESTAMP WHERE id=?",
                    (gid,))

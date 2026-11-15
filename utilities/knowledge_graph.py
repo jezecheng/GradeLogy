@@ -19,7 +19,10 @@ STATUS_FAILED = "失败"
 
 RELATIONS = ("prerequisite", "contains", "related")
 RELATION_LABEL = {"prerequisite": "前置", "contains": "包含", "related": "相关"}
-BATCH_CHARS = 8000
+# 推理模型会把大量 token 花在思考上，4096/8192 可能全部耗尽导致正文为空
+KG_MAX_TOKENS = 32768
+BATCH_CHARS = 3000
+TRUNCATED_MARK = "模型输出被截断"
 
 KG_BUILD_PROMPT = """你是资深学科教研员与知识图谱构建专家。请从下面的学科资料中抽取概念及其关系，用于构建学科知识图谱。
 
@@ -32,6 +35,7 @@ KG_BUILD_PROMPT = """你是资深学科教研员与知识图谱构建专家。�
    - related：并列、互补或经常一起考查，但无先后依赖。
 4. relation 只能取 prerequisite / contains / related；evidence 引用资料中的原句或关键短语作为依据。
 5. 宁缺毋滥：资料信息不足时少给关系，不要编造。
+6. 控制篇幅：单批最多抽取 25 个概念，每个定义不超过 40 字；关系最多 40 条，只保留有把握的内容。
 
 ### 输出格式（严格输出合法 JSON）
 {
@@ -99,18 +103,23 @@ def clean_relations(items):
     return result
 
 
-def analyze_batch(texts, api_url, api_key, model, max_tokens=4096, usage_hook=None):
+def analyze_batch(texts, api_url, api_key, model, max_tokens=KG_MAX_TOKENS,
+                  usage_hook=None):
     """让模型从一批资料文本里抽概念与关系，返回 (concepts, relations, error)。"""
     body = "\n\n--- 资料片段 ---\n\n".join(texts)
     prompt = KG_BUILD_PROMPT + "\n\n### 资料正文\n" + body
     try:
-        reply, _finish, err = llm.chat(
+        reply, finish, err = llm.chat(
             api_url, api_key, model, [{"type": "text", "text": prompt}],
             max_tokens=max_tokens, usage_hook=usage_hook)
     except Exception as e:  # noqa: BLE001 构建失败记录到资料状态即可
         return [], [], str(e)
     if err:
         return [], [], err
+    if finish == "length" or not (reply or "").strip():
+        # 推理模型可能把预算全部花在 reasoning 上，正文为空
+        return [], [], (f"{TRUNCATED_MARK}（max_tokens={max_tokens}），"
+                        "可改用非推理模型或调大输出上限")
     data = llm.extract_json(reply)
     if not isinstance(data, dict):
         return [], [], "模型未返回合法 JSON"
@@ -329,14 +338,24 @@ def build_material(db, material_id, api_url, api_key, model, usage_hook=None):
         db.commit()
         return None
     concepts, relations, errors = [], [], []
-    for texts in _batches(rows):
+
+    def analyze_texts(texts):
+        """截断时把批次对半拆开重试，避免推理模型一次输出过长直接失败。"""
         batch_concepts, batch_relations, error = analyze_batch(
             texts, api_url, api_key, model, usage_hook=usage_hook)
-        if error:
-            errors.append(error)
-            continue
+        if error.startswith(TRUNCATED_MARK) and len(texts) > 1:
+            middle = len(texts) // 2
+            left = analyze_texts(texts[:middle])
+            right = analyze_texts(texts[middle:])
+            return (left[0] + right[0], left[1] + right[1],
+                    left[2] + right[2])
+        return batch_concepts, batch_relations, ([error] if error else [])
+
+    for texts in _batches(rows):
+        batch_concepts, batch_relations, batch_errors = analyze_texts(texts)
         concepts.extend(batch_concepts)
         relations.extend(batch_relations)
+        errors.extend(batch_errors)
     if not concepts:
         message = "；".join(errors[:2]) or "模型未抽取到任何概念"
         db.execute("UPDATE kg_materials SET status=?, error=? WHERE id=?",

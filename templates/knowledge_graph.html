@@ -8,11 +8,26 @@
 .kg-stat span { color: #6b7280; font-size: 12px; }
 .subject-badge { background: #eef2ff; color: #1456f0; border-radius: 999px;
   padding: 2px 10px; font-size: 12px; }
-.status { border-radius: 999px; padding: 2px 10px; font-size: 12px; white-space: nowrap; }
+.status { border-radius: 999px; padding: 2px 10px; font-size: 12px; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 5px; }
 .status-pending { background: #fff7e6; color: #ad6800; }
 .status-building { background: #e6f4ff; color: #0958d9; }
 .status-done { background: #e6f6ec; color: #18794e; }
 .status-failed { background: #fff1f0; color: #cf1322; }
+.status-dot { font-size: 11px; line-height: 1; }
+.spinner { width: 10px; height: 10px; border: 2px solid #91caff; border-top-color: #0958d9;
+  border-radius: 50%; animation: kg-spin .8s linear infinite; }
+@keyframes kg-spin { to { transform: rotate(360deg); } }
+.kg-progress { display: flex; gap: 14px; flex-wrap: wrap; margin: 4px 0 12px;
+  color: #6b7280; font-size: 13px; }
+.kg-progress b { color: #111827; }
+.file-icon { display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; border-radius: 8px; font-size: 10px; font-weight: 600;
+  background: #eef2ff; color: #1456f0; margin-right: 8px; vertical-align: top; }
+.file-icon.pdf { background: #fff1f0; color: #cf1322; }
+.file-icon.md, .file-icon.markdown { background: #f3f0ff; color: #5b21b6; }
+.file-icon.txt { background: #f0f5ff; color: #1d4ed8; }
+.kg-file { display: flex; align-items: flex-start; }
 table.kg { width: 100%; border-collapse: collapse; font-size: 14px; }
 table.kg th, table.kg td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #eef0f3;
   vertical-align: top; }
@@ -66,22 +81,35 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
   {% endif %}
 
   {% if materials %}
+  <div class="kg-progress">
+    <span>共 <b>{{ materials | length }}</b> 份</span>
+    <span>✓ 已完成 <b>{{ status_counts.done }}</b></span>
+    <span>处理中 <b>{{ status_counts.building }}</b></span>
+    <span>○ 待处理 <b>{{ status_counts.pending }}</b></span>
+    <span>✕ 失败 <b>{{ status_counts.failed }}</b></span>
+  </div>
   <table class="kg">
     <thead><tr><th>资料</th><th>大小</th><th>解析</th><th>状态</th><th>上传时间</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
     <tbody>
       {% for m in materials %}
+      {% set ext = m.filename.rsplit('.', 1)[-1] | lower %}
       <tr>
         <td>
-          <div class="kg-name">{{ m.filename }}</div>
-          {% if m.error %}<div class="kg-note">{{ m.error }}</div>{% endif %}
+          <div class="kg-file">
+            <span class="file-icon {{ ext }}">{{ ext | upper }}</span>
+            <div>
+              <div class="kg-name">{{ m.filename }}</div>
+              {% if m.error %}<div class="kg-note">{{ m.error }}</div>{% endif %}
+            </div>
+          </div>
         </td>
         <td>{{ (m.size / 1024) | round(0) | int }} KB</td>
         <td>{{ m.page_count }} 页 / {{ m.char_count }} 字</td>
         <td>
-          {% if m.status == '完成' %}<span class="status status-done">完成</span>
-          {% elif m.status == '建图中' %}<span class="status status-building">建图中</span>
-          {% elif m.status == '失败' %}<span class="status status-failed">失败</span>
-          {% else %}<span class="status status-pending">{{ m.status }}</span>{% endif %}
+          {% if m.status == '完成' %}<span class="status status-done"><span class="status-dot">✓</span>已完成</span>
+          {% elif m.status == '建图中' %}<span class="status status-building"><span class="spinner"></span>处理中</span>
+          {% elif m.status == '失败' %}<span class="status status-failed"><span class="status-dot">✕</span>处理失败</span>
+          {% else %}<span class="status status-pending"><span class="status-dot">○</span>待处理</span>{% endif %}
         </td>
         <td>{{ m.created_at }}</td>
         {% if can_edit %}

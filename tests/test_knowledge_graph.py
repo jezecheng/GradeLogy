@@ -6,6 +6,8 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 import zipfile
 from unittest import mock
@@ -137,6 +139,35 @@ class KGLogicTest(unittest.TestCase):
             concepts, relations, error = kg.analyze_batch(["x"], "u", "k", "m")
         self.assertEqual((concepts, relations), ([], []))
         self.assertIn("JSON", error)
+
+    def test_analyze_batch_reports_truncated_output(self):
+        with mock.patch.object(kg.llm, "chat",
+                               return_value=("", "length", "")):
+            concepts, relations, error = kg.analyze_batch(["x"], "u", "k", "m")
+        self.assertEqual((concepts, relations), ([], []))
+        self.assertTrue(error.startswith(kg.TRUNCATED_MARK))
+
+    def test_build_material_splits_truncated_batch(self):
+        material_id = self._material()
+        for number in range(2):
+            self.con.execute(
+                "INSERT INTO kg_chunks(graph_id,material_id,chunk_no,content)"
+                " VALUES(1,?,?,?)", (material_id, number, "乙" * 200))
+        self.con.commit()
+        concepts = [{"name": "氧化还原反应", "category": "", "definition": "",
+                     "aliases": [], "confidence": 0.8}]
+        truncated = ([], [], f"{kg.TRUNCATED_MARK}（max_tokens=32768）")
+        with mock.patch.object(kg, "analyze_batch",
+                               side_effect=[truncated,
+                                            (concepts, [], ""),
+                                            (concepts, [], "")]) as mocked:
+            result = kg.build_material(self.con, material_id, "u", "k", "m")
+        self.assertEqual(mocked.call_count, 3)
+        self.assertEqual(result["errors"], 0)
+        self.assertEqual(result["new_nodes"], 1)
+        row = self.con.execute("SELECT * FROM kg_materials WHERE id=?",
+                               (material_id,)).fetchone()
+        self.assertEqual(row["status"], kg.STATUS_DONE)
 
     def test_extract_and_build_material_from_text(self):
         fd, path = tempfile.mkstemp(suffix=".txt")
@@ -314,6 +345,76 @@ class KGRouteTest(unittest.TestCase):
         listing = self.client.get(self.url("knowledge_graphs"))
         self.assertEqual(listing.status_code, 200)
         self.assertIn("高中化学", listing.get_data(as_text=True))
+
+    def test_detail_shows_batch_progress_and_status_badges(self):
+        graph = self._create_graph()
+        con = self._db()
+        for number, status in enumerate(
+                [kg.STATUS_PENDING, kg.STATUS_BUILDING,
+                 kg.STATUS_DONE, kg.STATUS_FAILED]):
+            con.execute(
+                "INSERT INTO kg_materials(id,graph_id,filename,stored_name,sha256,"
+                "status,uploaded_by) VALUES(?,?,?,?,?,?,?)",
+                (90 + number, graph["id"], f"第{number}.pdf",
+                 f"kg/{graph['id']}/{number}.pdf", str(number) * 64,
+                 status, 2))
+        con.commit()
+        con.close()
+        html = self.client.get(
+            self.url("knowledge_graph_detail", gid=graph["id"])).get_data(as_text=True)
+        self.assertIn("待处理", html)
+        self.assertIn("处理中", html)
+        self.assertIn("已完成", html)
+        self.assertIn("处理失败", html)
+        self.assertIn("已完成 <b>1</b>", html)
+        self.assertIn("待处理 <b>1</b>", html)
+        self.assertIn("处理中 <b>1</b>", html)
+        self.assertIn("失败 <b>1</b>", html)
+        self.assertIn('name="files" multiple', html)
+        self.assertIn("file-icon pdf", html)
+
+    def test_build_worker_serializes_queued_materials(self):
+        graph = self._create_graph()
+        con = self._db()
+        for number in range(2):
+            con.execute(
+                "INSERT INTO kg_materials(id,graph_id,filename,stored_name,sha256,"
+                "status,uploaded_by) VALUES(?,?,?,?,?,?,?)",
+                (95 + number, graph["id"], f"{number}.txt",
+                 f"kg/{graph['id']}/{number}.txt", str(number) * 64,
+                 kg.STATUS_PENDING, 2))
+        con.commit()
+        con.close()
+        state = {"active": 0, "peak": 0}
+        state_lock = threading.Lock()
+
+        def fake_build(_db, _material_id, *_args, **_kwargs):
+            with state_lock:
+                state["active"] += 1
+                state["peak"] = max(state["peak"], state["active"])
+            time.sleep(0.2)
+            with state_lock:
+                state["active"] -= 1
+            return {"nodes": 0, "edges": 0, "new_nodes": 0,
+                    "new_edges": 0, "errors": 0}
+
+        def run(material_id):
+            app_module._kg_build_worker(graph["id"], material_id, 2)
+
+        with mock.patch.object(app_module, "_ai_endpoint",
+                               return_value=("u", "k", "m", "")), \
+                mock.patch.object(app_module, "_start_ai_operation",
+                                  return_value={"usage_hook": None}), \
+                mock.patch.object(app_module, "_finish_ai_operation"), \
+                mock.patch.object(app_module.kg_utils, "build_material",
+                                  side_effect=fake_build):
+            threads = [threading.Thread(target=run, args=(mid,))
+                       for mid in (95, 96)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+        self.assertEqual(state["peak"], 1)
 
     def test_create_requires_subject_and_name(self):
         self._post("knowledge_graph_create", {"subject": "", "name": "x"})
