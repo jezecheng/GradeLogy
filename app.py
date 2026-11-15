@@ -2875,6 +2875,27 @@ def knowledge_graph_material_delete(mid):
     return redirect(url_for("knowledge_graph_detail", gid=material["graph_id"]))
 
 
+@_routes.route("/knowledge-graphs/<oid:gid>/edit", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_edit(gid):
+    """修改图谱名称与说明；学科与资料范围保持不变。"""
+    _kg_graph(gid, edit=True)
+    name = request.form.get("name", "").strip()[:80]
+    if not name:
+        flash("图谱名称不能为空")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    description = request.form.get("description", "").strip()[:300]
+    db = get_db()
+    db.execute("UPDATE knowledge_graphs SET name=?, description=?,"
+               " updated_at=CURRENT_TIMESTAMP WHERE id=?",
+               (name, description, gid))
+    db.commit()
+    log.info("编辑知识图谱 user=%s#%s id=%s name=%s",
+             g.user["username"], g.user["id"], gid, name)
+    flash("已更新图谱信息")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
 @_routes.route("/knowledge-graphs/<oid:gid>/delete", methods=["POST"])
 @role_required("teacher", "admin")
 def knowledge_graph_delete(gid):

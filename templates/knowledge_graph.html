@@ -36,6 +36,16 @@ details.kg-fold > summary::before { content: '▸'; color: #8a8f99; font-size: 1
 details.kg-fold[open] > summary::before { transform: rotate(90deg); }
 details.kg-fold > summary h2 { margin: 0; }
 .kg-refresh-hint { color: #6b7280; font-size: 12px; }
+.kg-materials > summary { justify-content: flex-start; }
+.kg-materials-summary { font-weight: 400; }
+.kg-failed { color: #b91c1c; }
+.kg-materials-latest { margin-left: auto; max-width: 32%; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.kg-table-wrap { max-height: 52vh; overflow: auto; border: 1px solid #eef0f3;
+  border-radius: 10px; }
+.kg-table-wrap table.kg { margin: 0; }
+.kg-table-wrap thead th { position: sticky; top: 0; background: #fff; z-index: 2;
+  box-shadow: inset 0 -1px 0 #e5e7eb; }
 .kg-graph { overflow-x: auto; padding: 4px 0; }
 .kg-graph svg { display: block; min-width: 100%; }
 .kg-node rect { transition: filter .15s; }
@@ -53,6 +63,8 @@ table.kg { width: 100%; border-collapse: collapse; font-size: 14px; }
 table.kg th, table.kg td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #eef0f3;
   vertical-align: top; }
 table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
+.kg-head-actions { display: flex; align-items: center; gap: 8px; }
+.kg-head-actions form { margin: 0; }
 .kg-name { font-weight: 600; }
 .kg-note { color: #8a8f99; font-size: 12px; }
 .kg-arrow { color: #8a8f99; margin: 0 4px; }
@@ -62,11 +74,14 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
 <div class="card-head">
   <h1>{{ graph.name }} <span class="subject-badge">{{ graph.subject }}</span></h1>
   {% if can_edit %}
-  <form method="post" action="{{ url_for('knowledge_graph_delete', gid=graph.id) }}"
-        onsubmit="return confirm('删除该知识图谱及全部资料？此操作不可恢复。')">
-    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <button class="ghost small">删除图谱</button>
-  </form>
+  <div class="kg-head-actions">
+    <button class="ghost small" type="button" data-dialog-open="kg-edit">编辑信息</button>
+    <form method="post" action="{{ url_for('knowledge_graph_delete', gid=graph.id) }}"
+          onsubmit="return confirm('删除该知识图谱及全部资料？此操作不可恢复。')">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <button class="ghost small">删除图谱</button>
+    </form>
+  </div>
   {% endif %}
 </div>
 <p class="muted">
@@ -82,8 +97,21 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
   <div class="kg-stat"><b data-count="chunks">{{ counts.chunks }}</b><span>文本块</span></div>
 </div>
 
-<div class="card">
-  <div class="card-head"><h2>资料与建图</h2></div>
+<details class="card kg-fold kg-materials" id="kg-materials" {% if materials | length <= 8 %}open{% endif %}>
+  <summary class="card-head">
+    <h2>资料与建图
+      <span class="muted small kg-materials-summary">
+        {{ materials | length }} 份 ·
+        已完成 <b data-status-count="done">{{ status_counts.done }}</b> ·
+        处理中 <b data-status-count="building">{{ status_counts.building }}</b> ·
+        待处理 <b data-status-count="pending">{{ status_counts.pending }}</b>
+        {% if status_counts.failed %} · <span class="kg-failed">失败 <b data-status-count="failed">{{ status_counts.failed }}</b></span>{% endif %}
+      </span>
+    </h2>
+    {% if materials %}
+    <span class="kg-materials-latest muted small">{{ materials[0].filename }}</span>
+    {% endif %}
+  </summary>
   {% if can_edit %}
   <form method="post" action="{{ url_for('knowledge_graph_upload', gid=graph.id) }}"
         enctype="multipart/form-data" class="stack-form">
@@ -109,10 +137,8 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
     <span>处理中 <b data-status-count="building">{{ status_counts.building }}</b></span>
     <span>○ 待处理 <b data-status-count="pending">{{ status_counts.pending }}</b></span>
     <span>✕ 失败 <b data-status-count="failed">{{ status_counts.failed }}</b></span>
-    <span id="kg-refresh-hint" class="kg-refresh-hint" hidden>
-      建图状态已更新，<a href="{{ request.path }}">刷新</a>查看最新节点与关系。
-    </span>
   </div>
+  <div class="kg-table-wrap">
   <table class="kg">
     <thead><tr><th>资料</th><th>大小</th><th>解析</th><th>状态</th><th>上传时间</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
     <tbody>
@@ -153,10 +179,14 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% else %}
   <p class="muted small">还没有资料。上传第一份教材或考纲即可冷启动图谱。</p>
   {% endif %}
-</div>
+</details>
+<p id="kg-refresh-hint" class="kg-refresh-hint" hidden>
+  建图状态已更新，<a href="{{ request.path }}">刷新</a>查看最新节点与关系。
+</p>
 
 {% if layered.nodes %}
 <details class="card kg-fold" open>
@@ -302,12 +332,12 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
         }
       });
       Object.keys(payload.status_counts).forEach(function (key) {
-        var node = document.querySelector('[data-status-count="' + key + '"]');
-        if (node) { node.textContent = payload.status_counts[key]; }
+        var nodes = document.querySelectorAll('[data-status-count="' + key + '"]');
+        nodes.forEach(function (node) { node.textContent = payload.status_counts[key]; });
       });
       Object.keys(payload.counts).forEach(function (key) {
-        var node = document.querySelector('[data-count="' + key + '"]');
-        if (node) { node.textContent = payload.counts[key]; }
+        var nodes = document.querySelectorAll('[data-count="' + key + '"]');
+        nodes.forEach(function (node) { node.textContent = payload.counts[key]; });
       });
       if (!payload.building) {
         clearInterval(timer);
@@ -325,6 +355,46 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
     timer = setInterval(poll, 4000);
     poll();
   }());
+</script>
+{% endif %}
+
+{% if can_edit %}
+<dialog id="kg-edit" class="modal">
+  <form method="post" action="{{ url_for('knowledge_graph_edit', gid=graph.id) }}" class="stack-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <h2>编辑图谱信息</h2>
+    <label>图谱名称
+      <input name="name" required maxlength="80" value="{{ graph.name }}">
+    </label>
+    <label>说明（可选）
+      <textarea name="description" rows="3" maxlength="300"
+                placeholder="覆盖范围、资料来源或使用约定">{{ graph.description or '' }}</textarea>
+    </label>
+    <p class="muted small">学科不可修改；如需更换学科，请新建图谱。名称与说明不影响已建的概念和关系。</p>
+    <div class="modal-actions">
+      <button type="button" class="ghost" data-dialog-close>取消</button>
+      <button type="submit">保存</button>
+    </div>
+  </form>
+</dialog>
+<script>
+(function () {
+  document.querySelectorAll('[data-dialog-open]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var dlg = document.getElementById(btn.dataset.dialogOpen);
+      if (!dlg) return;
+      dlg.showModal();
+      var first = dlg.querySelector('input:not([type=hidden]), textarea');
+      if (first) first.focus();
+    });
+  });
+  document.querySelectorAll('dialog.modal').forEach(function (dlg) {
+    dlg.querySelectorAll('[data-dialog-close]').forEach(function (btn) {
+      btn.addEventListener('click', function () { dlg.close(); });
+    });
+    dlg.addEventListener('click', function (e) { if (e.target === dlg) dlg.close(); });
+  });
+})();
 </script>
 {% endif %}
 {% endblock %}

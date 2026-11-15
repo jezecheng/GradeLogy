@@ -542,6 +542,65 @@ class KGRouteTest(unittest.TestCase):
         con.commit()
         con.close()
 
+    def test_materials_section_collapses_when_many_files(self):
+        graph = self._create_graph()
+        empty_html = self.client.get(
+            self.url("knowledge_graph_detail", gid=graph["id"])).get_data(as_text=True)
+        empty_tag = empty_html.split('id="kg-materials"', 1)[1].split(">", 1)[0]
+        self.assertIn("open", empty_tag)
+        con = self._db()
+        for index in range(9):
+            con.execute(
+                "INSERT INTO kg_materials(graph_id,filename,stored_name,sha256,status)"
+                " VALUES(?,?,?,?,?)",
+                (graph["id"], f"资料{index}.pdf", f"{index}.pdf",
+                 f"sha-{index}", "待建图"))
+        con.commit()
+        con.close()
+        html = self.client.get(
+            self.url("knowledge_graph_detail", gid=graph["id"])).get_data(as_text=True)
+        tag = html.split('id="kg-materials"', 1)[1].split(">", 1)[0]
+        self.assertNotIn("open", tag)
+        self.assertIn("9 份", html)
+        self.assertIn("kg-table-wrap", html)
+        self.assertIn("资料8.pdf", html)
+
+    def test_creator_can_edit_graph_info(self):
+        graph = self._create_graph()
+        self._post("knowledge_graph_edit",
+                   {"name": "必修一化学图谱", "description": "覆盖必修一"}, gid=graph["id"])
+        con = self._db()
+        row = con.execute("SELECT name,description FROM knowledge_graphs WHERE id=?",
+                          (graph["id"],)).fetchone()
+        con.close()
+        self.assertEqual(row["name"], "必修一化学图谱")
+        self.assertEqual(row["description"], "覆盖必修一")
+        html = self.client.get(
+            self.url("knowledge_graph_detail", gid=graph["id"])).get_data(as_text=True)
+        self.assertIn("必修一化学图谱", html)
+        self.assertIn("编辑信息", html)
+
+    def test_edit_requires_name(self):
+        graph = self._create_graph()
+        self._post("knowledge_graph_edit", {"name": "  "}, gid=graph["id"])
+        con = self._db()
+        row = con.execute("SELECT name FROM knowledge_graphs WHERE id=?",
+                          (graph["id"],)).fetchone()
+        con.close()
+        self.assertEqual(row["name"], "必修一知识图谱")
+
+    def test_other_teacher_cannot_edit_graph(self):
+        graph = self._create_graph()
+        other = self.login(3)
+        resp = self._post("knowledge_graph_edit", {"name": "被改名"}, client=other,
+                          gid=graph["id"])
+        self.assertEqual(resp.status_code, 403)
+        con = self._db()
+        row = con.execute("SELECT name FROM knowledge_graphs WHERE id=?",
+                          (graph["id"],)).fetchone()
+        con.close()
+        self.assertEqual(row["name"], "必修一知识图谱")
+
     def test_create_requires_subject_and_name(self):
         self._post("knowledge_graph_create", {"subject": "", "name": "x"})
         con = self._db()
