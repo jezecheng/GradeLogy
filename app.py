@@ -3323,6 +3323,36 @@ def _run_grading_job(teacher_id, sid, operation):
                 _GRADING.discard(sid)
 
 
+def _enqueue_grading(teacher_id, sid, course_id, lecture_id):
+    """统一入队入口：手动点击和定时扫描共用，返回 (operation, 错误提示)。"""
+    db = get_db()
+    with _GRADING_LOCK:
+        if sid in _GRADING:
+            return None, "这份作业已在批阅队列中，请等待完成后再操作。"
+        _GRADING.add(sid)
+
+    active = _latest_grade_job(db, sid)
+    if active is not None and active["status"] in ("queued", "running"):
+        with _GRADING_LOCK:
+            _GRADING.discard(sid)
+        return None, "这份作业已在批阅队列中，请等待完成后再操作。"
+
+    operation = None
+    try:
+        operation = _start_ai_operation(
+            teacher_id, "grade", get_setting(teacher_id, "ai_model"),
+            course_id=course_id, lecture_id=lecture_id,
+            submission_id=sid, status="queued")
+        _GRADING_POOL.submit(_run_grading_job, teacher_id, sid, operation)
+    except Exception as e:
+        log.exception("加入批阅队列失败 submission=%s", sid)
+        _finish_ai_operation(operation, "failed", str(e))
+        with _GRADING_LOCK:
+            _GRADING.discard(sid)
+        return None, "加入批阅队列失败：" + str(e)
+    return operation, None
+
+
 @app.route("/submission/<oid:sid>/grade", methods=["POST"])
 @role_required("teacher")
 def submission_grade(sid):
@@ -3371,32 +3401,9 @@ def submission_grade(sid):
         flash(f"演示模式：未调用 AI，已生成 {len(gen['questions'])} 道题，请逐题修正内容")
         return _back_to_page()
 
-    with _GRADING_LOCK:
-        if sid in _GRADING:
-            flash("这份作业已在批阅队列中，请等待完成后再操作。")
-            return _back_to_page()
-        _GRADING.add(sid)
-
-    active = _latest_grade_job(db, sid)
-    if active is not None and active["status"] in ("queued", "running"):
-        with _GRADING_LOCK:
-            _GRADING.discard(sid)
-        flash("这份作业已在批阅队列中，请等待完成后再操作。")
-        return _back_to_page()
-
-    operation = None
-    try:
-        model = get_setting(g.user["id"], "ai_model")
-        operation = _start_ai_operation(
-            g.user["id"], "grade", model, course_id=hw["course_id"],
-            lecture_id=hw["id"], submission_id=sid, status="queued")
-        _GRADING_POOL.submit(_run_grading_job, g.user["id"], sid, operation)
-    except Exception as e:
-        log.exception("加入批阅队列失败 submission=%s", sid)
-        _finish_ai_operation(operation, "failed", str(e))
-        with _GRADING_LOCK:
-            _GRADING.discard(sid)
-        flash("加入批阅队列失败：" + str(e))
+    _, err = _enqueue_grading(g.user["id"], sid, hw["course_id"], hw["id"])
+    if err:
+        flash(err)
         return _back_to_page()
 
     log.info("已加入批阅队列 submission=%s lecture=%s file=%s answer=%s pages=%s",
@@ -3445,6 +3452,117 @@ def submission_grading_status(sid):
         "error": (row["error"] if row else "") or "",
         "active": status in ("queued", "running"),
     })
+
+
+@app.route("/grading-queue")
+@role_required("teacher")
+def grading_queue():
+    """教师导航栏的后台批改队列：只返回自己名下排队中/进行中的任务。"""
+    rows = get_db().execute(
+        "SELECT o.id,o.status,s.id AS submission_id,s.lecture_id,"
+        "COALESCE(u.display_name,'未知学生') AS student_name,"
+        "COALESCE(l.title,'未知讲次') AS lecture_title,"
+        "COALESCE(c.name,'') AS course_name "
+        "FROM ai_operations o LEFT JOIN submissions s ON s.id=o.submission_id "
+        "LEFT JOIN users u ON u.id=s.student_id "
+        "LEFT JOIN lectures l ON l.id=s.lecture_id "
+        "LEFT JOIN courses c ON c.id=l.course_id "
+        "WHERE o.teacher_id=? AND o.operation_type='grade' "
+        "AND o.status IN ('queued','running') ORDER BY o.id", (g.user["id"],)).fetchall()
+    jobs = [{
+        "id": r["id"],
+        "status": r["status"],
+        "student": r["student_name"],
+        "lecture": r["lecture_title"],
+        "course": r["course_name"],
+        "url": url_for("lecture_detail", hid=r["lecture_id"]) if r["lecture_id"] else "",
+    } for r in rows]
+    return jsonify({
+        "jobs": jobs,
+        "active": bool(jobs),
+        "queued": sum(1 for j in jobs if j["status"] == "queued"),
+        "running": sum(1 for j in jobs if j["status"] == "running"),
+    })
+
+
+def _auto_grade_scan():
+    """扫描「已提交」且讲次已上传教师版答案的作业，自动加入后台批阅队列。
+
+    只处理从未批阅过的作业（status='已提交'）；没有答案 PDF 或还没划定作业范围
+    的讲次一律跳过。演示模式、未配置 API Key、以及开启「仅闲时批阅」但正处
+    高峰时段的老师也会跳过，避免无谓的失败记录和费用。
+    """
+    db = get_db()
+    rows = db.execute(
+        "SELECT s.id,s.lecture_id,l.course_id,c.teacher_id "
+        "FROM submissions s JOIN lectures l ON l.id=s.lecture_id "
+        "JOIN courses c ON c.id=l.course_id JOIN users t ON t.id=c.teacher_id "
+        "WHERE s.status='已提交' AND t.role='teacher' AND t.active=1 "
+        "AND TRIM(COALESCE(l.answer_pdf,''))<>'' "
+        "AND TRIM(COALESCE(l.scope_candidates,''))<>'' "
+        "AND TRIM(COALESCE(l.scope_selected,''))<>'' "
+        "ORDER BY s.id").fetchall()
+
+    teacher_block = {}   # teacher_id -> 跳过原因，缓存后避免逐份作业重复查设置
+    queued = 0
+    for r in rows:
+        tid = r["teacher_id"]
+        if tid not in teacher_block:
+            if get_setting(tid, "ai_demo") == "1":
+                reason = "演示模式不调用 AI"
+            elif not (get_setting(tid, "ai_api_key") or "").strip():
+                reason = "未配置 AI API Key"
+            else:
+                reason = _offpeak_block_if_enabled(tid) or ""
+            teacher_block[tid] = reason
+        if teacher_block[tid]:
+            continue
+        _, err = _enqueue_grading(tid, r["id"], r["course_id"], r["lecture_id"])
+        if err:
+            log.info("自动批阅跳过 submission=%s：%s", r["id"], err)
+        else:
+            queued += 1
+            log.info("自动批阅入队 submission=%s lecture=%s teacher=%s",
+                     r["id"], r["lecture_id"], tid)
+    if queued:
+        log.info("自动批阅扫描完成：新入队 %s 份", queued)
+    return queued
+
+
+_auto_grade_lock_file = None
+_auto_grade_started = False
+
+
+def _auto_grade_loop():
+    interval = max(0.1, float(cfg.AUTO_GRADE_HOURS)) * 3600
+    while True:
+        try:
+            with app.app_context():
+                _auto_grade_scan()
+        except Exception:
+            log.exception("自动批阅扫描异常")
+        time.sleep(interval)
+
+
+def start_auto_grade():
+    """启动自动批阅线程；多进程部署时只让抢到文件锁的进程跑。"""
+    global _auto_grade_started, _auto_grade_lock_file
+    if _auto_grade_started or not cfg.AUTO_GRADE:
+        return
+    _auto_grade_started = True
+    try:
+        os.makedirs(cfg.DATA_DIR, exist_ok=True)
+        _auto_grade_lock_file = open(os.path.join(cfg.DATA_DIR, ".auto_grade.lock"), "w")
+        fcntl.flock(_auto_grade_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        _auto_grade_started = False   # 别的进程已经在扫描
+        if _auto_grade_lock_file:
+            _auto_grade_lock_file.close()
+            _auto_grade_lock_file = None
+        return
+    threading.Thread(target=_auto_grade_loop, daemon=True, name="auto-grade").start()
+    log.info("自动批阅已启用：每 %s 小时检查一次已提交且已上传答案的作业",
+             cfg.AUTO_GRADE_HOURS)
 
 
 @app.route("/submission/<oid:sid>/review")
@@ -5173,6 +5291,7 @@ def _lan_ip():
 init_db()
 start_auto_backup()
 start_model_sync()
+start_auto_grade()
 
 
 if __name__ == "__main__":

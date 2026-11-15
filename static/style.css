@@ -14,6 +14,43 @@ a:hover { text-decoration: underline; }
             border: 1px solid rgba(255,255,255,.45); border-radius: 6px;
             padding: 3px 12px; cursor: pointer; line-height: 1.6; }
 .nav-help:hover { background: rgba(255,255,255,.26); }
+
+/* 教师导航栏：后台批改队列 */
+.grading-queue { position: relative; display: inline-flex; }
+.grading-queue[hidden] { display: none; }
+.grading-queue-btn { display: inline-flex; align-items: center; gap: 7px; font: inherit;
+  font-size: 14px; line-height: 1.6; color: #fff; background: rgba(255,255,255,.14);
+  border: 1px solid rgba(255,255,255,.45); border-radius: 6px; padding: 3px 12px; cursor: pointer; }
+.grading-queue-btn:hover { background: rgba(255,255,255,.26); }
+.grading-queue-dot { width: 8px; height: 8px; border-radius: 50%; background: #7ef0b0;
+  animation: grading-pulse 1.6s infinite; }
+@keyframes grading-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(126,240,176,.7); }
+  70% { box-shadow: 0 0 0 7px rgba(126,240,176,0); }
+  100% { box-shadow: 0 0 0 0 rgba(126,240,176,0); }
+}
+.grading-queue-count { min-width: 18px; padding: 0 5px; border-radius: 999px;
+  background: #fff; color: #1456f0; font-size: 12px; font-weight: 700; text-align: center; }
+.grading-queue-pop { display: none; position: absolute; top: calc(100% + 10px); left: 0;
+  z-index: 60; width: 320px; max-width: 78vw; background: #fff; color: #1f2329;
+  border: 1px solid #e3e7ee; border-radius: 10px; padding: 12px 14px;
+  box-shadow: 0 12px 30px rgba(20,32,64,.18); }
+.grading-queue:hover .grading-queue-pop, .grading-queue:focus-within .grading-queue-pop,
+.grading-queue.open .grading-queue-pop { display: block; }
+.grading-queue-title { margin: 0 0 8px; font-size: 14px; font-weight: 700; }
+.grading-queue-list { list-style: none; margin: 0; padding: 0; max-height: 280px; overflow-y: auto; }
+.grading-queue-item + .grading-queue-item { border-top: 1px solid #eef0f3; }
+.grading-queue-item a, .grading-queue-item > span { display: block; padding: 8px 0;
+  color: #1f2329; font-size: 13px; line-height: 1.5; }
+.grading-queue-item a:hover { text-decoration: none; background: #f7f9fc; }
+.grading-queue-state { display: inline-block; margin-right: 6px; padding: 0 6px;
+  border-radius: 999px; font-size: 11px; font-weight: 700; }
+.grading-queue-state.running { background: #e8f1ff; color: #1456f0; }
+.grading-queue-state.queued { background: #fff3e2; color: #a35a00; }
+.grading-queue-pop .small { margin: 8px 0 0; }
+@media (max-width: 600px) {
+  .grading-queue-pop { left: auto; right: 0; }
+}
 .role-badge { font-size: 12px; padding: 2px 8px; border-radius: 999px;
               background: rgba(255,255,255,.22); color: #fff; }
 .role-badge.role-teacher { background: rgba(255,255,255,.22); }

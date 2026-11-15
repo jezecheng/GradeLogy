@@ -17,6 +17,7 @@ from unittest import mock
 _TEST_ROOT = tempfile.mkdtemp(prefix="gradelogy-admin-tests-")
 os.environ["DATA_DIR"] = _TEST_ROOT
 os.environ["AUTO_BACKUP"] = "0"
+os.environ["AUTO_GRADE"] = "0"
 os.environ["SECRET_KEY"] = "admin-test-secret"
 
 import app as app_module  # noqa: E402
@@ -846,6 +847,32 @@ class AsyncGradingTest(unittest.TestCase):
         review = self.client.get(f"/submission/{self.sid_url}/review")
         self.assertEqual(review.status_code, 200)
 
+    def test_grading_queue_shows_only_own_active_jobs(self):
+        con = sqlite3.connect(app_module.DB_PATH)
+        con.execute("INSERT INTO users(id,username,password_hash,display_name,role,active,"
+                    "must_change_password) VALUES(3,'teacher2','x','老师二','teacher',1,0)")
+        con.execute("INSERT INTO ai_operations(teacher_id,operation_type,submission_id,"
+                    "status,started_at) VALUES(2,'grade',?,'queued',CURRENT_TIMESTAMP)",
+                    (self.SID,))
+        con.execute("INSERT INTO ai_operations(teacher_id,operation_type,submission_id,"
+                    "status,started_at) VALUES(3,'grade',?,'running',CURRENT_TIMESTAMP)",
+                    (self.SID,))
+        con.commit()
+        con.close()
+
+        data = self.client.get("/grading-queue").get_json()
+        self.assertTrue(data["active"])
+        self.assertEqual(data["queued"], 1)
+        self.assertEqual(len(data["jobs"]), 1)
+        job = data["jobs"][0]
+        self.assertEqual(job["status"], "queued")
+        self.assertEqual(job["student"], "学生一")
+        self.assertEqual(job["lecture"], "第1讲")
+        self.assertTrue(job["url"].startswith("/lecture/"))
+
+        page = self.client.get(f"/lecture/{self.hid_url}").get_data(as_text=True)
+        self.assertIn("后台批改中", page)
+
     def test_repeat_click_while_running_does_not_queue_twice(self):
         started = threading.Event()
         release = threading.Event()
@@ -885,6 +912,67 @@ class AsyncGradingTest(unittest.TestCase):
         row = self.operation()
         self.assertEqual(row[0], "failed")
         self.assertIn("重新提交", row[1])
+
+    def _run_scan(self):
+        with app_module.app.app_context():
+            return app_module._auto_grade_scan()
+
+    def _count_ops(self):
+        con = sqlite3.connect(app_module.DB_PATH)
+        n = con.execute("SELECT COUNT(*) FROM ai_operations WHERE submission_id=?",
+                        (self.SID,)).fetchone()[0]
+        con.close()
+        return n
+
+    def test_auto_grade_queues_submitted_with_answer(self):
+        with mock.patch.object(app_module, "get_setting", side_effect=self.setting), \
+                mock.patch.object(app_module, "file_list", return_value=[]), \
+                mock.patch.object(app_module, "run_grading",
+                                  return_value=self.grade_payload()) as run, \
+                mock.patch.object(app_module, "generate_report"):
+            self.assertEqual(self._run_scan(), 1)
+            row = self.wait_for_finish()
+        self.assertEqual(row[0], "success")
+        run.assert_called_once()
+        con = sqlite3.connect(app_module.DB_PATH)
+        status = con.execute("SELECT status FROM submissions WHERE id=?",
+                             (self.SID,)).fetchone()[0]
+        con.close()
+        self.assertEqual(status, "待批改")
+
+    def test_auto_grade_skips_lecture_without_answer(self):
+        con = sqlite3.connect(app_module.DB_PATH)
+        con.execute("UPDATE lectures SET answer_pdf='' WHERE id=100")
+        con.commit()
+        con.close()
+        with mock.patch.object(app_module, "get_setting", side_effect=self.setting), \
+                mock.patch.object(app_module, "run_grading") as run:
+            self.assertEqual(self._run_scan(), 0)
+        run.assert_not_called()
+        self.assertEqual(self._count_ops(), 0)
+
+    def test_auto_grade_skips_demo_and_unconfigured_teachers(self):
+        for overrides in ({"ai_demo": "1"}, {"ai_api_key": ""}):
+            with mock.patch.object(app_module, "get_setting",
+                                   side_effect=lambda _tid, key, default="", o=overrides:
+                                   o.get(key, self.settings.get(key, default))), \
+                    mock.patch.object(app_module, "run_grading") as run:
+                self.assertEqual(self._run_scan(), 0)
+            run.assert_not_called()
+        self.assertEqual(self._count_ops(), 0)
+
+    def test_auto_grade_does_not_duplicate_active_job(self):
+        con = sqlite3.connect(app_module.DB_PATH)
+        con.execute("INSERT INTO ai_operations(teacher_id,operation_type,submission_id,"
+                    "status,started_at) VALUES(2,'grade',?,'queued',CURRENT_TIMESTAMP)",
+                    (self.SID,))
+        con.commit()
+        con.close()
+        with mock.patch.object(app_module, "get_setting", side_effect=self.setting), \
+                mock.patch.object(app_module, "run_grading") as run:
+            self.assertEqual(self._run_scan(), 0)
+        run.assert_not_called()
+        self.assertEqual(self._count_ops(), 1)
 
 
 if __name__ == "__main__":

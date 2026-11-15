@@ -21,6 +21,18 @@
     <a href="{{ url_for('courses') }}">我的课程</a>
     <a href="{{ url_for('prompts_page') }}">我的提示词</a>
     <a href="{{ url_for('settings_page') }}">AI 设置</a>
+    <span class="grading-queue" id="grading-queue" hidden>
+      <button type="button" class="grading-queue-btn" aria-describedby="grading-queue-pop">
+        <span class="grading-queue-dot" aria-hidden="true"></span>
+        <span>后台批改中</span>
+        <span class="grading-queue-count" data-grading-count hidden>0</span>
+      </button>
+      <div class="grading-queue-pop" id="grading-queue-pop" role="tooltip">
+        <p class="grading-queue-title">后台批改队列</p>
+        <ul class="grading-queue-list" data-grading-list></ul>
+        <p class="muted small">关闭浏览器不会中断；完成后讲次页会自动更新。</p>
+      </div>
+    </span>
   {% else %}
     <a href="{{ url_for('student_home') }}">我的学习</a>
   {% endif %}
@@ -100,6 +112,61 @@
   dlg.addEventListener('click', function (e) { if (e.target === dlg) dlg.close(); });
 })();
 </script>
+{% if g.user and g.user.role == 'teacher' %}
+<script>
+// 后台批改队列：顶部图标 + 悬停/点按查看排队中与批改中的作业
+(function () {
+  var box = document.getElementById('grading-queue');
+  if (!box) return;
+  var list = box.querySelector('[data-grading-list]');
+  var count = box.querySelector('[data-grading-count]');
+
+  function render(data) {
+    box.hidden = !data.active;
+    if (!data.active) return;
+    count.hidden = false;
+    count.textContent = data.jobs.length;
+    list.textContent = '';
+    data.jobs.forEach(function (job) {
+      var li = document.createElement('li');
+      li.className = 'grading-queue-item';
+      var item = document.createElement(job.url ? 'a' : 'span');
+      if (job.url) item.href = job.url;
+      var state = document.createElement('span');
+      state.className = 'grading-queue-state ' + job.status;
+      state.textContent = job.status === 'running' ? '批改中' : '待批改';
+      var who = document.createElement('strong');
+      who.textContent = job.student;
+      var where = document.createElement('span');
+      where.className = 'muted small';
+      where.textContent = ' · ' + job.lecture + (job.course ? ' · ' + job.course : '');
+      item.appendChild(state);
+      item.appendChild(who);
+      item.appendChild(where);
+      li.appendChild(item);
+      list.appendChild(li);
+    });
+  }
+
+  function poll() {
+    if (document.hidden) return;
+    fetch("{{ url_for('grading_queue') }}", {headers: {'Accept': 'application/json'}})
+      .then(function (r) { return r.json(); })
+      .then(render)
+      .catch(function () {});
+  }
+
+  box.querySelector('.grading-queue-btn').addEventListener('click', function (e) {
+    e.stopPropagation();
+    box.classList.toggle('open');
+  });
+  document.addEventListener('click', function () { box.classList.remove('open'); });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
+  poll();
+  setInterval(poll, 5000);
+})();
+</script>
+{% endif %}
 {% include "_assistant.html" %}
 {% block scripts %}{% endblock %}
 </body>

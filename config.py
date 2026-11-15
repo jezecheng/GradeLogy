@@ -67,6 +67,9 @@ AUTO_BACKUP = _env("AUTO_BACKUP", "1").lower() not in ("0", "false", "no", "off"
 # 模型清单自动同步：每天通过 GET /v1/models 刷新一次各老师 TokenHub 入口的可用模型
 AUTO_MODEL_SYNC = _env("AUTO_MODEL_SYNC", "1").lower() not in ("0", "false", "no", "off")
 MODEL_SYNC_HOURS = float(_env("MODEL_SYNC_HOURS", "24"))
+# 自动批阅：每 6 小时扫描一次「已提交」且讲次已上传教师版答案的作业
+AUTO_GRADE = _env("AUTO_GRADE", "1").lower() not in ("0", "false", "no", "off")
+AUTO_GRADE_HOURS = float(_env("AUTO_GRADE_HOURS", "6"))
 
 
 def ensure_dirs():
