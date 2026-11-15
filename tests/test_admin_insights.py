@@ -660,7 +660,9 @@ class ApiKeyManagementTest(unittest.TestCase):
         self.assertIn("sk-s", html)
         self.assertNotIn("sk-secret-abcdef", html)
         self.assertGreater(html.find("AI API 配置"), -1)
-        self.assertLess(html.find("AI API 配置"), html.find("AI 模型清单与批阅设置"))
+        self.assertLess(html.find("AI API 配置"), html.find("AI 模型参考与批阅设置"))
+        # 模型改为在每套 API 配置里单独指定，页面不再保留全局模型选择器
+        self.assertNotIn('name="ai_model_select"', html)
 
     def test_invalid_key_is_rejected(self):
         self.post("/settings/api-keys/add", name="坏地址", base_url="ftp://nope",
@@ -728,9 +730,24 @@ class ApiKeyManagementTest(unittest.TestCase):
     def test_saving_model_updates_active_config(self):
         self.post("/settings/api-keys/add", name="阿里云", base_url="https://aliyun.example/v1",
                   api_key="sk-aliyun", use_now="1")
-        self.post("/settings", ai_model="qwen-vl-plus", ai_demo="", ai_offpeak_only="")
+        rows, _ = self.keys()
+        self.post(f"/settings/api-keys/{rows[0]['id']}/model", model="qwen-vl-plus")
         rows, _ = self.keys()
         self.assertEqual(rows[0]["model"], "qwen-vl-plus")
+        with app_module.app.test_request_context("/"):
+            self.assertEqual(app_module.get_setting(2, "ai_model"), "qwen-vl-plus")
+
+    def test_editing_model_of_inactive_config_does_not_change_current(self):
+        self.post("/settings/api-keys/add", name="阿里云", base_url="https://aliyun.example/v1",
+                  api_key="sk-aliyun", model="qwen-vl-max", use_now="1")
+        self.post("/settings/api-keys/add", name="腾讯云", base_url="https://tencent.example/v1",
+                  api_key="sk-tencent", model="deepseek-v4.1-flash")
+        rows, _ = self.keys()
+        self.post(f"/settings/api-keys/{rows[1]['id']}/model", model="glm-5.3-flash")
+        rows, _ = self.keys()
+        self.assertEqual(rows[1]["model"], "glm-5.3-flash")
+        with app_module.app.test_request_context("/"):
+            self.assertEqual(app_module.get_setting(2, "ai_model"), "qwen-vl-max")
 
 
 if __name__ == "__main__":

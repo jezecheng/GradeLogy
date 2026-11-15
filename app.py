@@ -3588,14 +3588,7 @@ def settings_page():
         if request.form.get("demo_only"):
             save_setting(g.user["id"], "ai_demo", "1" if request.form.get("ai_demo") else "")
         else:
-            # API 基地址与 Key 由「AI API 配置」卡片单独管理，这里只保存模型偏好
-            if not ENV_AI_SETTINGS.get("ai_model"):
-                model = request.form.get("ai_model", "").strip()
-                save_setting(g.user["id"], "ai_model", model)
-                # 模型属于当前这套配置，切换 Key 时各自恢复
-                get_db().execute(
-                    "UPDATE ai_api_keys SET model=?, updated_at=CURRENT_TIMESTAMP "
-                    "WHERE teacher_id=? AND is_active=1", (model, g.user["id"]))
+            # 模型由每套 API 配置单独保存，这里只维护批阅开关
             save_setting(g.user["id"], "ai_demo", "1" if request.form.get("ai_demo") else "")
             save_setting(g.user["id"], "ai_offpeak_only", "1" if request.form.get("ai_offpeak_only") else "")
         get_db().commit()
@@ -3643,6 +3636,29 @@ def settings_api_key_activate(key_id):
         flash("已切换当前使用的 AI API")
     else:
         flash("未找到该 API Key")
+    return redirect(url_for("settings_page"))
+
+
+@app.route("/settings/api-keys/<int:key_id>/model", methods=["POST"])
+@role_required("teacher")
+def settings_api_key_model(key_id):
+    """每套 API 配置单独保存模型，切换 Key 时互不影响。"""
+    if ENV_AI_SETTINGS.get("ai_api_key"):
+        flash("API Key 已由环境变量注入，模型请通过环境变量配置")
+        return redirect(url_for("settings_page"))
+    model = (request.form.get("model") or "").strip()[:120]
+    db = get_db()
+    row = db.execute("SELECT is_active FROM ai_api_keys WHERE id=? AND teacher_id=?",
+                     (key_id, g.user["id"])).fetchone()
+    if row is None:
+        flash("未找到该 API Key")
+        return redirect(url_for("settings_page"))
+    db.execute("UPDATE ai_api_keys SET model=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+               (model, key_id))
+    if row["is_active"] and not ENV_AI_SETTINGS.get("ai_model"):
+        save_setting(g.user["id"], "ai_model", model)
+    db.commit()
+    flash("已保存该配置的模型")
     return redirect(url_for("settings_page"))
 
 
