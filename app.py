@@ -5,6 +5,7 @@
 """
 import base64
 import fcntl
+import gzip
 import io
 import json
 import logging
@@ -13,6 +14,7 @@ import platform
 import re
 import secrets
 import shutil
+import ssl
 import sqlite3
 import subprocess
 import tempfile
@@ -24,6 +26,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta, timezone
 from functools import wraps
+from html.parser import HTMLParser
 
 try:
     import fcntl  # 仅类 Unix 可用，用于保证自动备份只在一个进程里跑
@@ -69,57 +72,59 @@ ROLE_LABEL = {"admin": "管理员", "teacher": "老师", "student": "学生"}
 
 # 按「API 入口（基地址）」分组的模型清单。价格单位为元/百万 token，来源为各服务商公开价目；
 # 只有腾讯云 TokenHub 的价目已核对，其余入口价格字段留空，页面显示「未收录」。
-# 之所以用静态清单：TokenHub 的 /v1/models 只返回模型 ID、不返回价格，价格只能人工维护；
-# 且 _start_ai_operation 的逐次调用成本快照已依赖这份清单，避免出现第二套价格口径。
-# 模型清单每天由后台线程通过 /v1/models 自动同步；价格可在设置页上传价目截图识别后写入 model_prices 覆盖这里。
-# 服务商调价时也可以直接改这里：设置页展示和逐次调用费用估算会同时生效。
+# TokenHub 的 /v1/models 只返回模型 ID、不返回价格，因此每天同步模型清单时会同时抓取公开价目页，
+# 把适合图片批改的多模态/视觉模型价格写入 model_prices；这里是内置兜底清单。
 MODEL_CATALOG = [
     {
         "name": "腾讯云 TokenHub",
         "base_url": "https://tokenhub.tencentmaas.com/v1",
         "hosts": ["tokenhub.tencentmaas.com"],
-        "price_source": "腾讯云 TokenHub 公开价目（2025.11）",
+        "price_source": "腾讯云 TokenHub 公开价目",
         "models": [
-            {
-                "model": "deepseek-v4.1-flash",
-                "vendor": "DeepSeek",
-                "tags": ["图片理解", "1M 上下文", "性价比高"],
-                "price_in": 1.0,
-                "price_out": 4.0,
-                "note": "vision-exp 的继任者，与旧版同价，能力全面升级",
-            },
-            {
-                "model": "glm-5.3-flash",
-                "vendor": "智谱",
-                "tags": ["图片理解", "最便宜", "128k 上下文"],
-                "price_in": 0.8,
-                "price_out": 2.8,
-                "note": "TokenHub 上价格最低的多模态模型",
-            },
-            {
-                "model": "minimax-m3.1-flash",
-                "vendor": "MiniMax",
-                "tags": ["图片理解", "1M 上下文"],
-                "price_in": 1.0,
-                "price_out": 4.0,
-                "note": "与 DeepSeek-V4.1-Flash 同价，1M 上下文",
-            },
-            {
-                "model": "deepseek-v4-pro",
-                "vendor": "DeepSeek",
-                "tags": ["图片理解", "旗舰", "1M 上下文"],
-                "price_in": 4.5,
-                "price_out": 13.5,
-                "note": "贵 4.5 倍，推理能力更强，但批阅速度相近",
-            },
-            {
-                "model": "kimi-k3.1-pro",
-                "vendor": "Kimi (月之暗面)",
-                "tags": ["图片+视频", "旗舰", "1M 上下文"],
-                "price_in": 13.0,
-                "price_out": 68.0,
-                "note": "最贵，支持视频输入，一般作业批阅用不上",
-            },
+            {"model": "deepseek-v4.1-flash", "vendor": "DeepSeek", "tags": ["图片理解", "1M 上下文", "性价比高"],
+             "price_in": 1.0, "price_out": 4.0, "note": "适合图片作业批改的高性价比模型"},
+            {"model": "deepseek-v4.1-flash-1017", "vendor": "DeepSeek", "tags": ["图片理解", "1M 上下文"],
+             "price_in": 1.0, "price_out": 4.0, "note": "DeepSeek-V4.1-Flash 版本别名"},
+            {"model": "deepseek/deepseek-flash", "vendor": "DeepSeek", "tags": ["图片理解", "原厂直供"],
+             "price_in": 1.0, "price_out": 4.0, "note": "原厂直供别名，价格与 deepseek-v4.1-flash 一致"},
+            {"model": "deepseek-v4-flash-vision-exp", "vendor": "DeepSeek", "tags": ["图片理解", "视觉实验版"],
+             "price_in": 1.0, "price_out": 4.0, "note": "视觉实验版，适合图片批改"},
+            {"model": "deepseek/deepseek-v4-flash-vision-exp", "vendor": "DeepSeek", "tags": ["图片理解", "原厂直供"],
+             "price_in": 1.0, "price_out": 4.0, "note": "视觉实验版原厂直供别名"},
+            {"model": "deepseek-v4-flash-202605", "vendor": "DeepSeek", "tags": ["图片理解"],
+             "price_in": 1.0, "price_out": 4.0, "note": "DeepSeek-V4-Flash 正式版别名"},
+            {"model": "deepseek/deepseek-v4-flash-0731", "vendor": "DeepSeek", "tags": ["图片理解"],
+             "price_in": 1.0, "price_out": 4.0, "note": "DeepSeek-V4-Flash 0731 别名"},
+            {"model": "deepseek/deepseek-v4-flash", "vendor": "DeepSeek", "tags": ["图片理解"],
+             "price_in": 1.0, "price_out": 4.0, "note": "DeepSeek-V4-Flash 原厂直供别名"},
+            {"model": "deepseek-v4-pro", "vendor": "DeepSeek", "tags": ["图片理解", "旗舰", "1M 上下文"],
+             "price_in": 12.0, "price_out": 24.0, "note": "推理能力更强，但批阅成本明显更高"},
+            {"model": "deepseek-v4-pro-0813", "vendor": "DeepSeek", "tags": ["图片理解", "旗舰"],
+             "price_in": 4.5, "price_out": 13.5, "note": "0813 正式版，价格低于默认 deepseek-v4-pro"},
+            {"model": "deepseek-v4-pro-202606", "vendor": "DeepSeek", "tags": ["图片理解", "旗舰"],
+             "price_in": 4.5, "price_out": 13.5, "note": "DeepSeek-V4-Pro 原厂直供版本别名"},
+            {"model": "deepseek/deepseek-v4-pro-0813", "vendor": "DeepSeek", "tags": ["图片理解", "原厂直供"],
+             "price_in": 4.5, "price_out": 13.5, "note": "DeepSeek-V4-Pro 0813 原厂直供别名"},
+            {"model": "glm-5.3-flash", "vendor": "智谱", "tags": ["图片理解", "最便宜", "128k 上下文"],
+             "price_in": 0.8, "price_out": 2.8, "note": "TokenHub 上价格很低的多模态模型"},
+            {"model": "glm-5v-turbo", "vendor": "智谱", "tags": ["图片理解", "视觉模型"],
+             "price_in": 5.0, "price_out": 22.0, "note": "智谱视觉理解模型，适合图片批改"},
+            {"model": "minimax-m3.1-flash", "vendor": "MiniMax", "tags": ["图片理解", "1M 上下文"],
+             "price_in": 1.0, "price_out": 4.0, "note": "与 DeepSeek-V4.1-Flash 同价，1M 上下文"},
+            {"model": "minimax-m3", "vendor": "MiniMax", "tags": ["图片理解"],
+             "price_in": 2.1, "price_out": 8.4, "note": "MiniMax 多模态模型"},
+            {"model": "kimi-k3.1-pro", "vendor": "Kimi (月之暗面)", "tags": ["图片+视频", "旗舰", "1M 上下文"],
+             "price_in": 13.0, "price_out": 68.0, "note": "支持视频输入，一般作业批阅用不上"},
+            {"model": "kimi-k3.1-pro-highspeed", "vendor": "Kimi (月之暗面)", "tags": ["图片+视频", "高速"],
+             "price_in": 26.0, "price_out": 136.0, "note": "高速版价格更高，普通批改不推荐"},
+            {"model": "hy-vision-2.0-instruct", "vendor": "腾讯混元", "tags": ["图片理解", "多模态理解"],
+             "price_in": 7.5, "price_out": 17.5, "note": "混元多模态视觉理解模型"},
+            {"model": "hy-vision-1.5-thinking", "vendor": "腾讯混元", "tags": ["图片理解", "多模态理解"],
+             "price_in": 3.0, "price_out": 9.0, "note": "混元视觉思考模型"},
+            {"model": "hy-vision-video", "vendor": "腾讯混元", "tags": ["图片+视频", "多模态理解"],
+             "price_in": 3.0, "price_out": 9.0, "note": "支持视觉和视频理解"},
+            {"model": "yt-vita", "vendor": "右糖", "tags": ["图片理解", "多模态理解"],
+             "price_in": 1.2, "price_out": 3.5, "note": "多模态理解模型，价格较低"},
         ],
     },
     {
@@ -259,6 +264,185 @@ def _sync_error_text(exc):
     return f"{type(exc).__name__}: {exc}"
 
 
+TOKENHUB_PRICE_URL = "https://cloud.tencent.com/document/product/1823/130055"
+# 作业批改要读取学生卷/答案图片，所以只保留视觉理解或多模态理解模型；
+# 纯文本、语音、图片/视频生成、3D、向量等模型即使在 /v1/models 中可用也不展示。
+TOKENHUB_GRADE_MODEL_IDS = {
+    "deepseek-v4.1-flash", "deepseek-v4.1-flash-1017", "deepseek/deepseek-flash",
+    "deepseek-v4-flash-vision-exp", "deepseek/deepseek-v4-flash-vision-exp",
+    "deepseek-v4-flash-202605", "deepseek/deepseek-v4-flash-0731", "deepseek/deepseek-v4-flash",
+    "deepseek-v4-pro", "deepseek-v4-pro-0813", "deepseek-v4-pro-202606",
+    "deepseek/deepseek-v4-pro-0813", "deepseek/deepseek-v4-pro",
+    "glm-5.3-flash", "glm-5v-turbo",
+    "minimax-m3.1-flash", "minimax-m3", "kimi-k3.1-pro", "kimi-k3.1-pro-highspeed",
+}
+
+# 腾讯云价目页会把同一模型的多个调用参数写在同一个单元格里且不带分隔符，
+# 这里按模型家族补齐别名价格，避免某些 /v1/models 中可用的别名显示为未收录。
+TOKENHUB_MODEL_ALIAS_GROUPS = [
+    {"deepseek-v4.1-flash", "deepseek-v4.1-flash-1017", "deepseek/deepseek-flash",
+     "deepseek-v4-flash-vision-exp", "deepseek/deepseek-v4-flash-vision-exp",
+     "deepseek-v4-flash-202605", "deepseek/deepseek-v4-flash-0731", "deepseek/deepseek-v4-flash"},
+    {"deepseek-v4-pro", "deepseek-v4-pro-0813", "deepseek-v4-pro-202606",
+     "deepseek/deepseek-v4-pro-0813", "deepseek/deepseek-v4-pro"},
+]
+
+
+def _urlopen_with_cert(url, timeout=30):
+    context = ssl.create_default_context()
+    try:
+        import certifi
+        context.load_verify_locations(certifi.where())
+    except Exception:
+        pass
+    req = urllib.request.Request(url, headers={
+        "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"),
+        "Accept-Encoding": "gzip",
+    })
+    return urllib.request.urlopen(req, timeout=timeout, context=context)
+
+
+def _extract_model_ids(text):
+    text = text or ""
+    ids = []
+    # 先按已知模型 ID 切分腾讯云价目页里被拼接在同一单元格的多个别名。
+    for mid in sorted(TOKENHUB_GRADE_MODEL_IDS, key=len, reverse=True):
+        if mid in text:
+            ids.append(mid)
+            text = text.replace(mid, " ")
+    ids.extend(re.findall(r"[A-Za-z0-9][A-Za-z0-9._/\-:]{0,119}", text))
+    return [mid.lower() for mid in ids]
+
+
+def _parse_price_cell(text):
+    match = re.search(r"\d+(?:\.\d+)?", text or "")
+    return float(match.group(0)) if match else None
+
+
+class _TokenHubPriceParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.tables = []
+        self.rows = []
+        self.row = []
+        self.cell = []
+        self.in_cell = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            self.rows = []
+        elif tag == "tr":
+            self.row = []
+        elif tag in ("td", "th"):
+            self.cell = []
+            self.in_cell = True
+        elif tag == "br" and self.in_cell:
+            self.cell.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in ("td", "th") and self.in_cell:
+            text = re.sub(r"[^\S\n]+", " ", "".join(self.cell)).strip()
+            self.row.append(text)
+            self.in_cell = False
+        elif tag == "tr":
+            self.rows.append(self.row)
+        elif tag == "table":
+            self.tables.append(self.rows)
+
+    def handle_data(self, data):
+        if self.in_cell:
+            self.cell.append(data)
+
+
+def parse_tokenhub_prices(html):
+    """解析 TokenHub 公开价目页，返回 {prices, multimodal_ids}。
+
+    prices[model_id] = {price_in, price_out, name}，单位均为元/百万 token。
+    multimodal_ids 来自「多模态理解模型」表，自动视为适合图片批改。
+    """
+    parser = _TokenHubPriceParser()
+    parser.feed(html or "")
+    prices = {}
+    multimodal_ids = set()
+    for rows in parser.tables:
+        if len(rows) < 2:
+            continue
+        header = rows[0]
+        joined = "".join(header)
+        if "推理输入" not in joined or "推理输出" not in joined:
+            continue
+        model_col = next((i for i, h in enumerate(header) if "model（调用参数）" in h), 0)
+        in_col = next(i for i, h in enumerate(header) if "推理输入" in h)
+        out_col = next(i for i, h in enumerate(header) if "推理输出" in h)
+        peak_col = next((i for i, h in enumerate(header) if "峰谷" in h), None)
+        is_multimodal = model_col == 0 and len(header) == 3
+        current_ids = []
+        for row in rows[1:]:
+            if len(row) <= max(model_col, in_col, out_col):
+                continue
+            ids = []
+            for line in (row[model_col] or "").splitlines():
+                ids.extend(_extract_model_ids(line))
+            if ids:
+                current_ids = ids
+            if peak_col is not None and peak_col < len(row) and "高峰" in row[peak_col]:
+                continue
+            price_in = _parse_price_cell(row[in_col])
+            price_out = _parse_price_cell(row[out_col])
+            if not current_ids or price_in is None or price_out is None:
+                continue
+            name = row[0] if row else ""
+            for mid in current_ids:
+                prices.setdefault(mid, {"price_in": price_in, "price_out": price_out, "name": name})
+                if is_multimodal:
+                    multimodal_ids.add(mid)
+    for group in TOKENHUB_MODEL_ALIAS_GROUPS:
+        source = next((prices[mid] for mid in group if mid in prices), None)
+        if source:
+            for mid in group:
+                prices.setdefault(mid, source)
+    return {"prices": prices, "multimodal_ids": multimodal_ids}
+
+
+def fetch_tokenhub_price_page(timeout=30):
+    # 腾讯云文档页对部分浏览器默认 Accept 头会返回 JS 挑战页，这里只保留最小请求头。
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"),
+        "Accept-Encoding": "gzip",
+    }
+    try:
+        import requests
+        verify = True
+        try:
+            import certifi
+            verify = certifi.where()
+        except Exception:
+            pass
+        resp = requests.get(TOKENHUB_PRICE_URL, headers=headers, timeout=timeout, verify=verify)
+        resp.raise_for_status()
+        return resp.text
+    except ImportError:
+        pass
+    resp = _urlopen_with_cert(TOKENHUB_PRICE_URL, timeout=timeout)
+    raw = resp.read()
+    if resp.headers.get("Content-Encoding") == "gzip":
+        raw = gzip.decompress(raw)
+    return raw.decode("utf-8", "ignore")
+
+
+def fetch_tokenhub_prices(timeout=30):
+    return parse_tokenhub_prices(fetch_tokenhub_price_page(timeout=timeout))
+
+
+def tokenhub_suitable_model_ids(price_data=None):
+    ids = set(TOKENHUB_GRADE_MODEL_IDS)
+    if price_data:
+        ids |= set(price_data.get("multimodal_ids") or set())
+    return ids
+
+
 def sync_models_for_teacher(teacher_id, force=False):
     """把某老师配置入口的可用模型同步进缓存。
 
@@ -298,7 +482,28 @@ def sync_models_for_teacher(teacher_id, force=False):
             con.commit()
             return 0, msg
 
+        price_data = None
+        try:
+            price_data = fetch_tokenhub_prices(timeout=20)
+        except Exception as exc:
+            logger.warning("TokenHub 公开价目同步失败 teacher=%s: %s",
+                           teacher_id, _sync_error_text(exc))
+        suitable_ids = tokenhub_suitable_model_ids(price_data)
+        models = [m for m in models if m["model_id"] in suitable_ids]
+
         now = _now_text()
+        if price_data:
+            for mid, item in price_data["prices"].items():
+                if mid not in suitable_ids:
+                    continue
+                con.execute(
+                    "INSERT INTO model_prices(model,price_in,price_out,unit,source,updated_at) "
+                    "VALUES(?,?,?,?,?,?) ON CONFLICT(model) DO UPDATE SET "
+                    "price_in=excluded.price_in, price_out=excluded.price_out, "
+                    "unit=excluded.unit, source=excluded.source, updated_at=excluded.updated_at",
+                    (mid, item["price_in"], item["price_out"], "元/百万 token",
+                     "TokenHub 公开价目", now))
+
         con.execute("DELETE FROM model_sync WHERE teacher_id=? AND base_url=?",
                     (teacher_id, base_url))
         con.executemany(
@@ -1072,11 +1277,12 @@ def _start_ai_operation(teacher_id, operation_type, model, course_id=None,
     price_in = preset["price_in"] if preset else None
     price_out = preset["price_out"] if preset else None
     price_source = "MODEL_PRESETS"
-    try:  # 截图录入的价目优先于内置清单
+    try:  # 公开价目或截图录入的价目优先于内置清单
         row = get_db().execute(
-            "SELECT price_in,price_out FROM model_prices WHERE model=?", (model,)).fetchone()
+            "SELECT price_in,price_out,source FROM model_prices WHERE model=?", (model,)).fetchone()
         if row is not None and row["price_in"] is not None:
-            price_in, price_out, price_source = row["price_in"], row["price_out"], "截图价目"
+            price_in, price_out = row["price_in"], row["price_out"]
+            price_source = row["source"] or "模型价目"
     except Exception:
         pass
     peak = _now_in_peak()[0]
@@ -1205,9 +1411,34 @@ def _ai_usage_text(operation):
     return "本次 AI 消耗：" + "；".join(parts)
 
 
+def _compact_number(value):
+    """监控图表用的紧凑数值；完整数值仍在页面标题或明细表中保留。"""
+    if value is None:
+        return "—"
+    number = float(value)
+    for threshold, suffix in ((1000000000, "B"), (1000000, "M"), (1000, "K")):
+        if abs(number) >= threshold:
+            text = f"{number / threshold:.2f}".rstrip("0").rstrip(".")
+            return text + suffix
+    return f"{int(number):,}"
+
+
+def _token_axis_max(value):
+    """将柱状图上限取为 1 / 2 / 5 × 10ⁿ，避免顶部柱贴边。"""
+    value = int(value or 0)
+    magnitude = 1
+    while magnitude * 10 <= value:
+        magnitude *= 10
+    for factor in (1, 2, 5, 10):
+        if magnitude * factor >= value:
+            return magnitude * factor
+    return 1
+
+
 app.jinja_env.globals["ai_operation_label"] = AI_OPERATION_LABEL.get
 app.jinja_env.globals["ai_status_label"] = AI_STATUS_LABEL.get
 app.jinja_env.globals["ai_usage_text"] = _ai_usage_text
+app.jinja_env.globals["compact_number"] = _compact_number
 
 
 def _ai_dashboard_data(filters):
@@ -1226,6 +1457,16 @@ def _ai_dashboard_data(filters):
         if value not in (None, ""):
             where.append(column + "=?")
             params.append(value)
+    query = (filters.get("q") or "").strip()
+    if query:
+        if query.startswith("#") and query[1:].isdigit():
+            where.append("o.id=?")
+            params.append(int(query[1:]))
+        else:
+            where.append("EXISTS (SELECT 1 FROM ai_usage_events search_event "
+                         "WHERE search_event.operation_id=o.id "
+                         "AND search_event.provider_request_id LIKE ?)")
+            params.append("%" + query + "%")
 
     sql = """
         WITH operation_usage AS (
@@ -1305,6 +1546,114 @@ def _ai_dashboard_data(filters):
             ORDER BY operation_count DESC, label""", params).fetchall())
     recent = [dict(row) for row in db.execute(
         sql + " SELECT * FROM operation_usage ORDER BY id DESC LIMIT 20", params).fetchall()]
+
+    # 请求级分析使用服务商实际返回的模型名；业务操作数仍由上面的 operation_usage 决定。
+    event_from = """
+        FROM ai_operations o
+        JOIN ai_usage_events e ON e.operation_id=o.id
+        LEFT JOIN users u ON u.id=o.teacher_id
+        LEFT JOIN courses c ON c.id=o.course_id
+    """
+    event_where = (" WHERE " + " AND ".join(where)) if where else ""
+    event_model = "COALESCE(NULLIF(e.model,''),NULLIF(o.model,''),'未指定模型')"
+    model_rows = [dict(row) for row in db.execute("""
+        SELECT """ + event_model + """ AS label, COUNT(*) AS request_count,
+          CASE WHEN COUNT(e.total_tokens)>0 THEN SUM(e.total_tokens) END AS total_tokens,
+          SUM(CASE WHEN e.total_tokens IS NULL THEN 1 ELSE 0 END) AS unknown_usage_count
+    """ + event_from + event_where + """
+        GROUP BY """ + event_model + """
+        ORDER BY total_tokens IS NULL,total_tokens DESC,request_count DESC,label
+    """, params).fetchall()]
+
+    palette = ["#4e6ef2", "#16a394", "#f59e0b", "#8b5cf6", "#ec4899", "#22c55e"]
+    other_color = "#98a2b3"
+    top_models = model_rows[:6]
+    top_labels = {row["label"] for row in top_models}
+    token_peak = max((row["total_tokens"] or 0 for row in model_rows), default=0)
+    model_ranking = []
+    for index, row in enumerate(model_rows[:8]):
+        item = dict(row)
+        item["rank"] = index + 1
+        item["color"] = palette[index] if index < len(palette) else other_color
+        item["bar_pct"] = round((row["total_tokens"] or 0) * 100 / token_peak, 1) if token_peak else 0
+        model_ranking.append(item)
+
+    trend_rows = [dict(row) for row in db.execute("""
+        SELECT substr(o.started_at,1,10) AS day,""" + event_model + """ AS label,
+          COUNT(*) AS request_count,
+          CASE WHEN COUNT(e.total_tokens)>0 THEN SUM(e.total_tokens) END AS total_tokens
+    """ + event_from + event_where + """
+        GROUP BY substr(o.started_at,1,10),""" + event_model + """
+        ORDER BY day,label
+    """, params).fetchall()]
+    if filters["period"] == "all":
+        day_labels = sorted({row["day"] for row in trend_rows})
+    else:
+        first_day = datetime.now().date() - timedelta(days=int(filters["period"]) - 1)
+        day_labels = [(first_day + timedelta(days=offset)).isoformat()
+                      for offset in range(int(filters["period"]))]
+    rows_by_day = {}
+    for row in trend_rows:
+        rows_by_day.setdefault(row["day"], []).append(row)
+
+    trend_models = [{"label": row["label"], "color": palette[index],
+                     "total_tokens": row["total_tokens"]}
+                    for index, row in enumerate(top_models)]
+    if len(model_rows) > len(top_models):
+        others = model_rows[len(top_models):]
+        other_known = [row["total_tokens"] for row in others if row["total_tokens"] is not None]
+        trend_models.append({"label": "其他模型", "color": other_color,
+                             "total_tokens": sum(other_known) if other_known else None})
+
+    chart_days = []
+    for day in day_labels:
+        source_rows = rows_by_day.get(day, [])
+        segments = []
+        for model in trend_models:
+            if model["label"] == "其他模型":
+                matched = [row for row in source_rows if row["label"] not in top_labels]
+            else:
+                matched = [row for row in source_rows if row["label"] == model["label"]]
+            known = [row["total_tokens"] for row in matched if row["total_tokens"] is not None]
+            segments.append({**model, "value": sum(known) if known else None,
+                             "request_count": sum(row["request_count"] for row in matched)})
+        known_totals = [segment["value"] for segment in segments if segment["value"] is not None]
+        chart_days.append({"label": day, "short_label": day[5:], "segments": segments,
+                           "total_tokens": sum(known_totals) if known_totals else None,
+                           "request_count": sum(row["request_count"] for row in source_rows)})
+    axis_max = _token_axis_max(max((day["total_tokens"] or 0 for day in chart_days), default=0))
+    for day in chart_days:
+        for segment in day["segments"]:
+            segment["height_pct"] = (round(segment["value"] * 100 / axis_max, 3)
+                                     if segment["value"] else 0)
+    token_trend = {
+        "days": chart_days,
+        "models": trend_models,
+        "ticks": [axis_max * step / 4 for step in range(4, -1, -1)],
+        "width": max(660, len(day_labels) * 46),
+        "has_tokens": any(day["total_tokens"] is not None for day in chart_days),
+    }
+
+    request_logs = [dict(row) for row in db.execute("""
+        SELECT e.id,e.operation_id,e.attempt,e.provider_request_id,
+          """ + event_model + """ AS model,e.prompt_tokens,e.completion_tokens,e.total_tokens,
+          e.cached_tokens,e.reasoning_tokens,e.latency_ms,e.finish_reason,e.estimated_cost,
+          e.status AS event_status,e.error AS event_error,
+          COALESCE(e.created_at,o.started_at) AS request_time,
+          o.started_at AS operation_started_at,o.operation_type,o.status AS operation_status,
+          o.error AS operation_error,u.display_name AS teacher_name,u.username AS teacher_username,
+          c.name AS course_name
+    """ + event_from + event_where + " ORDER BY e.id DESC LIMIT 50", params).fetchall()]
+    for row in request_logs:
+        try:
+            # SQLite CURRENT_TIMESTAMP 使用 UTC；操作时间仍保留应用本地时间口径。
+            recorded_at = datetime.fromisoformat(row["request_time"])
+            if recorded_at.tzinfo is None:
+                recorded_at = recorded_at.replace(tzinfo=timezone.utc)
+            row["request_time"] = recorded_at.astimezone().isoformat(sep=" ", timespec="seconds")
+        except (TypeError, ValueError):
+            pass
+
     options = {
         "teachers": db.execute(
             "SELECT id,display_name,username FROM users WHERE role='teacher' OR EXISTS "
@@ -1317,7 +1666,9 @@ def _ai_dashboard_data(filters):
                        for value, label in AI_OPERATION_LABEL.items()],
     }
     return {"summary": summary, "daily": daily, "groups": groups,
-            "recent": recent, "options": options}
+            "recent": recent, "options": options, "model_ranking": model_ranking,
+            "model_ranking_extra": max(0, len(model_rows) - len(model_ranking)),
+            "token_trend": token_trend, "request_logs": request_logs}
 
 
 # ---------- 提示词（批改 / 报告）----------
@@ -1634,7 +1985,9 @@ def admin_users():
 @role_required("admin")
 def admin_ai_usage():
     period = request.args.get("period", "30")
-    if period not in {"7", "30", "90", "all"}:
+    period_labels = {"1": "今天", "7": "近 7 天", "30": "近 30 天",
+                     "90": "近 90 天", "all": "全部时间"}
+    if period not in period_labels:
         period = "30"
 
     def optional_id(name):
@@ -1657,8 +2010,12 @@ def admin_ai_usage():
         "operation_type": operation_type,
         "model": request.args.get("model", "").strip()[:200],
         "status": status,
+        "q": request.args.get("q", "").strip()[:200],
     }
+    period_links = {value: url_for("admin_ai_usage", **{**filters, "period": value})
+                    for value in period_labels}
     return render_template("admin_ai_usage.html", filters=filters,
+                           period_labels=period_labels, period_links=period_links,
                            **_ai_dashboard_data(filters))
 
 

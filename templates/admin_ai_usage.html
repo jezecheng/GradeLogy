@@ -1,47 +1,59 @@
 {% extends "base.html" %}
-{% block title %}AI 使用{% endblock %}
+{% block title %}AI 用量监控{% endblock %}
 {% macro token_text(value) -%}
   {%- if value is not none %}{{ '{:,}'.format(value) }}{% else %}—{% endif -%}
+{%- endmacro %}
+{% macro compact_token(value) -%}
+  <span class="monitor-kpi-num" {% if value is not none %}title="{{ '{:,}'.format(value) }} Tokens"{% endif %}>{{ compact_number(value) }}</span>
 {%- endmacro %}
 {% macro cost_text(value) -%}
   {%- if value is not none %}¥{{ '%.4f'|format(value) }}{% else %}—{% endif -%}
 {%- endmacro %}
 {% macro distribution_table(rows, operation_labels=false) %}
   {% if rows %}
-  <table class="bar-table">
-    <tr><th>名称</th><th>操作</th><th>请求</th><th>总 token</th><th>预估费用</th></tr>
-    {% for row in rows %}
-    <tr>
-      <td>
-        <strong>{% if operation_labels %}{{ ai_operation_label(row.label) or row.label }}{% else %}{{ row.label }}{% endif %}</strong>
-        <div class="usage-bar" aria-hidden="true"><span style="width:{{ row.bar_pct }}%"></span></div>
-      </td>
-      <td>{{ row.operation_count }}</td>
-      <td>{{ row.request_count }}</td>
-      <td>{{ token_text(row.total_tokens) }}</td>
-      <td>{{ cost_text(row.estimated_cost) }}</td>
-    </tr>
-    {% endfor %}
-  </table>
+  <div class="table-scroll">
+    <table class="bar-table">
+      <tr><th>名称</th><th>操作</th><th>请求</th><th>总 token</th><th>预估费用</th></tr>
+      {% for row in rows %}
+      <tr>
+        <td>
+          <strong>{% if operation_labels %}{{ ai_operation_label(row.label) or row.label }}{% else %}{{ row.label }}{% endif %}</strong>
+          <div class="usage-bar" aria-hidden="true"><span style="width:{{ row.bar_pct }}%"></span></div>
+        </td>
+        <td>{{ row.operation_count }}</td>
+        <td>{{ row.request_count }}</td>
+        <td>{{ token_text(row.total_tokens) }}</td>
+        <td>{{ cost_text(row.estimated_cost) }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
   {% else %}
   <p class="muted">当前筛选条件下暂无数据。</p>
   {% endif %}
 {% endmacro %}
 {% block content %}
 {% include "_admin_tabs.html" %}
-<h1>AI 使用</h1>
-<p class="muted">汇总所有老师的 AI 操作与逐次模型请求。费用按调用时的价格快照估算，实际以服务商账单为准。</p>
+<header class="monitor-heading">
+  <div>
+    <h1>AI 用量监控</h1>
+    <p class="muted">从业务操作到每一次模型请求，追踪 Token 消耗、成本与调用质量。</p>
+  </div>
+  <a class="monitor-refresh" href="{{ url_for('admin_ai_usage', **filters) }}">刷新数据</a>
+</header>
 
-<div class="card">
+<section class="card monitor-filter-card" aria-label="用量筛选">
+  <div class="monitor-period-row">
+    <span class="monitor-filter-title">时间范围</span>
+    <nav class="period-presets" aria-label="快捷时间范围">
+      {% for value, label in period_labels.items() %}
+      <a href="{{ period_links[value] }}" {% if filters.period == value %}class="active" aria-current="page"{% endif %}>{{ label }}</a>
+      {% endfor %}
+    </nav>
+    <span class="monitor-period-note">{{ period_labels[filters.period] }} · 按操作开始时间统计</span>
+  </div>
   <form method="get" action="{{ url_for('admin_ai_usage') }}" class="filter-form ai-filter-form">
-    <label>时间范围
-      <select name="period">
-        <option value="7" {% if filters.period == '7' %}selected{% endif %}>近 7 天</option>
-        <option value="30" {% if filters.period == '30' %}selected{% endif %}>近 30 天</option>
-        <option value="90" {% if filters.period == '90' %}selected{% endif %}>近 90 天</option>
-        <option value="all" {% if filters.period == 'all' %}selected{% endif %}>全部</option>
-      </select>
-    </label>
+    <input type="hidden" name="period" value="{{ filters.period }}">
     <label>教师
       <select name="teacher_id">
         <option value="">全部教师</option>
@@ -74,7 +86,7 @@
         {% endfor %}
       </select>
     </label>
-    <label>状态
+    <label>操作状态
       <select name="status">
         <option value="">全部状态</option>
         {% for value, label in [('success','成功'),('failed','失败'),('running','进行中')] %}
@@ -82,101 +94,237 @@
         {% endfor %}
       </select>
     </label>
+    <label class="monitor-search">请求定位
+      <input type="search" name="q" value="{{ filters.q }}" placeholder="请求 ID，或 #操作 ID">
+    </label>
     <div class="filter-actions">
       <button type="submit">应用筛选</button>
       <a class="small" href="{{ url_for('admin_ai_usage') }}">重置</a>
     </div>
   </form>
-</div>
+</section>
 
-<div class="card">
-  <div class="card-head"><h2>用量总览</h2><span class="muted small">已知数据合计，不将未知值记为 0</span></div>
-  <div class="stats-kpis admin-ai-kpis">
-    <div class="kpi">
-      <div class="kpi-num">{{ summary.operation_count }}</div>
-      <div class="kpi-lbl">AI 操作</div>
-      <div class="kpi-sub">成功 {{ summary.success_count }} · 失败 {{ summary.failed_count }} · 进行中 {{ summary.running_count }}</div>
-    </div>
-    <div class="kpi">
-      <div class="kpi-num">{% if summary.success_rate is not none %}{{ summary.success_rate }}%{% else %}—{% endif %}</div>
-      <div class="kpi-lbl">已完成操作成功率</div>
-      <div class="kpi-sub">进行中不计入分母</div>
-    </div>
-    <div class="kpi">
-      <div class="kpi-num">{{ summary.request_count }}</div>
-      <div class="kpi-lbl">模型请求（含重试）</div>
-      <div class="kpi-sub">{{ summary.no_request_count }} 次操作未发起请求</div>
-    </div>
-    <div class="kpi">
-      <div class="kpi-num">{{ token_text(summary.total_tokens) }}</div>
-      <div class="kpi-lbl">总 token</div>
-      <div class="kpi-sub">输入 {{ token_text(summary.prompt_tokens) }} · 输出 {{ token_text(summary.completion_tokens) }}</div>
-      {% if summary.unknown_usage_count %}<div class="kpi-sub">{{ summary.unknown_usage_count }} 次请求用量未知</div>{% endif %}
-    </div>
-    <div class="kpi">
-      <div class="kpi-num">{{ cost_text(summary.estimated_cost) }}</div>
-      <div class="kpi-lbl">预估费用</div>
-      {% if summary.unknown_cost_count %}<div class="kpi-sub">{{ summary.unknown_cost_count }} 次请求费用未知</div>{% else %}<div class="kpi-sub">按价格快照估算</div>{% endif %}
-    </div>
-    <div class="kpi">
-      <div class="kpi-num">{% if summary.avg_latency_s is not none %}{{ summary.avg_latency_s }}s{% else %}—{% endif %}</div>
-      <div class="kpi-lbl">平均请求耗时</div>
-      <div class="kpi-sub">仅统计服务商已返回耗时的请求</div>
-    </div>
+<section class="monitor-kpis" aria-label="Token 用量总览">
+  <article class="monitor-kpi is-primary">
+    <div class="monitor-kpi-label">总 Tokens</div>
+    {{ compact_token(summary.total_tokens) }}
+    <div class="monitor-kpi-foot">{{ period_labels[filters.period] }}累加</div>
+    {% if summary.unknown_usage_count %}<div class="monitor-kpi-warning">{{ summary.unknown_usage_count }} 次请求用量未知</div>{% endif %}
+  </article>
+  <article class="monitor-kpi">
+    <div class="monitor-kpi-label">输入 Tokens</div>
+    {{ compact_token(summary.prompt_tokens) }}
+    <div class="monitor-kpi-foot">发送给模型的内容</div>
+  </article>
+  <article class="monitor-kpi">
+    <div class="monitor-kpi-label">输出 Tokens</div>
+    {{ compact_token(summary.completion_tokens) }}
+    <div class="monitor-kpi-foot">模型生成的内容</div>
+  </article>
+  <article class="monitor-kpi">
+    <div class="monitor-kpi-label">缓存 Tokens</div>
+    {{ compact_token(summary.cached_tokens) }}
+    <div class="monitor-kpi-foot">命中服务商提示词缓存</div>
+  </article>
+</section>
+<p class="muted small monitor-token-note">推理 token：{{ token_text(summary.reasoning_tokens) }}。仅合计服务商已返回的数据，未知值不记为 0。</p>
+
+<section class="card monitor-health-strip" aria-label="运行健康度">
+  <div class="monitor-health-item">
+    <span class="monitor-health-label">AI 操作</span>
+    <strong>{{ summary.operation_count }}</strong>
+    <span class="monitor-health-sub">成功 {{ summary.success_count }} · 失败 {{ summary.failed_count }} · 进行中 {{ summary.running_count }}</span>
   </div>
-  <p class="muted small token-breakdown">缓存 token：{{ token_text(summary.cached_tokens) }} · 推理 token：{{ token_text(summary.reasoning_tokens) }}；未知项目以 — 表示。</p>
-</div>
+  <div class="monitor-health-item">
+    <span class="monitor-health-label">操作成功率</span>
+    <strong>{% if summary.success_rate is not none %}{{ summary.success_rate }}%{% else %}—{% endif %}</strong>
+    <span class="monitor-health-sub">进行中不计入分母</span>
+  </div>
+  <div class="monitor-health-item">
+    <span class="monitor-health-label">模型请求</span>
+    <strong>{{ summary.request_count }}</strong>
+    <span class="monitor-health-sub">含重试 · {{ summary.no_request_count }} 次操作未发起请求</span>
+  </div>
+  <div class="monitor-health-item">
+    <span class="monitor-health-label">平均请求耗时</span>
+    <strong>{% if summary.avg_latency_s is not none %}{{ summary.avg_latency_s }}s{% else %}—{% endif %}</strong>
+    <span class="monitor-health-sub">仅统计已知耗时</span>
+  </div>
+  <div class="monitor-health-item">
+    <span class="monitor-health-label">预估费用</span>
+    <strong>{{ cost_text(summary.estimated_cost) }}</strong>
+    <span class="monitor-health-sub">{% if summary.unknown_cost_count %}{{ summary.unknown_cost_count }} 次请求费用未知{% else %}按调用时价格快照{% endif %}</span>
+  </div>
+</section>
 
-<div class="dashboard-grid">
-  <div class="card">
-    <div class="card-head"><h2>按日趋势</h2><span class="muted small">横条按操作数归一化</span></div>
+<section class="card usage-visual-card">
+  <div class="usage-model-ranking">
+    <div class="card-head">
+      <h2>模型用量排行</h2>
+      <span class="muted small">按总 token</span>
+    </div>
+    {% if model_ranking %}
+    <ol class="model-rank-list">
+      {% for row in model_ranking %}
+      <li>
+        <span class="model-rank-no">{{ '%02d'|format(row.rank) }}</span>
+        <span class="model-rank-dot" style="background:{{ row.color }}" aria-hidden="true"></span>
+        <div class="model-rank-main">
+          <div class="model-rank-name" title="{{ row.label }}">{{ row.label }}</div>
+          <div class="model-rank-bar" aria-hidden="true"><span style="width:{{ row.bar_pct }}%;background:{{ row.color }}"></span></div>
+          <div class="model-rank-sub">{{ row.request_count }} 次请求{% if row.unknown_usage_count %} · {{ row.unknown_usage_count }} 次用量未知{% endif %}</div>
+        </div>
+        <strong class="model-rank-value" {% if row.total_tokens is not none %}title="{{ token_text(row.total_tokens) }} Tokens"{% endif %}>{{ compact_number(row.total_tokens) }}</strong>
+      </li>
+      {% endfor %}
+    </ol>
+    {% if model_ranking_extra %}<p class="muted small">另有 {{ model_ranking_extra }} 个模型未列入排行。</p>{% endif %}
+    {% else %}<p class="muted">当前筛选条件下暂无模型请求。</p>{% endif %}
+  </div>
+
+  <div class="usage-trend-panel">
+    <div class="card-head">
+      <div><h2>Token 消耗走势</h2><span class="muted small">按日堆叠 · 按服务商实际返回模型分色</span></div>
+      <span class="monitor-period-chip">{{ period_labels[filters.period] }}</span>
+    </div>
+    {% if token_trend.models %}
+    <div class="usage-chart-legend" aria-label="模型图例">
+      {% for model in token_trend.models %}
+      <span><i style="background:{{ model.color }}" aria-hidden="true"></i>{{ model.label }} <strong>{{ compact_number(model.total_tokens) }}</strong></span>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% if token_trend.has_tokens %}
+    <div class="usage-chart-body">
+      <div class="usage-chart-y" aria-hidden="true">
+        {% for tick in token_trend.ticks %}<span>{{ compact_number(tick) }}</span>{% endfor %}
+      </div>
+      <div class="usage-chart-scroll">
+        <div class="usage-chart-plot" style="width:{{ token_trend.width }}px">
+          <div class="usage-chart-grid" aria-hidden="true">{% for tick in token_trend.ticks %}<i></i>{% endfor %}</div>
+          <div class="usage-chart-columns">
+            {% for day in token_trend.days %}
+            <div class="usage-chart-day">
+              <div class="usage-chart-bar-area">
+                <div class="usage-chart-stack" role="img" aria-label="{{ day.label }}，总 token {{ token_text(day.total_tokens) }}，{{ day.request_count }} 次请求">
+                  {% for segment in day.segments %}
+                  {% if segment.value %}
+                  <span style="height:{{ segment.height_pct }}%;background:{{ segment.color }}" title="{{ day.label }} · {{ segment.label }}：{{ token_text(segment.value) }} Tokens"></span>
+                  {% endif %}
+                  {% endfor %}
+                </div>
+              </div>
+              <span class="usage-chart-x">{{ day.short_label }}</span>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+    </div>
+    {% else %}
+    <div class="usage-chart-empty">
+      <strong>暂无可绘制的 Token 数据</strong>
+      <span>{% if summary.request_count %}服务商未返回用量，可先在下方请求日志检查调用状态。{% else %}当前时间范围与筛选条件下还没有模型请求。{% endif %}</span>
+    </div>
+    {% endif %}
     {% if daily %}
-    <div class="daily-usage-table">
-      <table class="bar-table">
-        <tr><th>日期</th><th>操作</th><th>请求</th><th>总 token</th><th>预估费用</th></tr>
-        {% for row in daily %}
+    <details class="usage-data-details">
+      <summary>查看每日汇总数据</summary>
+      <div class="table-scroll daily-usage-table">
+        <table class="bar-table">
+          <tr><th>日期</th><th>操作</th><th>请求</th><th>总 token</th><th>预估费用</th></tr>
+          {% for row in daily %}
+          <tr><td>{{ row.label }}</td><td>{{ row.operation_count }}</td><td>{{ row.request_count }}</td><td>{{ token_text(row.total_tokens) }}</td><td>{{ cost_text(row.estimated_cost) }}</td></tr>
+          {% endfor %}
+        </table>
+      </div>
+    </details>
+    {% endif %}
+  </div>
+</section>
+
+<section class="card request-log-card">
+  <div class="card-head">
+    <div><h2>请求日志</h2><span class="muted small">每次 API 调用单独记录，自动重试不会合并</span></div>
+    <span class="monitor-log-count">共 {{ summary.request_count }} 次{% if summary.request_count > request_logs|length %} · 显示最近 {{ request_logs|length }} 条{% endif %}</span>
+  </div>
+  {% if request_logs %}
+  <div class="table-scroll ai-request-table">
+    <table>
+      <thead>
+        <tr><th>请求时间</th><th>请求 ID</th><th>模型</th><th>操作 / 教师</th><th>请求状态</th><th class="right">总 Tokens</th><th class="right">输入</th><th class="right">输出</th><th class="right">缓存</th><th class="right">耗时</th><th class="right">费用</th><th>详情</th></tr>
+      </thead>
+      <tbody>
+        {% for row in request_logs %}
         <tr>
-          <td>{{ row.label }}<div class="usage-bar" aria-hidden="true"><span style="width:{{ row.bar_pct }}%"></span></div></td>
-          <td>{{ row.operation_count }}</td><td>{{ row.request_count }}</td>
-          <td>{{ token_text(row.total_tokens) }}</td><td>{{ cost_text(row.estimated_cost) }}</td>
+          <td class="nowrap">{{ row.request_time }}</td>
+          <td>
+            {% if row.provider_request_id %}
+            <code class="request-id" title="{{ row.provider_request_id }}">{{ row.provider_request_id[:16] }}{% if row.provider_request_id|length > 16 %}…{% endif %}</code>
+            {% else %}<span class="muted" title="服务商未返回请求 ID">内部 #{{ row.id }}</span>{% endif %}
+            <div class="muted small">第 {{ row.attempt }} 次尝试</div>
+          </td>
+          <td class="request-model">{{ row.model }}</td>
+          <td>{{ ai_operation_label(row.operation_type) or row.operation_type }} <span class="muted">#{{ row.operation_id }}</span><div class="muted small">{{ row.teacher_name or row.teacher_username or '已删除教师' }}</div></td>
+          <td>{% if row.event_status == 'success' %}<span class="request-status is-success">成功</span>{% elif row.event_status == 'error' %}<span class="request-status is-error">失败</span>{% else %}<span class="request-status">{{ row.event_status }}</span>{% endif %}</td>
+          <td class="right nowrap">{{ token_text(row.total_tokens) }}</td>
+          <td class="right nowrap">{{ token_text(row.prompt_tokens) }}</td>
+          <td class="right nowrap">{{ token_text(row.completion_tokens) }}</td>
+          <td class="right nowrap">{{ token_text(row.cached_tokens) }}</td>
+          <td class="right nowrap">{% if row.latency_ms is not none %}{{ '%.1f'|format(row.latency_ms / 1000) }}s{% else %}—{% endif %}</td>
+          <td class="right nowrap">{{ cost_text(row.estimated_cost) }}</td>
+          <td>
+            <details class="request-detail">
+              <summary>详情</summary>
+              <dl>
+                <dt>完整请求 ID</dt><dd>{{ row.provider_request_id or '服务商未返回' }}</dd>
+                <dt>课程</dt><dd>{{ row.course_name or '未关联课程' }}</dd>
+                <dt>操作状态</dt><dd>{{ ai_status_label(row.operation_status) or row.operation_status }}</dd>
+                <dt>结束原因</dt><dd>{{ row.finish_reason or '—' }}</dd>
+                {% if row.event_error %}<dt>请求错误</dt><dd class="danger-text">{{ row.event_error }}</dd>{% endif %}
+                {% if row.operation_error %}<dt>操作错误</dt><dd class="danger-text">{{ row.operation_error }}</dd>{% endif %}
+              </dl>
+            </details>
+          </td>
         </tr>
         {% endfor %}
-      </table>
-    </div>
-    {% else %}<p class="muted">当前筛选条件下暂无数据。</p>{% endif %}
+      </tbody>
+    </table>
   </div>
-  <div class="card">
-    <h2>按操作类型</h2>
-    {{ distribution_table(groups.operations, true) }}
-  </div>
-  <div class="card">
-    <h2>按模型</h2>
-    {{ distribution_table(groups.models) }}
-  </div>
-  <div class="card">
-    <h2>按教师</h2>
-    {{ distribution_table(groups.teachers) }}
-  </div>
-</div>
+  {% else %}<p class="muted">当前筛选条件下暂无请求日志。</p>{% endif %}
+  <p class="muted small request-log-note">Token 与费用来自单次请求快照；「—」表示服务商未返回或缺少价格，不代表 0。实际费用以服务商账单为准。</p>
+</section>
 
-<div class="card">
-  <div class="card-head"><h2>最近操作</h2><span class="muted small">最多 20 条，与上方筛选条件一致</span></div>
+<details class="card ai-business-details">
+  <summary class="card-head"><h2>业务视角与最近操作</h2><span class="muted small">按操作类型、教师查看，重试不重复计操作</span></summary>
+  <div class="dashboard-grid">
+    <section><h3>按操作类型</h3>{{ distribution_table(groups.operations, true) }}</section>
+    <section><h3>按教师</h3>{{ distribution_table(groups.teachers) }}</section>
+  </div>
+  <h3>最近操作</h3>
   {% if recent %}
-  <table>
-    <tr><th>开始时间</th><th>教师 / 课程</th><th>操作</th><th>模型 / 状态</th><th>消耗</th></tr>
-    {% for op in recent %}
-    <tr>
-      <td class="nowrap">{{ op.started_at }}</td>
-      <td>{{ op.teacher_name or op.teacher_username or '已删除教师' }}<br><span class="muted small">{{ op.course_name or '未关联课程' }}</span></td>
-      <td>{{ ai_operation_label(op.operation_type) or op.operation_type }}<br><span class="muted small">#{{ op.id }}</span></td>
-      <td>{{ op.model or '未指定模型' }}<br><span class="muted small">{{ ai_status_label(op.status) or op.status }}</span></td>
-      <td>{{ ai_usage_text(op) }}
-        {% if op.request_count > 1 %}<div class="muted small">共 {{ op.request_count }} 次请求，以上为合计。</div>{% endif %}
-        {% if op.error %}<div class="danger-text small">失败原因：{{ op.error }}</div>{% endif %}
-      </td>
-    </tr>
-    {% endfor %}
-  </table>
+  <div class="table-scroll">
+    <table>
+      <tr><th>开始时间</th><th>教师 / 课程</th><th>操作</th><th>模型 / 状态</th><th>消耗</th></tr>
+      {% for op in recent %}
+      <tr>
+        <td class="nowrap">{{ op.started_at }}</td>
+        <td>{{ op.teacher_name or op.teacher_username or '已删除教师' }}<br><span class="muted small">{{ op.course_name or '未关联课程' }}</span></td>
+        <td>{{ ai_operation_label(op.operation_type) or op.operation_type }}<br><span class="muted small">#{{ op.id }}</span></td>
+        <td>{{ op.model or '未指定模型' }}<br><span class="muted small">{{ ai_status_label(op.status) or op.status }}</span></td>
+        <td>{{ ai_usage_text(op) }}{% if op.request_count > 1 %}<div class="muted small">共 {{ op.request_count }} 次请求，以上为合计。</div>{% endif %}{% if op.error %}<div class="danger-text small">失败原因：{{ op.error }}</div>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
   {% else %}<p class="muted">当前筛选条件下暂无操作。</p>{% endif %}
-</div>
+</details>
+{% endblock %}
+{% block scripts %}
+<script>
+// 时间范围较长时，优先展示最近的用量；无脚本时仍可手动横向滚动。
+document.querySelectorAll('.usage-chart-scroll').forEach(function (chart) {
+  chart.scrollLeft = chart.scrollWidth;
+});
+</script>
 {% endblock %}

@@ -80,13 +80,15 @@ class AdminInsightsTest(unittest.TestCase):
         con.commit()
         con.close()
 
-    def event(self, operation_id, attempt, prompt, completion, total, cost, latency):
+    def event(self, operation_id, attempt, prompt, completion, total, cost, latency,
+              model="model", cached=0, provider_request_id=None, status="success", error=""):
         con = sqlite3.connect(app_module.DB_PATH)
         con.execute(
-            "INSERT INTO ai_usage_events(operation_id,attempt,model,prompt_tokens,"
-            "completion_tokens,total_tokens,cached_tokens,reasoning_tokens,latency_ms,"
-            "estimated_cost,status) VALUES(?,?, 'model',?,?,?,0,0,?,?,'success')",
-            (operation_id, attempt, prompt, completion, total, latency, cost))
+            "INSERT INTO ai_usage_events(operation_id,attempt,provider_request_id,model,"
+            "prompt_tokens,completion_tokens,total_tokens,cached_tokens,reasoning_tokens,"
+            "latency_ms,estimated_cost,status,error) VALUES(?,?,?,?,?,?,?,?,0,?,?,?,?)",
+            (operation_id, attempt, provider_request_id, model, prompt, completion, total,
+             cached, latency, cost, status, error))
         con.commit()
         con.close()
 
@@ -94,14 +96,18 @@ class AdminInsightsTest(unittest.TestCase):
         now = datetime.now().replace(microsecond=0)
         today = now.isoformat(sep=" ")
         self.operation(1, 2, "grade", "model-a", "success", today)
-        self.event(1, 1, 100, 20, 120, 0.001, 1000)
-        self.event(1, 2, 200, 30, 230, 0.002, 3000)
+        self.event(1, 1, 100, 20, 120, 0.001, 1000, model="model-a", cached=40,
+                   provider_request_id="req-grade-1")
+        self.event(1, 2, 200, 30, 230, 0.002, 3000, model="model-a", cached=60,
+                   provider_request_id="req-grade-2")
         self.operation(2, 3, "report_comment", "model-b", "failed", today, 20)
-        self.event(2, 1, None, None, None, None, None)
+        self.event(2, 1, None, None, None, None, None, model="model-b", cached=None,
+                   provider_request_id="req-failed-429", status="error", error="HTTP 429")
         self.operation(3, 2, "scope_analyze", "model-a", "running", today)
         old = (now - timedelta(days=40)).isoformat(sep=" ")
         self.operation(4, 2, "lecture_summary", "model-a", "success", old)
-        self.event(4, 1, 40, 10, 50, 0.005, 500)
+        self.event(4, 1, 40, 10, 50, 0.005, 500, model="model-a",
+                   provider_request_id="req-old")
 
     def dashboard(self, **filters):
         with app_module.app.app_context():
@@ -131,6 +137,60 @@ class AdminInsightsTest(unittest.TestCase):
         self.assertEqual((daily["operation_count"], daily["request_count"]), (3, 3))
         grade = next(row for row in all_data["groups"]["operations"] if row["label"] == "grade")
         self.assertEqual((grade["operation_count"], grade["request_count"]), (1, 2))
+
+    def test_request_logs_model_ranking_and_stacked_trend(self):
+        self.seed_operations()
+        data = self.dashboard()
+        self.assertEqual(data["summary"]["cached_tokens"], 100)
+        logs = data["request_logs"]
+        self.assertEqual([row["provider_request_id"] for row in logs],
+                         ["req-failed-429", "req-grade-2", "req-grade-1"])
+        self.assertEqual(logs[0]["event_status"], "error")
+        self.assertIsNone(logs[0]["total_tokens"])
+        self.assertEqual(logs[0]["event_error"], "HTTP 429")
+
+        ranking = {row["label"]: row for row in data["model_ranking"]}
+        self.assertEqual((ranking["model-a"]["total_tokens"],
+                          ranking["model-a"]["request_count"]), (350, 2))
+        self.assertIsNone(ranking["model-b"]["total_tokens"])
+        self.assertEqual(ranking["model-b"]["unknown_usage_count"], 1)
+
+        trend = data["token_trend"]
+        self.assertEqual(len(trend["days"]), 30)
+        today = datetime.now().date().isoformat()
+        day = next(row for row in trend["days"] if row["label"] == today)
+        self.assertEqual((day["total_tokens"], day["request_count"]), (350, 3))
+        segments = {row["label"]: row for row in day["segments"]}
+        self.assertEqual(segments["model-a"]["value"], 350)
+        self.assertIsNone(segments["model-b"]["value"])
+        self.assertEqual(segments["model-b"]["request_count"], 1)
+        self.assertEqual(len(self.dashboard(period="all")["token_trend"]["days"]), 2)
+
+        html = self.login().get("/admin/ai-usage?period=1").get_data(as_text=True)
+        self.assertIn("模型用量排行", html)
+        self.assertIn("Token 消耗走势", html)
+        self.assertIn("请求日志", html)
+        self.assertIn("req-failed-429", html)
+        self.assertIn("HTTP 429", html)
+
+    def test_request_id_and_operation_id_search(self):
+        self.seed_operations()
+        by_request = self.dashboard(q="grade-2")
+        self.assertEqual(by_request["summary"]["operation_count"], 1)
+        self.assertEqual(by_request["summary"]["request_count"], 2)
+        self.assertEqual(by_request["summary"]["total_tokens"], 350)
+        self.assertEqual(len(by_request["request_logs"]), 2)
+
+        by_operation = self.dashboard(q="#2")
+        self.assertEqual(by_operation["summary"]["operation_count"], 1)
+        self.assertEqual(by_operation["summary"]["request_count"], 1)
+        self.assertIsNone(by_operation["summary"]["total_tokens"])
+        self.assertEqual(by_operation["request_logs"][0]["provider_request_id"],
+                         "req-failed-429")
+
+        html = self.login().get("/admin/ai-usage?q=req-grade-2").get_data(as_text=True)
+        self.assertIn("req-grade-1", html)
+        self.assertNotIn("req-failed-429", html)
 
     def test_dashboard_filters_and_admin_pages(self):
         self.seed_operations()
@@ -451,6 +511,83 @@ class LectureScopeTest(unittest.TestCase):
         self.assertEqual(page.status_code, 200)
         self.assertIn("保存并生成题目列表", html)
         self.assertNotIn("scope/analyze", html)
+
+
+class TokenHubModelSyncTest(unittest.TestCase):
+    """TokenHub 每日同步：只保留适合图片批改的模型，并刷新公开价目。"""
+
+    PRICE_HTML = """
+    <table>
+      <tr><th>模型名称</th><th>model（调用参数）</th><th>条件</th><th>峰谷计费</th>
+          <th>推理输入（元/百万 tokens）</th><th>推理输出（元/百万 tokens）</th><th>缓存命中</th></tr>
+      <tr><td>纯文本 Hy4</td><td>hy4</td><td>-</td><td>-</td><td>6</td><td>18</td><td>0.3</td></tr>
+      <tr><td>DeepSeek-V4.1-Flash</td><td>deepseek-v4.1-flash</td><td>-</td><td>空闲时段</td>
+          <td>1</td><td>4</td><td>0.02</td></tr>
+      <tr><td></td><td></td><td></td><td>高峰时段</td><td>2</td><td>8</td><td>0.04</td></tr>
+      <tr><td>GLM-5.3-Flash</td><td>glm-5.3-flash</td><td>-</td><td>-</td><td>0.8</td><td>2.8</td><td>0.23</td></tr>
+    </table>
+    <table>
+      <tr><th>模型名称</th><th>推理输入（元/百万 tokens）</th><th>推理输出（元/百万 tokens）</th></tr>
+      <tr><td>YT-VITA</td><td>1.2</td><td>3.5</td></tr>
+    </table>
+    <table>
+      <tr><th>模型名称</th><th>功能</th><th>Token 单价</th></tr>
+      <tr><td>语音合成 TTS</td><td>语音合成</td><td>10 元/百万 tokens</td></tr>
+    </table>
+    """
+
+    def setUp(self):
+        app_module.app.config.update(TESTING=True)
+        con = sqlite3.connect(app_module.DB_PATH)
+        for table in ("model_sync", "model_sync_state", "model_prices", "settings", "users"):
+            con.execute(f"DELETE FROM {table}")
+        con.execute(
+            "INSERT INTO users(id,username,password_hash,display_name,role,active,"
+            "must_change_password) VALUES(2,'teacher1','x','老师一','teacher',1,0)")
+        con.executemany(
+            "INSERT INTO settings(teacher_id,key,value) VALUES(2,?,?)",
+            [("ai_api_url", "https://tokenhub.tencentmaas.com/v1"), ("ai_api_key", "secret")])
+        con.commit()
+        con.close()
+
+    def test_parse_tokenhub_prices_and_suitable_filter(self):
+        data = app_module.parse_tokenhub_prices(self.PRICE_HTML)
+        self.assertEqual(data["prices"]["deepseek-v4.1-flash"]["price_in"], 1.0)
+        self.assertEqual(data["prices"]["deepseek-v4.1-flash"]["price_out"], 4.0)
+        self.assertEqual(data["prices"]["glm-5.3-flash"]["price_out"], 2.8)
+        self.assertEqual(data["prices"]["yt-vita"]["price_in"], 1.2)
+        self.assertIn("hy4", data["prices"])
+        suitable = app_module.tokenhub_suitable_model_ids(data)
+        self.assertIn("deepseek-v4.1-flash", suitable)
+        self.assertIn("yt-vita", suitable)
+        self.assertNotIn("hy4", suitable)
+
+    def test_sync_keeps_only_suitable_models_and_updates_prices(self):
+        available = [
+            {"model_id": "hy4", "display_name": "Hy4", "status": ""},
+            {"model_id": "deepseek-v4.1-flash", "display_name": "DeepSeek-V4.1-Flash", "status": ""},
+            {"model_id": "glm-5.3-flash", "display_name": "GLM-5.3-Flash", "status": ""},
+            {"model_id": "tenlai-tts-v1", "display_name": "TTS", "status": ""},
+        ]
+        prices = app_module.parse_tokenhub_prices(self.PRICE_HTML)
+        with mock.patch.object(app_module, "fetch_available_models", return_value=available), \
+                mock.patch.object(app_module, "fetch_tokenhub_prices", return_value=prices):
+            count, err = app_module.sync_models_for_teacher(2, force=True)
+        self.assertEqual(err, "")
+        self.assertEqual(count, 2)
+
+        con = sqlite3.connect(app_module.DB_PATH)
+        rows = con.execute(
+            "SELECT model_id FROM model_sync WHERE teacher_id=2 "
+            "ORDER BY model_id").fetchall()
+        self.assertEqual([r[0] for r in rows], ["deepseek-v4.1-flash", "glm-5.3-flash"])
+        price = con.execute(
+            "SELECT price_in,price_out,source FROM model_prices WHERE model='deepseek-v4.1-flash'"
+        ).fetchone()
+        con.close()
+        self.assertEqual(price[0], 1.0)
+        self.assertEqual(price[1], 4.0)
+        self.assertEqual(price[2], "TokenHub 公开价目")
 
 
 if __name__ == "__main__":
