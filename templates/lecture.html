@@ -145,7 +145,7 @@
   <form method="post" action="{{ url_for('lecture_scope_save', hid=hw.id) }}" id="scope-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <table>
-      <tr><th style="width:60px">选中</th><th>题号</th><th>满分</th><th>说明</th></tr>
+      <tr><th style="width:60px">选中</th><th>题号</th><th>满分</th><th>说明</th><th>知识点标签</th></tr>
       {% for q in cands %}
       <tr>
         <td><input type="checkbox" name="no" value="{{ q.key or q.no }}" style="width:auto"
@@ -153,6 +153,11 @@
         <td>{{ q.no }}</td>
         <td>{% if q.max %}{{ '%g'|format(q.max|float) }}{% else %}<span class="muted">—</span>{% endif %}</td>
         <td class="muted">{{ q.hint or '—' }}</td>
+        <td>
+          {% set qtags = tag_by_key.get(q.key or q.no) or [] %}
+          {% for t in qtags %}<span class="tag tag-knowledge">{{ t }}</span>{% endfor %}
+          {% if not qtags %}<span class="muted small">未标注</span>{% endif %}
+        </td>
       </tr>
       {% endfor %}
     </table>
@@ -160,9 +165,17 @@
       <button type="submit">保存作业范围</button>
       <button type="button" class="small ghost" data-scope-all="1">全选</button>
       <button type="button" class="small ghost" data-scope-all="0">全不选</button>
-      <span class="muted small">至少勾选一道题；当前已选 <b id="scope-count">{{ cands|length if not chosen else chosen|length }}</b> 题</span>
+      <span class="muted small">至少勾选一道题；当前已选 <b id="scope-count">{{ cands|length if not chosen else chosen|length }}</b> 题 ·
+        保存时会调用一次 AI 为勾选题目生成知识点标签</span>
     </div>
   </form>
+  <div class="save-bar" style="margin-top:6px">
+    <form method="post" action="{{ url_for('lecture_tags_generate', hid=hw.id) }}" class="tag-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <button type="submit" class="small ghost">重新生成知识点标签</button>
+      <span class="muted small">更换答案页或标签不理想时使用；只标注当前作业范围内的题目。</span>
+    </form>
+  </div>
   {% else %}
   <p class="muted">{% if hw.answer_pdf %}还没有题目清单。先在上方勾选教师版页码并点「保存并生成题目列表」。{% else %}请先上传教师版标准答案 PDF，再生成题目清单。{% endif %}</p>
   {% endif %}
@@ -350,6 +363,38 @@
   </div>
   {% endif %}
 </div>
+
+<div class="card" id="tag-analysis">
+  <div class="card-head">
+    <h2>知识点分析（全班）</h2>
+    <form method="post" action="{{ url_for('lecture_tag_analysis', hid=hw.id) }}"
+          class="tag-analysis-form" data-has-result="{{ '1' if tag_analysis else '0' }}">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <button type="submit" class="small ghost">
+        {{ '重新分析知识点' if tag_analysis else '分析知识点' }}
+      </button>
+    </form>
+  </div>
+  <p class="muted small">基于「作业范围」中每道题的知识点标签与全班逐题判定，横向找出同学们普遍薄弱的知识点，
+    并给出下次课的教学建议。需要先保存作业范围并完成 AI 批阅。</p>
+  {% if tag_stats %}
+  <div class="chips">
+    {% for t in tag_stats %}
+    <span class="chip tag-stat-chip" title="第 {{ t.question_nos|join('、') }} 题；错 {{ t.n_wrong }}、半对 {{ t.n_partial }}、对 {{ t.n_right }}">
+      {{ t.tag }} <b>{{ t.n_wrong + t.n_partial }}</b><span class="muted">/{{ t.n_total }}</span>
+    </span>
+    {% endfor %}
+  </div>
+  {% elif cands and chosen %}
+  <p class="muted small">本讲还没有知识点标签。保存一次作业范围即可自动生成。</p>
+  {% endif %}
+  {% if tag_analysis %}
+  <div style="margin-top:12px; padding-top:12px; border-top:1px dashed #eef0f3">
+    <p class="muted small">生成于 {{ tag_analysis.created_at|localtime }}（覆盖生成会弹确认）</p>
+    <div class="lecture-summary-body">{{ tag_analysis.content_md|markdown_safe }}</div>
+  </div>
+  {% endif %}
+</div>
 <script>
 // 上传 PDF：文件选择放在弹窗里，点「上传/更换」才打开
 (function () {
@@ -483,6 +528,35 @@
       boxes.forEach(function (b) { b.checked = on; });
       refresh();
     });
+  });
+  form.addEventListener('submit', function () {
+    busyOn(form.querySelector('button[type="submit"]'), '保存并标注中…');
+  });
+})();
+// 知识点标签与分析：都会调用 AI，按钮进入处理中状态；已有结果时覆盖先确认
+(function () {
+  var form = document.querySelector('.tag-form');
+  if (!form) return;
+  form.addEventListener('submit', function () {
+    busyOn(form.querySelector('button'), '标注中…');
+  });
+})();
+(function () {
+  var form = document.querySelector('.tag-analysis-form');
+  if (!form) return;
+  form.addEventListener('submit', function (e) {
+    if (form.dataset.hasResult === '1' && form.dataset.confirmed !== '1') {
+      e.preventDefault();
+      confirmDialog('重新分析会覆盖当前的全班知识点分析，确定继续吗？',
+                    '重新分析').then(function (ok) {
+        if (!ok) return;
+        form.dataset.confirmed = '1';
+        busyOn(form.querySelector('button'), '分析中…');
+        form.submit();
+      });
+      return;
+    }
+    busyOn(form.querySelector('button'), '分析中…');
   });
 })();
 // 讲次汇总：生成会耗时几十秒，按钮进入处理中状态；已有汇总时覆盖先确认

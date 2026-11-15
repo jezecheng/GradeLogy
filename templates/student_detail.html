@@ -34,6 +34,38 @@
 </div>
 
 <div class="card">
+  <div class="card-head">
+    <h2>纵向知识点分析</h2>
+    <form method="post" action="{{ url_for('student_tag_analysis', cid=course.id, sid=student.id) }}"
+          class="tag-analysis-form" data-has-result="{{ '1' if tag_analysis else '0' }}">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <button type="submit" class="small ghost">
+        {{ '重新分析薄弱点' if tag_analysis else '分析薄弱点' }}
+      </button>
+    </form>
+  </div>
+  <p class="muted small">汇总该生在本课程多讲作业中出错或半对的题目，按知识点标签找出在不同讲次中反复出现的薄弱点；
+    需要各讲次已生成知识点标签并完成 AI 批阅。</p>
+  {% if weak_stats %}
+  <div class="chips">
+    {% for t in weak_stats %}
+    <span class="chip tag-stat-chip" title="涉及 {{ t.n_lectures }} 讲；错 {{ t.n_wrong }}、半对 {{ t.n_partial }}">
+      {{ t.tag }} <b>{{ t.n_wrong + t.n_partial }}</b><span class="muted">/{{ t.n_lectures }}讲</span>
+    </span>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% if tag_analysis %}
+  <div style="margin-top:12px; padding-top:12px; border-top:1px dashed #eef0f3">
+    <p class="muted small">生成于 {{ tag_analysis.created_at|localtime }}</p>
+    <div class="lecture-summary-body">{{ tag_analysis.content_md|markdown_safe }}</div>
+  </div>
+  {% elif not weak_stats %}
+  <p class="muted small">暂无可分析数据：先给讲次生成知识点标签，并完成该生作业的 AI 批阅。</p>
+  {% endif %}
+</div>
+
+<div class="card">
   <h2>考试成绩（{{ exams|length }}）</h2>
   {% if exams %}
   <table>
@@ -62,4 +94,25 @@
   </table>
   <p class="muted small">学生主数据与登录密码由管理员统一维护，如需修改请联系管理员。</p>
 </div>
+<script>
+// 纵向分析会调用 AI：按钮进入处理中状态；已有结果时覆盖先确认
+(function () {
+  var form = document.querySelector('.tag-analysis-form');
+  if (!form) return;
+  form.addEventListener('submit', function (e) {
+    if (form.dataset.hasResult === '1' && form.dataset.confirmed !== '1') {
+      e.preventDefault();
+      confirmDialog('重新分析会覆盖当前的纵向知识点分析，确定继续吗？',
+                    '重新分析').then(function (ok) {
+        if (!ok) return;
+        form.dataset.confirmed = '1';
+        busyOn(form.querySelector('button'), '分析中…');
+        form.submit();
+      });
+      return;
+    }
+    busyOn(form.querySelector('button'), '分析中…');
+  });
+})();
+</script>
 {% endblock %}

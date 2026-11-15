@@ -50,13 +50,16 @@ from model_catalog import (EST_TOKENS_INPUT, EST_TOKENS_OUTPUT, MODEL_CATALOG,
                            start_model_sync, tokenhub_suitable_model_ids)
 from model_catalog import sync_models_for_teacher as _sync_models_for_teacher
 from utilities import assistant, course_export, llm, logview, roster, storage
+from utilities import tags as tag_utils
 from utilities.report import _overall_text, build_report_md, render_markdown
 from utilities.uploads import (_student_files, _validate_upload, allowed_file, file_list,
                                save_upload)
 from utilities.pdfgrade import (DEFAULT_GRADE_PROMPT, DEFAULT_REPORT_PROMPT,
-                                ai_lecture_summary, ai_report_comment,
-                                analyze_answer_pdf, grade_pdf_submission,
-                                pdf_page_count, render_page_jpeg)
+                                ai_horizontal_analysis, ai_lecture_summary,
+                                ai_report_comment, ai_vertical_analysis,
+                                analyze_answer_pdf, analyze_question_tags,
+                                grade_pdf_submission, pdf_page_count,
+                                render_page_jpeg)
 
 cfg.ensure_dirs()
 cfg.setup_logging()
@@ -1450,13 +1453,18 @@ def lecture_detail(hid):
         "JOIN (SELECT submission_id,MAX(id) AS max_id FROM ai_operations "
         "WHERE operation_type='grade' GROUP BY submission_id) m ON m.max_id=o.id "
         "JOIN submissions s ON s.id=o.submission_id WHERE s.lecture_id=?", (hid,))}
+    tag_by_key = tag_utils.lecture_tags_by_key(db, hid)
+    tag_stats = tag_utils.lecture_stats(db, hid)
     return render_template("lecture.html", hw=hw, course=course, subs=subs, students=students,
                            qstats=qstats, n_subs=n_subs, n_graded=n_graded, n_reviewed=n_reviewed,
                            answer_total=answer_total, answer_picked=answer_picked,
                            grade_jobs=grade_jobs,
                            grading_active=any(j["status"] in ("queued", "running")
                                               for j in grade_jobs.values()),
-                           acc_by=acc_by, ai_operations=_ai_operation_history(lecture_id=hid, limit=8))
+                           acc_by=acc_by, tag_by_key=tag_by_key, tag_stats=tag_stats,
+                           tag_analysis=tag_utils.latest_analysis(
+                               db, "horizontal", lecture_id=hid),
+                           ai_operations=_ai_operation_history(lecture_id=hid, limit=8))
 
 
 @_routes.route("/lecture/<oid:hid>/upload-for", methods=["POST"])
@@ -1545,6 +1553,69 @@ def _answer_pages_note(picked, total):
     if len(picked) == total:
         return f"已保存页码：全部 {total} 页（与不限制相同）。"
     return f"已保存页码：{len(picked)}/{total} 页，只发送这些页。"
+
+
+def _ai_endpoint(teacher_id):
+    """取当前可用的 AI 配置；不可用时返回 (\"\", \"\", \"\", 原因)。"""
+    if get_setting(teacher_id, "ai_demo") == "1":
+        return "", "", "", "演示模式不会调用 AI"
+    block = _offpeak_block_if_enabled(teacher_id)
+    if block:
+        return "", "", "", block
+    api_url = get_setting(teacher_id, "ai_api_url").rstrip("/")
+    api_key = get_setting(teacher_id, "ai_api_key")
+    model = get_setting(teacher_id, "ai_model")
+    if not api_url or not api_key or not model:
+        return "", "", "", "尚未配置 AI 接口"
+    return api_url, api_key, model, ""
+
+
+def _generate_question_tags(hw, keys):
+    """给作业范围内勾选的题目生成知识点标签，返回 (标签数, 错误提示)。
+
+    失败只返回原因，不影响已保存的作业范围；调用方决定如何提示。
+    """
+    db = get_db()
+    try:
+        cands = json.loads(hw["scope_candidates"] or "[]")
+    except (TypeError, ValueError):
+        cands = []
+    by_key = {str(c.get("key")): c for c in cands if isinstance(c, dict)}
+    picked = [by_key[str(k)] for k in keys if str(k) in by_key]
+    if not picked:
+        return 0, "没有找到勾选的题目，请重新生成题目清单"
+    if not hw["answer_pdf"]:
+        return 0, "教师版标准答案缺失，无法生成知识点标签"
+    api_url, api_key, model, err = _ai_endpoint(g.user["id"])
+    if err:
+        return 0, err
+    operation = _start_ai_operation(
+        g.user["id"], "question_tagging", model,
+        course_id=hw["course_id"], lecture_id=hw["id"])
+    try:
+        rows, err = analyze_question_tags(
+            os.path.join(UPLOAD_DIR, hw["answer_pdf"]), picked,
+            api_url, api_key, model, pages=_page_list(hw["answer_pages"]),
+            usage_hook=operation["usage_hook"])
+    except Exception as e:  # noqa: BLE001 标签失败不影响作业范围本身
+        _finish_ai_operation(operation, "failed", str(e))
+        log.exception("生成知识点标签失败 lecture=%s", hw["id"])
+        return 0, f"生成失败：{e}"
+    _finish_ai_operation(operation, "failed" if err else "success", err)
+    if err:
+        return 0, err
+    db.execute("DELETE FROM question_tags WHERE lecture_id=? AND source='ai'", (hw["id"],))
+    count = 0
+    for row in rows:
+        for tag in row["tags"]:
+            db.execute(
+                "INSERT INTO question_tags(lecture_id,question_key,question_no,tag,"
+                "category,source) VALUES(?,?,?,?,?,'ai')",
+                (hw["id"], row["key"], row["no"], tag, row["category"]))
+            count += 1
+    db.commit()
+    log.info("生成知识点标签 lecture=%s 题数=%s 标签数=%s", hw["id"], len(rows), count)
+    return count, ""
 
 
 def _analyze_scope(hw, pages):
@@ -1667,7 +1738,81 @@ def lecture_scope_save(hid):
     db.execute("UPDATE lectures SET scope_selected=? WHERE id=?",
                (json.dumps(keys, ensure_ascii=False), hid))
     db.commit()
-    flash(f"已保存作业范围：{len(keys)} 道题")
+    # 保存范围时顺带为勾选的题目生成知识点标签，供后续横向/纵向薄弱点分析
+    count, err = _generate_question_tags(hw, keys)
+    if err:
+        flash(f"已保存作业范围：{len(keys)} 道题；知识点标签未生成：{err}")
+    else:
+        flash(f"已保存作业范围：{len(keys)} 道题，已生成 {count} 个知识点标签")
+    return redirect(url_for("lecture_detail", hid=hid))
+
+
+@_routes.route("/lecture/<oid:hid>/tags/generate", methods=["POST"])
+@role_required("teacher")
+def lecture_tags_generate(hid):
+    """重新为当前作业范围生成知识点标签，用于失败重试或更换答案页后刷新。"""
+    db = get_db()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
+    if not hw:
+        abort(404)
+    own_course(hw["course_id"])
+    try:
+        keys = json.loads(hw["scope_selected"] or "[]")
+    except (TypeError, ValueError):
+        keys = []
+    if not keys:
+        flash("请先在「作业范围」勾选并保存本讲题目，再生成知识点标签。")
+        return redirect(url_for("lecture_detail", hid=hid))
+    count, err = _generate_question_tags(hw, keys)
+    if err:
+        flash(f"知识点标签未生成：{err}")
+    else:
+        flash(f"已重新生成 {count} 个知识点标签")
+    return redirect(url_for("lecture_detail", hid=hid))
+
+
+@_routes.route("/lecture/<oid:hid>/tag-analysis", methods=["POST"])
+@role_required("teacher")
+def lecture_tag_analysis(hid):
+    """横向分析：把本讲各知识点标签与全班逐题判定结合，找共性问题。"""
+    db = get_db()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
+    if not hw:
+        abort(404)
+    own_course(hw["course_id"])
+    stats = tag_utils.lecture_stats(db, hid)
+    if not stats:
+        flash("本讲还没有知识点标签；请先在「作业范围」保存一次，系统会自动调用 AI 标注。")
+        return redirect(url_for("lecture_detail", hid=hid))
+    if not any(s["n_total"] for s in stats):
+        flash("本讲还没有批改完成的作业，暂时无法做知识点分析。")
+        return redirect(url_for("lecture_detail", hid=hid))
+    api_url, api_key, model, err = _ai_endpoint(g.user["id"])
+    if err:
+        flash(f"知识点分析未生成：{err}")
+        return redirect(url_for("lecture_detail", hid=hid))
+    operation = _start_ai_operation(
+        g.user["id"], "tag_horizontal", model,
+        course_id=hw["course_id"], lecture_id=hid)
+    try:
+        result = ai_horizontal_analysis(stats, api_url, api_key, model,
+                                        usage_hook=operation["usage_hook"])
+    except Exception as e:
+        _finish_ai_operation(operation, "failed", str(e))
+        raise
+    error = "" if result else "AI 未返回可用的分析结果，请稍后重试"
+    _finish_ai_operation(operation, "success" if result else "failed", error)
+    if not result:
+        flash(error)
+        return redirect(url_for("lecture_detail", hid=hid))
+    md = tag_utils.render_horizontal_md(result, stats)
+    db.execute("INSERT INTO tag_analyses(teacher_id,course_id,lecture_id,kind,"
+               "content_md,stats_json) VALUES(?,?,?,'horizontal',?,?)",
+               (g.user["id"], hw["course_id"], hid, md,
+                json.dumps(stats, ensure_ascii=False)))
+    db.commit()
+    log.info("横向知识点分析完成 lecture=%s by=%s", hid, g.user["username"])
+    flash("全班知识点分析已生成")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
@@ -1790,8 +1935,51 @@ def student_detail(cid, sid):
         FROM exams x LEFT JOIN exam_scores s ON s.exam_id=x.id AND s.student_id=?
         WHERE x.course_id=? ORDER BY x.id DESC""", (sid, cid)).fetchall()
     acc_by = _accuracy_by_submission(db, [h["last_sub_id"] for h in lectures])
-    return render_template("student_detail.html", course=course, student=student,
-                           lectures=lectures, exams=exams, acc_by=acc_by)
+    return render_template(
+        "student_detail.html", course=course, student=student,
+        lectures=lectures, exams=exams, acc_by=acc_by,
+        weak_stats=tag_utils.student_stats(db, cid, sid),
+        tag_analysis=tag_utils.latest_analysis(db, "vertical", student_id=sid))
+
+
+@_routes.route("/course/<oid:cid>/student/<oid:sid>/tag-analysis", methods=["POST"])
+@role_required("teacher")
+def student_tag_analysis(cid, sid):
+    """纵向分析：把该生跨讲次的错题按知识点标签聚合，找反复出错的知识点。"""
+    db = get_db()
+    student = own_student(cid, sid)
+    course = own_course(cid)
+    stats = tag_utils.student_stats(db, cid, sid)
+    if not stats:
+        flash("暂时没有可分析的数据：需要先给讲次生成知识点标签，并且该生有批改结果。")
+        return redirect(url_for("student_detail", cid=cid, sid=sid))
+    api_url, api_key, model, err = _ai_endpoint(g.user["id"])
+    if err:
+        flash(f"纵向分析未生成：{err}")
+        return redirect(url_for("student_detail", cid=cid, sid=sid))
+    operation = _start_ai_operation(
+        g.user["id"], "tag_vertical", model, course_id=cid)
+    try:
+        result = ai_vertical_analysis(stats, student["display_name"], course["name"],
+                                      api_url, api_key, model,
+                                      usage_hook=operation["usage_hook"])
+    except Exception as e:
+        _finish_ai_operation(operation, "failed", str(e))
+        raise
+    error = "" if result else "AI 未返回可用的分析结果，请稍后重试"
+    _finish_ai_operation(operation, "success" if result else "failed", error)
+    if not result:
+        flash(error)
+        return redirect(url_for("student_detail", cid=cid, sid=sid))
+    md = tag_utils.render_vertical_md(result, stats)
+    db.execute("INSERT INTO tag_analyses(teacher_id,course_id,lecture_id,student_id,"
+               "kind,content_md,stats_json) VALUES(?,?,0,?,'vertical',?,?)",
+               (g.user["id"], cid, sid, md, json.dumps(stats, ensure_ascii=False)))
+    db.commit()
+    log.info("纵向知识点分析完成 course=%s student=%s by=%s",
+             cid, sid, g.user["username"])
+    flash("该生的纵向知识点分析已生成")
+    return redirect(url_for("student_detail", cid=cid, sid=sid))
 
 
 # ---------- 老师：考试（只录分数，不做 AI 批阅） ----------
@@ -2126,6 +2314,7 @@ def submission_review(sid):
     questions = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
                            (sid,)).fetchall()
     return render_template("review.html", sub=sub, hw=hw, course=course, questions=questions,
+                           tag_by_key=tag_utils.lecture_tags_by_key(db, hw["id"]),
                            grade_job=latest_operation(db, sid),
                            ai_operations=_ai_operation_history(submission_id=sid, limit=5))
 

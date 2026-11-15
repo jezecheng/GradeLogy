@@ -89,6 +89,7 @@
     <details class="review-item">
       <summary>
         <span class="q-no">{{ ('第 ' ~ q.no ~ ' 题') if q.no[:1].isdigit() else q.no }}</span>
+        {% for t in tag_by_key.get(q.no) or [] %}<span class="tag tag-knowledge">{{ t }}</span>{% endfor %}
         {% if q.verdict %}
         <span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">AI 判定：{{ q.verdict }}</span>
         {% endif %}

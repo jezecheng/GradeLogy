@@ -188,6 +188,31 @@ CREATE TABLE IF NOT EXISTS model_sync_state(
   model_count INTEGER DEFAULT 0,
   error TEXT DEFAULT '',
   PRIMARY KEY(teacher_id, base_url));
+-- 每讲每道题的知识点标签：设置作业范围时由 AI 生成，供横向/纵向薄弱点分析使用
+CREATE TABLE IF NOT EXISTS question_tags(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lecture_id INTEGER NOT NULL REFERENCES lectures(id),
+  question_key TEXT DEFAULT '',
+  question_no TEXT NOT NULL,
+  tag TEXT NOT NULL,
+  category TEXT DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'ai',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS idx_question_tags_lecture ON question_tags(lecture_id, question_no);
+CREATE INDEX IF NOT EXISTS idx_question_tags_tag ON question_tags(tag);
+-- 知识点分析结果：horizontal=同一讲的全班共性问题，vertical=同一学生跨讲次的薄弱点
+CREATE TABLE IF NOT EXISTS tag_analyses(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  teacher_id INTEGER NOT NULL,
+  course_id INTEGER NOT NULL,
+  lecture_id INTEGER DEFAULT 0,
+  student_id INTEGER DEFAULT 0,
+  kind TEXT NOT NULL,
+  content_md TEXT DEFAULT '',
+  stats_json TEXT DEFAULT '',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS idx_tag_analyses_lecture ON tag_analyses(kind, lecture_id, id);
+CREATE INDEX IF NOT EXISTS idx_tag_analyses_student ON tag_analyses(kind, student_id, id);
 -- 价目表：静态清单之外的覆盖值（目前由价目截图识别后确认写入），按模型 ID 全局生效
 CREATE TABLE IF NOT EXISTS model_prices(
   model TEXT PRIMARY KEY,

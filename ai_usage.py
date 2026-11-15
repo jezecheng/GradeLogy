@@ -24,6 +24,9 @@ PEAK_RANGES = [  # (start_hour, start_minute, end_hour, end_minute)，24 小时�
 # ---------- AI 操作与逐次调用用量 ----------
 AI_OPERATION_LABEL = {
     "scope_analyze": "作业范围分析",
+    "question_tagging": "知识点标注",
+    "tag_horizontal": "横向知识点分析",
+    "tag_vertical": "纵向知识点分析",
     "grade": "作业批阅",
     "lecture_summary": "讲次汇总",
     "report_generate": "批改报告评价",

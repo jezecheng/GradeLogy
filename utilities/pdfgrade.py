@@ -9,6 +9,7 @@ import base64
 import io
 import json
 import os
+import re
 
 import pypdfium2 as pdfium
 
@@ -251,6 +252,111 @@ def analyze_answer_pdf(answer_path, api_url, api_key, model, max_tokens=16384,
     return out, ""
 
 
+TAG_PROMPT = (
+    "你是教研助理。附件是教师版标准答案的相关页；下面给出本次作业范围内的题目清单。\n"
+    "请给每道题标注知识点标签，用于后续按知识点分析学生的薄弱点。\n"
+    "题目清单：\n"
+)
+
+TAG_RULES = (
+    "\n请只输出 JSON，不要输出解释或代码块标记：\n"
+    '{"questions":[{"no":"题号","category":"主要考查类型","tags":["知识点1","知识点2"]}]}\n'
+    "规则：\n"
+    "1. tags 用教材/考纲里的通用知识点术语（如 氧化还原反应、离子方程式、化学平衡常数），"
+    "每题 1~4 个，按主要程度排序。\n"
+    "2. 不要输出题号、分数、难度（如「基础题」「综合题」）这类非知识点标签。\n"
+    "3. 只输出清单里的题号，不要补题；同一题有多个小问时合并成一组标签。\n"
+    "4. 标准答案看不清时，可结合题目本身与清单里的说明推断；仍无法判断就把 tags 留空。"
+)
+
+MAX_TAGS_PER_QUESTION = 4
+
+
+def _clean_tags(raw):
+    """清理模型给出的标签：去重、去空白，过滤题号/分数学非知识点描述。"""
+    out = []
+    for item in raw or []:
+        if isinstance(item, dict):
+            item = item.get("tag") or item.get("name") or ""
+        text = str(item).strip().strip("#、,，;；")
+        if not text or len(text) > 20:
+            continue
+        if text in out:
+            continue
+        out.append(text)
+    return out[:MAX_TAGS_PER_QUESTION]
+
+
+def _no_token(value):
+    """题号归一化：取前导数字，便于把「3.」「第3题」「3(1)」归到同一题。"""
+    m = re.match(r"\s*(?:第\s*)?(\d+)", str(value or ""))
+    return m.group(1) if m else str(value or "").strip()
+
+
+def analyze_question_tags(answer_path, questions, api_url, api_key, model,
+                          max_tokens=4096, pages=None, usage_hook=None):
+    """给作业范围内每道题生成知识点标签，返回 (rows, error)。
+
+    rows 与传入 questions 顺序一致，每项为 {key,no,category,tags}；
+    没有生成标签的题也会保留（tags 为空），由调用方决定是否落库。
+    """
+    listing = []
+    for i, q in enumerate(questions or []):
+        if not isinstance(q, dict):
+            continue
+        no = str(q.get("no", "")).strip()
+        if not no:
+            continue
+        listing.append({"key": str(q.get("key") or f"q{i}"), "no": no,
+                        "hint": str(q.get("hint", "")).strip()})
+    if not listing:
+        return None, "没有可标注的题目"
+    if not answer_path:
+        return None, "教师版标准答案缺失，无法生成知识点标签"
+    parts, err = _file_parts(answer_path, "标准答案", pages)
+    if err:
+        return None, err
+
+    content = [{"type": "text",
+                "text": TAG_PROMPT + json.dumps(listing, ensure_ascii=False) + TAG_RULES},
+               {"type": "text", "text": f"教师版标准答案，共 {len(parts)} 页："}]
+    content += parts
+    reply, finish, err = llm.chat(api_url, api_key, model, content,
+                                  max_tokens=max_tokens, timeout=180, retries=1,
+                                  usage_hook=usage_hook)
+    if err:
+        return None, f"AI 标注失败：{err}"
+
+    data = llm.extract_json(reply)
+    raw = data.get("questions") if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        if finish == "length":
+            return None, "AI 输出被截断，未能得到知识点标签，请重试。"
+        return None, "AI 未返回可用的知识点标签，请重试。"
+
+    by_no = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        no = str(item.get("no", "")).strip()
+        if not no:
+            continue
+        tags = _clean_tags(item.get("tags"))
+        if not tags:
+            continue
+        by_no[_no_token(no)] = (tags, str(item.get("category", "")).strip())
+
+    rows = []
+    for q in listing:
+        tags, category = by_no.get(_no_token(q["no"]), ([], ""))
+        rows.append({"key": q["key"], "no": q["no"], "category": category, "tags": tags})
+    if not any(r["tags"] for r in rows):
+        if finish == "length":
+            return None, "AI 输出被截断，未能得到知识点标签，请重试。"
+        return None, "AI 未能为这些题目生成知识点标签，请重试。"
+    return rows, ""
+
+
 def grade_pdf_submission(student_path, answer_path, api_url, api_key, model,
                          extra="", max_tokens=32768, answer_pages=None, prompt="",
                          usage_hook=None):
@@ -413,3 +519,103 @@ def ai_lecture_summary(qstats, api_url, api_key, model, max_tokens=4096, usage_h
         return {}
     return {"per_question": data.get("per_question", {}),
             "overall": str(data.get("overall", "")).strip()}
+
+
+# ---------- 基于知识点标签的横向/纵向分析 ----------
+
+HORIZONTAL_TAG_PROMPT = (
+    "你是教研组组长。下面给出某讲作业按知识点标签汇总的全班判定统计"
+    "（对/半对/错/无法判定），以及错题的代表性评语。\n"
+    "请找出全班普遍存在的知识点问题，并给出教学建议。\n"
+    "只输出 JSON，不要输出解释或代码块标记：\n"
+    '{"summary":"整体判断（100~200 字）",'
+    '"points":[{"tag":"知识点标签","problem":"多数学生的具体问题（60~120 字）",'
+    '"advice":"下次课的教学建议（40~100 字）"}]}\n'
+    "规则：\n"
+    "1. tag 必须使用数据里出现的标签原文，不要自造新标签；按问题普遍程度排序，最多 6 条。\n"
+    "2. 只依据给定数据，不要编造学生没写的内容；错误率低的标签不要硬列为问题。\n"
+    "3. problem 要写清错在哪一步或哪个概念，避免空泛。"
+)
+
+VERTICAL_TAG_PROMPT = (
+    "你是该学生的任课老师。下面给出这个学生在本课程多次作业中，"
+    "错或半对的题目按知识点标签汇总的记录。\n"
+    "请结合同一知识点在不同讲次、不同题目里的反复出错情况，判断真正薄弱的知识点。\n"
+    "只输出 JSON，不要输出解释或代码块标记：\n"
+    '{"summary":"整体判断（100~200 字）",'
+    '"weak_tags":[{"tag":"知识点标签","trend":"在哪些讲次/题目反复出错、错误表现（60~120 字）",'
+    '"advice":"针对该生的练习建议（40~100 字）"}],'
+    '"strengths":"相对掌握较好的方面（60~120 字，没有就留空）"}\n'
+    "规则：\n"
+    "1. tag 必须使用数据中出现的标签原文，按薄弱程度排序，最多 6 条。\n"
+    "2. 只依据给定记录，不要编造；同一标签跨讲次重复出现时要明确指出。\n"
+    "3. 建议要具体可执行，不要只说「多加练习」。"
+)
+
+
+def ai_horizontal_analysis(stats, api_url, api_key, model,
+                           max_tokens=4096, usage_hook=None):
+    """按讲次聚合的知识点统计，生成全班共性问题分析；失败返回 {}。"""
+    payload = []
+    for row in (stats or []):
+        total = (row.get("n_right", 0) + row.get("n_partial", 0)
+                 + row.get("n_wrong", 0) + row.get("n_unknown", 0))
+        if not total:      # 还没有批改结果的标签不进入分析，避免干扰判断
+            continue
+        payload.append({
+            "tag": row.get("tag", ""),
+            "questions": row.get("question_nos") or [],
+            "students": row.get("n_students", 0),
+            "right": row.get("n_right", 0),
+            "partial": row.get("n_partial", 0),
+            "wrong": row.get("n_wrong", 0),
+            "unknown": row.get("n_unknown", 0),
+            "comments": (row.get("sample_comments") or [])[:3],
+        })
+        if len(payload) >= 16:
+            break
+    content = [{"type": "text", "text": HORIZONTAL_TAG_PROMPT + "\n\n数据：\n" +
+                json.dumps(payload, ensure_ascii=False)}]
+    reply, finish, err = llm.chat(api_url, api_key, model, content,
+                                  max_tokens=max_tokens, timeout=180, retries=1,
+                                  usage_hook=usage_hook)
+    if err:
+        return {}
+    data = llm.extract_json(reply)
+    if not isinstance(data, dict):
+        return {}
+    points = [p for p in (data.get("points") or []) if isinstance(p, dict)][:6]
+    summary = str(data.get("summary", "")).strip()
+    if not summary and not points:
+        return {}
+    return {"summary": summary, "points": points}
+
+
+def ai_vertical_analysis(stats, student_name, course_name, api_url, api_key, model,
+                         max_tokens=4096, usage_hook=None):
+    """按学生跨讲次聚合的错题标签，生成纵向薄弱点分析；失败返回 {}。"""
+    payload = {"student": student_name, "course": course_name, "weak_tags": []}
+    for row in (stats or [])[:16]:
+        payload["weak_tags"].append({
+            "tag": row.get("tag", ""),
+            "wrong": row.get("n_wrong", 0),
+            "partial": row.get("n_partial", 0),
+            "lectures": row.get("n_lectures", 0),
+            "episodes": (row.get("episodes") or [])[:6],
+        })
+    content = [{"type": "text", "text": VERTICAL_TAG_PROMPT + "\n\n数据：\n" +
+                json.dumps(payload, ensure_ascii=False)}]
+    reply, finish, err = llm.chat(api_url, api_key, model, content,
+                                  max_tokens=max_tokens, timeout=180, retries=1,
+                                  usage_hook=usage_hook)
+    if err:
+        return {}
+    data = llm.extract_json(reply)
+    if not isinstance(data, dict):
+        return {}
+    weak = [w for w in (data.get("weak_tags") or []) if isinstance(w, dict)][:6]
+    summary = str(data.get("summary", "")).strip()
+    strengths = str(data.get("strengths", "")).strip()
+    if not summary and not weak and not strengths:
+        return {}
+    return {"summary": summary, "weak_tags": weak, "strengths": strengths}
