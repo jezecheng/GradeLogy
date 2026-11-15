@@ -2357,9 +2357,9 @@ def course_prompts_save(cid):
 
 
 @_routes.route("/assistant/chat", methods=["POST"])
-@role_required("teacher")
+@role_required("admin", "teacher", "student")
 def assistant_chat():
-    """页面右下角教师助手：带工具调用的多轮对话，只读查询本老师的数据。"""
+    """右下角数字助手：带工具调用的多轮对话，按角色只读查询本人可见的数据。"""
     data = request.get_json(silent=True) or {}
     msgs = []
     for m in (data.get("messages") or [])[-12:]:
@@ -2370,8 +2370,11 @@ def assistant_chat():
             msgs.append({"role": role, "content": content[:4000]})
     if not msgs or msgs[-1]["role"] != "user":
         return jsonify({"error": "请先输入问题"}), 400
+    # 学生与管理员没有自己的 AI 配置，统一用平台已配置的接口（取第一个可用的老师配置或环境变量）
+    role = g.user["role"]
+    cfg = llm.resolve_config(g.user["id"] if role == "teacher" else None)
     # 助手是交互式的，单次请求很小，不受「仅闲时批阅」限制
-    reply, trace, err = assistant.reply(msgs, llm.resolve_config(g.user["id"]), g.user["id"])
+    reply, trace, err = assistant.reply(msgs, cfg, g.user["id"], role=role)
     if err:
         return jsonify({"error": err, "trace": trace}), 502
     return jsonify({"reply": reply, "trace": trace})

@@ -187,6 +187,60 @@ class AssistantToolsTest(unittest.TestCase):
     def test_lecture_scope_rejects_other_teachers_course(self):
         self.assertIn("error", assistant.lecture_scope(4, "线性代数", "第一讲"))
 
+    def test_student_tools_only_see_own_data(self):
+        self.assertEqual([c["id"] for c in assistant.my_courses(2)["courses"]], [10])
+        self.assertEqual(assistant.my_courses(3)["courses"][0]["not_submitted"], 1)
+
+    def test_student_pending_and_lectures(self):
+        pending = assistant.my_pending(2)
+        self.assertEqual(pending["count"], 1)
+        self.assertEqual(pending["pending"][0]["title"], "第二讲")
+        lectures = {x["title"]: x for x in assistant.my_lectures(2)["lectures"]}
+        self.assertEqual(lectures["第一讲"]["my_status"], "已批改")
+        self.assertEqual(lectures["第一讲"]["accuracy"], "50%")
+        self.assertEqual(lectures["第二讲"]["my_status"], "未提交")
+
+    def test_student_report_hidden_until_published(self):
+        shown = assistant.my_report(2, "线性代数", "第一讲")
+        self.assertTrue(shown["published"])
+        self.assertEqual(shown["questions"][0]["verdict"], "对")
+        hidden = assistant.my_report(3, "线性代数", "第一讲")
+        self.assertFalse(hidden["published"])
+        self.assertNotIn("questions", hidden)
+
+    def test_student_exam_scores(self):
+        rows = {x["title"]: x for x in assistant.my_exam_scores(2)["exams"]}
+        self.assertEqual(rows["期中考试"]["score"], "85")
+        self.assertEqual(assistant.my_exam_scores(3)["exams"][0]["score"], "未公布")
+
+    def test_student_cannot_read_other_course(self):
+        self.assertIn("error", assistant.my_lectures(2, "别的课"))
+        self.assertIn("error", assistant.my_report(2, "别的课"))
+
+    def test_role_tools_are_scoped(self):
+        student_names = {t["name"] for t in assistant.tools_for_role("student")}
+        self.assertIn("my_report", student_names)
+        self.assertNotIn("list_courses", student_names)
+        admin_names = {t["name"] for t in assistant.tools_for_role("admin")}
+        self.assertIn("admin_overview", admin_names)
+        self.assertNotIn("student_report", admin_names)
+
+    def test_admin_tools(self):
+        overview = assistant.admin_overview()
+        self.assertEqual(overview["counts"]["courses"], 2)
+        self.assertEqual(overview["counts"]["users"], 4)
+        self.assertEqual(len(assistant.admin_list_users(role="teacher")["users"]), 2)
+        courses = {c["name"]: c for c in assistant.admin_list_courses()["courses"]}
+        self.assertEqual(courses["线性代数"]["students"], 2)
+        self.assertEqual(assistant.admin_ai_usage(7)["summary"]["operations"], 2)
+
+    def test_call_tool_routes_by_role(self):
+        out = json.loads(assistant.call_tool("my_pending", {}, 2, "student"))
+        self.assertEqual(out["count"], 1)
+        # 学生不能调用老师/管理员工具
+        self.assertIn("error", json.loads(assistant.call_tool("admin_overview", {}, 2, "student")))
+        self.assertIn("error", json.loads(assistant.call_tool("list_courses", {}, 2, "student")))
+
     def test_call_tool_returns_json(self):
         text = assistant.call_tool("pending_work", {"course": "线性代数"}, 1)
         self.assertEqual(json.loads(text)["counts"]["not_graded"], 1)

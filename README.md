@@ -29,7 +29,7 @@
 - **学生进度**：课程名单点进单个学生，查看其所有讲次的提交与正确率、所有考试的成绩与评语（学生主数据与密码由管理员维护）
 - **考试成绩**：按考试录入每个学生的分数与评语，保存即对学生可见
 - **AI 批阅**：学生作业与标准答案两份文件整页渲染后一起送入多模态模型，逐题输出 OCR、判定（对 / 半对 / 错 / 无法判定）与评语，并按判定统计正确率
-- **Digital Assistant 数字助手**：教师可在右下角对话面板中，用自然语言查询课程与讲次、作业提交和批改进度、学生成绩与逐题表现，也能检索站内使用文档；所有查询按教师课程归属过滤
+- **Digital Assistant 数字助手**：管理员、教师、学生登录后右下角都有对话面板（系统助手 / 教学助手 / 学习助手），可用自然语言查询各自可见的数据，也能检索站内使用文档；所有查询按角色和归属过滤，只读。首次进入会有气泡与呼吸动画引导
 - **MCP 服务目录**：内置 `mcp_server.py`，可向 Trae、Claude Desktop、Cursor 等 MCP 客户端开放 `ask_help`、`list_courses`、`list_lectures`、`lecture_status`、`find_student`、`student_report`、`list_exams`、`exam_scores`、`course_overview`、`pending_work`、`grading_queue`、`search_reports`、`ai_usage`、`list_prompts`、`get_prompt`、`lesson_plan`、`lecture_scope` 17 个只读工具；仅允许教师账号，按课程归属授权，不提供写操作
 - **人工复核**：两栏同屏，可修改 OCR、判定与评语；保存即向学生发布
 - **工程能力**：配置环境变量化、Docker 部署、日志轮转、每日自动备份、数据整体导出与恢复、一致性检查、访问与审计日志

@@ -1,4 +1,4 @@
-// 教师端右下角数字助手：保持当前标签页内的对话上下文（sessionStorage）
+// 右下角数字助手（管理员/老师/学生共用）：保持当前标签页内的对话上下文（sessionStorage）
 (function () {
   const root = document.getElementById('assistant');
   if (!root) return;
@@ -11,8 +11,12 @@
   const sendBtn = document.getElementById('assistant-send');
   const resetBtn = document.getElementById('assistant-reset');
   const closeBtn = document.getElementById('assistant-close');
+  const callout = document.getElementById('assistant-callout');
   const csrf = document.querySelector('meta[name="csrf-token"]');
-  const key = 'gradelogy.assistant.' + (root.dataset.user || 'me');
+  const user = root.dataset.user || 'me';
+  const key = 'gradelogy.assistant.' + user;
+  const seenKey = 'gradelogy.assistant.seen.' + user;
+  const hintText = root.dataset.hint || '可以问我系统怎么用，或查询你的数据。';
 
   let messages = [];
   try {
@@ -21,13 +25,29 @@
     messages = [];
   }
 
+  function hasSeen() {
+    try { return localStorage.getItem(seenKey) === '1'; } catch (e) { return true; }
+  }
+  function markSeen() {
+    try { localStorage.setItem(seenKey, '1'); } catch (e) { /* 隐私模式忽略 */ }
+  }
+
   const TOOL_LABEL = {
     ask_help: '查使用文档',
     list_courses: '查课程列表',
     list_lectures: '查讲次列表',
     lecture_status: '查作业情况',
     find_student: '查学生',
-    student_report: '查批改结果'
+    student_report: '查批改结果',
+    my_courses: '查我的课程',
+    my_lectures: '查我的作业',
+    my_pending: '查未交作业',
+    my_report: '查我的批改',
+    my_exam_scores: '查我的成绩',
+    admin_overview: '查系统概况',
+    admin_list_users: '查用户',
+    admin_list_courses: '查全部课程',
+    admin_ai_usage: '查 AI 用量'
   };
 
   function save() {
@@ -80,7 +100,7 @@
     if (!messages.length) {
       const hint = document.createElement('p');
       hint.className = 'assistant-hint';
-      hint.textContent = '可以问我：某次作业的完成情况、某个学生的批改结果、某个功能怎么用。';
+      hint.textContent = hintText;
       body.appendChild(hint);
       return;
     }
@@ -144,6 +164,10 @@
   function open() {
     panel.hidden = false;
     fab.classList.add('assistant-fab-open');
+    fab.setAttribute('aria-expanded', 'true');
+    hideCallout();
+    stopAttention();
+    markSeen();
     renderAll();
     input.focus();
   }
@@ -151,11 +175,40 @@
   function close() {
     panel.hidden = true;
     fab.classList.remove('assistant-fab-open');
+    fab.setAttribute('aria-expanded', 'false');
+  }
+
+  function showCallout() {
+    if (panel.hidden === false || !callout) return;
+    callout.hidden = false;
+    callout.classList.add('assistant-callout-in');
+    window.setTimeout(hideCallout, 9000);
+  }
+
+  function hideCallout() {
+    if (callout) callout.hidden = true;
+  }
+
+  function startAttention() {
+    if (hasSeen()) return;
+    fab.classList.add('assistant-fab-attn');
+    window.setTimeout(showCallout, 700);
+  }
+
+  function stopAttention() {
+    fab.classList.remove('assistant-fab-attn');
   }
 
   fab.addEventListener('click', function () {
     if (panel.hidden) { open(); } else { close(); }
   });
+  if (callout) {
+    callout.addEventListener('click', open);
+  }
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !panel.hidden) { close(); fab.focus(); }
+  });
+
   closeBtn.addEventListener('click', close);
   resetBtn.addEventListener('click', function () {
     if (!messages.length || confirm('清空当前对话？')) {
@@ -174,4 +227,6 @@
       send();
     }
   });
+
+  startAttention();
 })();

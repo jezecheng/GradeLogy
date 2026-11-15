@@ -1,17 +1,40 @@
-{% if g.user and g.user.role == 'teacher' %}
-<div class="assistant" id="assistant" data-user="{{ g.user.username }}"
-     data-avatar="{{ url_for('static', filename='gradelogy-mark.png') }}">
-  <button type="button" class="assistant-fab" id="assistant-fab" aria-label="打开教学助手">
+{% if g.user %}
+{% set _role = g.user.role %}
+{% set _label = {'admin': '系统助手', 'teacher': '教学助手', 'student': '学习助手'}.get(_role, '数字助手') %}
+{% set _hint = {
+  'admin': '可以问我：系统有多少用户和课程、AI 用量多少、某个管理功能怎么用。',
+  'teacher': '可以问我：某次作业的完成情况、某个学生的批改结果、某个功能怎么用。',
+  'student': '可以问我：我还有什么作业没交、这次作业的批改结果、某道题为什么错。'
+}.get(_role, '可以问我系统怎么用，或查询你的数据。') %}
+{% set _callout = {
+  'admin': '系统数据、操作流程，问我最快',
+  'teacher': '作业情况、批改结果，问我最快',
+  'student': '作业、批改、成绩，都可以问我'
+}.get(_role, '有问题可以问我') %}
+<div class="assistant" id="assistant" data-user="{{ g.user.username }}" data-role="{{ _role }}"
+     data-avatar="{{ url_for('static', filename='gradelogy-mark.png') }}"
+     data-hint="{{ _hint }}">
+  <div class="assistant-callout" id="assistant-callout" hidden>
+    <span>{{ _callout }}</span>
+  </div>
+
+  <button type="button" class="assistant-fab" id="assistant-fab"
+          aria-label="打开{{ _label }}" aria-expanded="false">
     <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
       <path fill="currentColor" d="M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H9l-4.6 3.4A1 1 0 0 1 3 19.6V6a2 2 0 0 1 1-2z"/>
     </svg>
+    <span class="assistant-fab-dot" aria-hidden="true"></span>
   </button>
 
-  <section class="assistant-panel" id="assistant-panel" hidden>
+  <section class="assistant-panel" id="assistant-panel" hidden aria-label="{{ _label }}">
     <header class="assistant-head">
       <div class="assistant-title">
-        <strong>教学助手</strong>
-        <span class="muted small">只读查询 · 仅你可见</span>
+        <strong>{{ _label }}</strong>
+        <span class="muted small">
+          {%- if _role == 'student' %}只读 · 只查你自己的数据
+          {%- elif _role == 'admin' %}只读 · 系统概况与操作说明
+          {%- else %}只读查询 · 仅你可见{% endif -%}
+        </span>
       </div>
       <div class="assistant-head-actions">
         <button type="button" class="btn-link" id="assistant-reset">新对话</button>
@@ -19,10 +42,10 @@
       </div>
     </header>
     <div class="assistant-body" id="assistant-body">
-      <p class="assistant-hint">可以问我：某次作业的完成情况、某个学生的批改结果、某个功能怎么用。</p>
+      <p class="assistant-hint">{{ _hint }}</p>
     </div>
     <form class="assistant-form" id="assistant-form">
-      <textarea id="assistant-input" rows="2" placeholder="例如：这次的作业错得最多的是哪道题？"></textarea>
+      <textarea id="assistant-input" rows="2" placeholder="{% if _role == 'student' %}例如：我还有什么作业没交？{% elif _role == 'admin' %}例如：这个月 AI 用了多少 token？{% else %}例如：这次的作业错得最多的是哪道题？{% endif %}"></textarea>
       <button type="submit" id="assistant-send">发送</button>
     </form>
   </section>

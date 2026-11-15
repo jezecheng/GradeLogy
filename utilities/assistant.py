@@ -780,6 +780,319 @@ def lecture_scope(teacher_id, course, lecture):
         db.close()
 
 
+# ---------- 学生端工具 ----------
+def _student_course(db, student_id, key):
+    """按 ID 或名称定位学生已选修的课程。"""
+    sql = ("SELECT c.* FROM courses c JOIN enrollments e "
+           "ON e.course_id=c.id AND e.student_id=? WHERE ")
+    key = str(key or "").strip()
+    if key.isdigit():
+        row = db.execute(sql + "c.id=?", (student_id, int(key))).fetchone()
+        if row:
+            return dict(row)
+    row = db.execute(sql + "c.name LIKE ? ORDER BY c.id DESC LIMIT 1",
+                     (student_id, f"%{key}%")).fetchone()
+    return dict(row) if row else None
+
+
+def _latest_submission(db, lecture_id, student_id):
+    row = db.execute("SELECT * FROM submissions WHERE lecture_id=? AND student_id=? "
+                     "ORDER BY id DESC LIMIT 1", (lecture_id, student_id)).fetchone()
+    return dict(row) if row else None
+
+
+def _accuracy_text(n_right, n_partial, n_wrong):
+    judged = (n_right or 0) + (n_partial or 0) + (n_wrong or 0)
+    return f"{round((n_right or 0) * 100 / judged)}%" if judged else ""
+
+
+def _accuracy(db, submission_id):
+    row = db.execute("SELECT "
+                     "SUM(CASE WHEN verdict='对' THEN 1 ELSE 0 END) AS n_right, "
+                     "SUM(CASE WHEN verdict='半对' THEN 1 ELSE 0 END) AS n_partial, "
+                     "SUM(CASE WHEN verdict='错' THEN 1 ELSE 0 END) AS n_wrong "
+                     "FROM questions WHERE submission_id=?", (submission_id,)).fetchone()
+    if not row:
+        return ""
+    return _accuracy_text(row["n_right"], row["n_partial"], row["n_wrong"])
+
+
+def _revealed(sub):
+    return bool(sub) and (sub["status"] == "已批改" or sub["report_published"])
+
+
+def my_courses(student_id):
+    """列出学生选修的课程：老师、讲次数、尚未提交的讲次数。"""
+    db = _db()
+    try:
+        rows = _rows(db.execute("""
+            SELECT c.id, c.name, c.description,
+              (SELECT GROUP_CONCAT(COALESCE(NULLIF(u.display_name,''),u.username),'、')
+                 FROM course_teachers ct JOIN users u ON u.id=ct.teacher_id
+                WHERE ct.course_id=c.id) AS teachers,
+              (SELECT COUNT(*) FROM lectures h WHERE h.course_id=c.id) AS lectures,
+              (SELECT COUNT(*) FROM lectures h WHERE h.course_id=c.id
+                 AND NOT EXISTS (SELECT 1 FROM submissions s
+                    WHERE s.lecture_id=h.id AND s.student_id=?)) AS not_submitted
+            FROM courses c JOIN enrollments e ON e.course_id=c.id AND e.student_id=?
+            ORDER BY c.id DESC""", (student_id, student_id)))
+        return {"courses": rows}
+    finally:
+        db.close()
+
+
+def my_lectures(student_id, course=None):
+    """列出学生的讲次与自己的提交状态，可按课程过滤。"""
+    db = _db()
+    try:
+        params = [student_id] * 4
+        where = ""
+        if str(course or "").strip():
+            c = _student_course(db, student_id, course)
+            if not c:
+                return {"error": f"没有找到课程「{course}」，可先用 my_courses 查看自己的课程"}
+            where = " AND h.course_id=?"
+            params.append(c["id"])
+        rows = _rows(db.execute(f"""
+            SELECT h.id, h.title, h.deadline, c.name AS course_name,
+              (SELECT s.id FROM submissions s WHERE s.lecture_id=h.id AND s.student_id=?
+                 ORDER BY s.id DESC LIMIT 1) AS submission_id,
+              (SELECT s.status FROM submissions s WHERE s.lecture_id=h.id AND s.student_id=?
+                 ORDER BY s.id DESC LIMIT 1) AS status,
+              (SELECT s.report_published FROM submissions s
+                 WHERE s.lecture_id=h.id AND s.student_id=?
+                 ORDER BY s.id DESC LIMIT 1) AS report_published,
+              (h.student_pdf!='') AS has_handout
+            FROM lectures h JOIN courses c ON c.id=h.course_id
+            JOIN enrollments e ON e.course_id=c.id AND e.student_id=?
+            WHERE 1=1{where}
+            ORDER BY h.title COLLATE NOCASE, h.id""",
+            params))
+        for r in rows:
+            if not r["submission_id"]:
+                r["my_status"] = "未提交"
+            elif r["status"] == "已批改" or r["report_published"]:
+                r["my_status"] = "已批改"
+                r["accuracy"] = _accuracy(db, r["submission_id"])
+            else:
+                r["my_status"] = "已提交，待批改"
+            for k in ("submission_id", "status", "report_published"):
+                r.pop(k, None)
+        return {"lectures": rows}
+    finally:
+        db.close()
+
+
+def my_pending(student_id):
+    """还没提交的讲次，按截止时间排序，便于知道先做哪份作业。"""
+    db = _db()
+    try:
+        rows = _rows(db.execute("""
+            SELECT c.name AS course_name, h.title, h.deadline
+            FROM lectures h JOIN courses c ON c.id=h.course_id
+            JOIN enrollments e ON e.course_id=c.id AND e.student_id=?
+            WHERE NOT EXISTS (SELECT 1 FROM submissions s
+                WHERE s.lecture_id=h.id AND s.student_id=?)
+            ORDER BY CASE WHEN h.deadline IS NULL OR h.deadline='' THEN 1 ELSE 0 END,
+                     h.deadline, c.id, h.title""", (student_id, student_id)))
+        for r in rows:
+            r["deadline"] = (r["deadline"] or "").replace("T", " ") or "不限"
+        return {"count": len(rows), "pending": rows}
+    finally:
+        db.close()
+
+
+def my_report(student_id, course, lecture=None):
+    """查看自己某讲次的批改结果；老师未发布时不返回逐题内容。"""
+    db = _db()
+    try:
+        c = _student_course(db, student_id, course)
+        if not c:
+            return {"error": f"没有找到课程「{course}」，可先用 my_courses 查看自己的课程"}
+        h = _lecture(db, c["id"], lecture) if str(lecture or "").strip() else None
+        if not h and not str(lecture or "").strip():
+            sub = db.execute("""
+                SELECT s.* FROM submissions s JOIN lectures h ON h.id=s.lecture_id
+                WHERE h.course_id=? AND s.student_id=?
+                ORDER BY s.id DESC LIMIT 1""", (c["id"], student_id)).fetchone()
+            if sub:
+                sub = dict(sub)
+                h = db.execute("SELECT * FROM lectures WHERE id=?",
+                               (sub["lecture_id"],)).fetchone()
+                h = dict(h) if h else None
+        elif not h:
+            return {"error": f"课程「{c['name']}」下没有找到讲次「{lecture}」"}
+        if not h:
+            return {"error": f"课程「{c['name']}」还没有可查看的作业记录"}
+        sub = _latest_submission(db, h["id"], student_id)
+        if not sub:
+            return {"course": c["name"], "lecture": h["title"],
+                    "message": "这一讲你还没有提交作业"}
+        if not _revealed(sub):
+            return {"course": c["name"], "lecture": h["title"],
+                    "status": sub["status"], "published": False,
+                    "message": "老师还没有发布这次作业的批改结果，发布后可以在这里查看"}
+        items = _rows(db.execute(
+            "SELECT no, verdict, score, max_score, note, ai_comment "
+            "FROM questions WHERE submission_id=? ORDER BY id", (sub["id"],)))
+        for q in items:
+            q["note"] = _cut(q["note"], 300)
+            q["ai_comment"] = _cut(q["ai_comment"], 300)
+        return {
+            "course": c["name"], "lecture": h["title"], "published": True,
+            "status": sub["status"], "score": sub["score"] or "",
+            "accuracy": _accuracy(db, sub["id"]),
+            "feedback": _cut(sub["feedback"] or sub["ai_summary"], 2000),
+            "report": _cut(sub["report_md"], 3000),
+            "questions": items,
+        }
+    finally:
+        db.close()
+
+
+def my_exam_scores(student_id, course=None):
+    """学生的考试成绩；老师未录分时显示未公布。"""
+    db = _db()
+    try:
+        params = [student_id, student_id]
+        where = ""
+        if str(course or "").strip():
+            c = _student_course(db, student_id, course)
+            if not c:
+                return {"error": f"没有找到课程「{course}」，可先用 my_courses 查看自己的课程"}
+            where = " AND x.course_id=?"
+            params.append(c["id"])
+        rows = _rows(db.execute(f"""
+            SELECT c.name AS course_name, x.title, x.exam_date, x.full_score,
+                   s.score, s.comment
+            FROM exams x JOIN courses c ON c.id=x.course_id
+            JOIN enrollments e ON e.course_id=c.id AND e.student_id=?
+            LEFT JOIN exam_scores s ON s.exam_id=x.id AND s.student_id=?
+            WHERE 1=1{where}
+            ORDER BY x.id DESC""", params))
+        for r in rows:
+            r["score"] = r["score"] or "未公布"
+        return {"exams": rows}
+    finally:
+        db.close()
+
+
+# ---------- 管理员工具 ----------
+def admin_overview():
+    """系统整体情况：用户、课程、讲次、提交与批改进度。"""
+    db = _db()
+    try:
+        counts = dict(db.execute("""
+            SELECT
+              (SELECT COUNT(*) FROM users) AS users,
+              (SELECT COUNT(*) FROM users WHERE role='teacher' AND active=1) AS active_teachers,
+              (SELECT COUNT(*) FROM users WHERE role='student' AND active=1) AS active_students,
+              (SELECT COUNT(*) FROM users WHERE active=0) AS disabled_users,
+              (SELECT COUNT(*) FROM courses) AS courses,
+              (SELECT COUNT(*) FROM lectures) AS lectures,
+              (SELECT COUNT(*) FROM exams) AS exams,
+              (SELECT COUNT(*) FROM submissions) AS submissions,
+              (SELECT COUNT(*) FROM submissions WHERE status='已提交') AS waiting_grade,
+              (SELECT COUNT(*) FROM submissions WHERE status='已批改') AS graded,
+              (SELECT COUNT(*) FROM submissions WHERE status IN ('排队中','批改中')) AS in_queue
+        """).fetchone())
+        recent = _rows(db.execute("""
+            SELECT substr(o.started_at,1,10) AS date, COUNT(*) AS operations,
+              COALESCE(SUM(CASE WHEN o.status='failed' THEN 1 ELSE 0 END),0) AS failed
+            FROM ai_operations o
+            WHERE o.started_at>=datetime('now','-7 days','localtime')
+            GROUP BY substr(o.started_at,1,10) ORDER BY date DESC"""))
+        return {"counts": counts, "ai_last_7_days": recent}
+    finally:
+        db.close()
+
+
+def admin_list_users(role=None, keyword=None, limit=50):
+    """按角色或关键词列出用户（不含密码等敏感字段）。"""
+    db = _db()
+    try:
+        sql = ("SELECT id, username, display_name, role, student_no, active, "
+               "last_login_at, created_at FROM users WHERE 1=1")
+        params = []
+        if role:
+            sql += " AND role=?"
+            params.append(role)
+        if keyword:
+            sql += " AND (display_name LIKE ? OR username LIKE ?)"
+            params += [f"%{keyword}%", f"%{keyword}%"]
+        sql += " ORDER BY role, display_name LIMIT ?"
+        params.append(_clamp(limit, 50, 200))
+        rows = _rows(db.execute(sql, params))
+        for r in rows:
+            r["active"] = bool(r["active"])
+        return {"users": rows}
+    finally:
+        db.close()
+
+
+def admin_list_courses():
+    """全部课程及其老师、学生数、讲次数与考试数。"""
+    db = _db()
+    try:
+        rows = _rows(db.execute("""
+            SELECT c.id, c.name,
+              (SELECT GROUP_CONCAT(COALESCE(NULLIF(u.display_name,''),u.username),'、')
+                 FROM course_teachers ct JOIN users u ON u.id=ct.teacher_id
+                WHERE ct.course_id=c.id) AS teachers,
+              (SELECT COUNT(*) FROM enrollments e WHERE e.course_id=c.id) AS students,
+              (SELECT COUNT(*) FROM lectures h WHERE h.course_id=c.id) AS lectures,
+              (SELECT COUNT(*) FROM exams x WHERE x.course_id=c.id) AS exams
+            FROM courses c ORDER BY c.id DESC"""))
+        return {"courses": rows}
+    finally:
+        db.close()
+
+
+def admin_ai_usage(days=7):
+    """全平台 AI 用量：总量、按操作类型、按老师。"""
+    days = _clamp(days, 7, 90)
+    start = (datetime.now() - timedelta(days=days - 1)).strftime("%Y-%m-%d 00:00:00")
+    base = """
+        WITH operation_usage AS (
+          SELECT o.id, o.teacher_id, o.operation_type, o.status,
+            COUNT(e.id) AS request_count,
+            CASE WHEN COUNT(e.total_tokens)>0 THEN SUM(e.total_tokens) END AS total_tokens,
+            CASE WHEN COUNT(e.estimated_cost)>0 THEN SUM(e.estimated_cost) END AS estimated_cost
+          FROM ai_operations o
+          LEFT JOIN ai_usage_events e ON e.operation_id=o.id
+          WHERE o.started_at>=?
+          GROUP BY o.id)
+    """
+    db = _db()
+    try:
+        summary = dict(db.execute(base + """
+            SELECT COUNT(*) AS operations,
+              COALESCE(SUM(status='success'),0) AS success,
+              COALESCE(SUM(status='failed'),0) AS failed,
+              COALESCE(SUM(request_count),0) AS requests,
+              SUM(total_tokens) AS total_tokens,
+              SUM(estimated_cost) AS estimated_cost
+            FROM operation_usage""", (start,)).fetchone())
+        if summary["estimated_cost"] is not None:
+            summary["estimated_cost"] = round(summary["estimated_cost"], 4)
+        by_type = _rows(db.execute(base + """
+            SELECT operation_type, COUNT(*) AS operations,
+              COALESCE(SUM(request_count),0) AS requests,
+              SUM(total_tokens) AS total_tokens, SUM(estimated_cost) AS estimated_cost
+            FROM operation_usage GROUP BY operation_type
+            ORDER BY operations DESC""", (start,)))
+        by_teacher = _rows(db.execute(base + """
+            SELECT COALESCE(NULLIF(u.display_name,''),u.username,'未知') AS teacher,
+              COUNT(*) AS operations, SUM(total_tokens) AS total_tokens,
+              SUM(estimated_cost) AS estimated_cost
+            FROM operation_usage o LEFT JOIN users u ON u.id=o.teacher_id
+            GROUP BY o.teacher_id ORDER BY operations DESC LIMIT 10""", (start,)))
+        return {"days": days, "since": start[:10], "summary": summary,
+                "by_type": by_type, "by_teacher": by_teacher}
+    finally:
+        db.close()
+
+
 # ---------- 工具注册表 ----------
 def _spec(name, desc, props, required):
     return {"name": name, "description": desc,
@@ -854,8 +1167,105 @@ TOOLS = [
           ["course", "lecture"]),
 ]
 
+STUDENT_TOOLS = [
+    _spec("ask_help", "查询本系统的使用说明：怎么交作业、查看批改、看成绩、改密码等。"
+                      "回答操作类问题前优先调用。",
+          {"question": {"type": "string", "description": "用户的问题或关键词，如「怎么交作业」「批改结果」"}},
+          ["question"]),
+    _spec("my_courses", "列出自己选修的课程：任课老师、讲次数、还有几讲没交。", {}, []),
+    _spec("my_lectures", "列出自己的讲次与提交状态（未提交 / 已提交待批改 / 已批改），"
+                         "已批改的会带正确率。可按课程过滤。",
+          {"course": {"type": "string", "description": "课程名称或 ID，可省略"}}, []),
+    _spec("my_pending", "列出自己还没提交的作业，按截止时间排序，回答「我还有什么作业没交」时优先调用。",
+          {}, []),
+    _spec("my_report", "查看自己某讲次的批改结果：逐题判定、评语、正确率与批改报告。"
+                       "老师未发布时会说明「尚未发布」。不传讲次时取该课程最近一次提交。",
+          {"course": {"type": "string", "description": "课程名称或 ID"},
+           "lecture": {"type": "string", "description": "讲次标题或 ID，可省略"}},
+          ["course"]),
+    _spec("my_exam_scores", "查看自己的考试成绩、满分与老师评语；未录分显示未公布。",
+          {"course": {"type": "string", "description": "课程名称或 ID，可省略"}}, []),
+]
 
-def call_tool(name, args, teacher_id):
+ADMIN_TOOLS = [
+    _spec("ask_help", "查询本系统的使用说明：用户管理、备份恢复、初始化导入、AI 用量等。"
+                      "回答操作类问题前优先调用。",
+          {"question": {"type": "string", "description": "用户的问题或关键词，如「重置密码」「备份」"}},
+          ["question"]),
+    _spec("admin_overview", "系统整体概况：用户数、课程数、讲次数、提交与批改待办、近 7 天 AI 操作。",
+          {}, []),
+    _spec("admin_list_users", "按角色或姓名/用户名查看用户列表（不含密码），含启用状态与最近登录时间。",
+          {"role": {"type": "string", "description": "admin / teacher / student，可省略"},
+           "keyword": {"type": "string", "description": "姓名或用户名关键词，可省略"},
+           "limit": {"type": "integer", "description": "最多返回条数，默认 50"}},
+          []),
+    _spec("admin_list_courses", "查看全平台课程：任课老师、学生数、讲次数、考试数。", {}, []),
+    _spec("admin_ai_usage", "查看全平台 AI 用量：操作数、token、估算成本，按类型与老师拆分。",
+          {"days": {"type": "integer", "description": "统计最近多少天，默认 7，最大 90"}}, []),
+]
+
+ROLE_TOOLS = {"teacher": TOOLS, "student": STUDENT_TOOLS, "admin": ADMIN_TOOLS}
+
+
+def tools_for_role(role):
+    return ROLE_TOOLS.get(role, TOOLS)
+
+
+def call_tool(name, args, user_id, role="teacher"):
+    """执行工具，返回可直接给模型/客户端读的 JSON 文本。"""
+    if role == "student":
+        return _call_student_tool(name, args, user_id)
+    if role == "admin":
+        return _call_admin_tool(name, args, user_id)
+    return _call_teacher_tool(name, args, user_id)
+
+
+def _pack(out):
+    return json.dumps(out, ensure_ascii=False)
+
+
+def _call_student_tool(name, args, student_id):
+    try:
+        if name == "ask_help":
+            out = ask_help(args.get("question", ""))
+        elif name == "my_courses":
+            out = my_courses(student_id)
+        elif name == "my_lectures":
+            out = my_lectures(student_id, args.get("course") or None)
+        elif name == "my_pending":
+            out = my_pending(student_id)
+        elif name == "my_report":
+            out = my_report(student_id, args.get("course", ""), args.get("lecture"))
+        elif name == "my_exam_scores":
+            out = my_exam_scores(student_id, args.get("course") or None)
+        else:
+            out = {"error": f"未知工具 {name}"}
+    except Exception as e:
+        out = {"error": f"{type(e).__name__}: {e}"}
+    return _pack(out)
+
+
+def _call_admin_tool(name, args, admin_id):
+    try:
+        if name == "ask_help":
+            out = ask_help(args.get("question", ""))
+        elif name == "admin_overview":
+            out = admin_overview()
+        elif name == "admin_list_users":
+            out = admin_list_users(args.get("role") or None, args.get("keyword") or None,
+                                   args.get("limit"))
+        elif name == "admin_list_courses":
+            out = admin_list_courses()
+        elif name == "admin_ai_usage":
+            out = admin_ai_usage(args.get("days"))
+        else:
+            out = {"error": f"未知工具 {name}"}
+    except Exception as e:
+        out = {"error": f"{type(e).__name__}: {e}"}
+    return _pack(out)
+
+
+def _call_teacher_tool(name, args, teacher_id):
     """执行工具，返回可直接给模型/客户端读的 JSON 文本。"""
     try:
         if name == "ask_help":
@@ -913,6 +1323,30 @@ SYSTEM_PROMPT = (
     "4. 回答控制在 200 字以内，多使用短句和列表；不要输出 JSON、不要编造数据。"
 )
 
+STUDENT_SYSTEM_PROMPT = (
+    "你是「教学管理平台」的学生学习助手。你只能查询当前学生自己的数据，"
+    "绝不能提供其他学生的成绩、批改或名单。\n"
+    "规则：\n"
+    "1. 问「我还有什么作业没交」「我的批改结果」「成绩」时先调用 my_pending / "
+    "my_lectures / my_report / my_exam_scores，不要凭空猜测。\n"
+    "2. 问「怎么交作业」「怎么看批改」等操作问题时先调用 ask_help，再按文档步骤回答。\n"
+    "3. 老师未发布批改结果时，明确说「老师还没有发布」，不要编造分数或逐题结论。\n"
+    "4. 回答控制在 200 字以内，用短句和列表；不要输出 JSON。"
+)
+
+ADMIN_SYSTEM_PROMPT = (
+    "你是「教学管理平台」的系统助手，面向管理员。你可以查询全平台的概况、用户、课程与 AI 用量。\n"
+    "规则：\n"
+    "1. 涉及数量、用户、课程、用量时先调用 admin_overview / admin_list_users / "
+    "admin_list_courses / admin_ai_usage，不要凭空猜测。\n"
+    "2. 问操作流程（重置密码、备份恢复、初始化导入）时先调用 ask_help，再按文档步骤回答。\n"
+    "3. 只做只读查询：不要声称已经替用户执行了删除、恢复等写操作，要引导到对应页面。\n"
+    "4. 绝不输出密码、API Key 等敏感信息；回答控制在 200 字以内，不要输出 JSON。"
+)
+
+SYSTEM_PROMPTS = {"teacher": SYSTEM_PROMPT, "student": STUDENT_SYSTEM_PROMPT,
+                  "admin": ADMIN_SYSTEM_PROMPT}
+
 
 def _post(url, api_key, payload, timeout):
     import urllib.error
@@ -931,26 +1365,28 @@ def _post(url, api_key, payload, timeout):
         raise RuntimeError(f"AI 接口请求失败：{str(e)[:200]}")
 
 
-def _openai_tools():
+def _openai_tools(role="teacher"):
     """把 MCP 风格的工具定义转成 OpenAI function calling 需要的结构。"""
     return [{"type": "function",
              "function": {"name": t["name"], "description": t["description"],
                           "parameters": t["inputSchema"]}}
-            for t in TOOLS]
+            for t in tools_for_role(role)]
 
 
-def reply(messages, cfg, teacher_id, max_rounds=4, timeout=90):
+def reply(messages, cfg, user_id, role="teacher", max_rounds=4, timeout=90):
     """跑工具调用循环，返回 (回答文本, 调用轨迹, 错误)。cfg 来自 llm.resolve_config。"""
     if not cfg.get("api_url") or not cfg.get("api_key") or not cfg.get("model"):
-        return "", [], "尚未配置 AI 接口，请先到「AI 设置」保存地址、Key 与模型"
+        if role == "teacher":
+            return "", [], "尚未配置 AI 接口，请先到「AI 设置」保存地址、Key 与模型"
+        return "", [], "数字助手还没有配置 AI 接口，请联系老师或管理员在「AI 设置」中保存"
     url = f"{cfg['api_url']}/chat/completions"
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT}] + list(messages)
+    msgs = [{"role": "system", "content": SYSTEM_PROMPTS.get(role, SYSTEM_PROMPT)}] + list(messages)
     trace = []
     try:
         for _ in range(max_rounds):
             data = _post(url, cfg["api_key"],
                          {"model": cfg["model"], "messages": msgs,
-                          "max_tokens": 1200, "tools": _openai_tools(),
+                          "max_tokens": 1200, "tools": _openai_tools(role),
                           "tool_choice": "auto"},
                          timeout)
             msg = data["choices"][0]["message"]
@@ -967,7 +1403,7 @@ def reply(messages, cfg, teacher_id, max_rounds=4, timeout=90):
                     args = {}
                 trace.append({"tool": fn, "args": args})
                 msgs.append({"role": "tool", "tool_call_id": call.get("id", ""),
-                             "content": call_tool(fn, args, teacher_id)})
+                             "content": call_tool(fn, args, user_id, role)})
     except RuntimeError as e:
         return "", trace, str(e)
     return "这个问题需要查太多步，先给你到这里的结论；可以再问我更具体一点。", trace, ""
