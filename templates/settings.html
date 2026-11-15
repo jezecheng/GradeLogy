@@ -40,6 +40,22 @@
 .cost-est details { margin-top: 4px; }
 .cost-est summary { cursor: pointer; color: #8a8f99; font-size: 12px; }
 .cost-est ul { margin-left: 18px; }
+.api-status { background: #fff4e0; border: 1px solid #ffe0b2; border-radius: 8px;
+              padding: 10px 12px; margin-bottom: 10px; }
+.api-status.ok { background: #e6f6ec; border-color: #bfe8cd; }
+.api-status strong { display: block; margin-bottom: 2px; }
+.api-key-wrap { overflow-x: auto; margin-top: 8px; }
+.api-key-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.api-key-table th, .api-key-table td { border-bottom: 1px solid #eef0f3; padding: 6px 8px;
+                                        text-align: left; vertical-align: top; }
+.api-key-table th { color: #8a8f99; font-weight: 500; }
+.api-key-table code { background: #f2f5fa; padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+.api-key-table .cur-row { background: #fff9e0; }
+.api-key-table form { margin: 0; }
+.api-key-add { border-top: 1px solid #eef0f3; margin-top: 12px; padding-top: 12px; }
+.danger-text { color: #c93338; }
+.api-catalog { margin-top: 12px; }
+.api-catalog summary { cursor: pointer; color: #8a8f99; font-size: 13px; }
 </style>
 <h1>AI 批阅设置</h1>
 
@@ -60,36 +76,112 @@
 </div>
 
 <div class="card narrow">
-  <h2>真实接口</h2>
+  <h2>AI API 配置</h2>
+  <div class="api-status {% if api_configured %}ok{% endif %}">
+    {% if api_configured %}
+    <strong>当前 AI API 已配置</strong>
+    {% if api_env_managed %}
+    <div class="muted small">由环境变量注入，页面上的 Key 管理不会生效。</div>
+    {% elif active_api_key %}
+    <div class="muted small">
+      正在使用：{{ active_api_key.name }} · <code>{{ active_api_key.base_url }}</code>
+      · Key {{ active_api_key.masked_key }}
+    </div>
+    {% else %}
+    <div class="muted small">当前基地址 <code>{{ cfg.ai_api_url or "未填写" }}</code></div>
+    {% endif %}
+    {% else %}
+    <strong>尚未配置 AI API</strong>
+    <div class="muted small">批改前需要至少保存一组可用的接口基地址与 API Key。</div>
+    {% endif %}
+  </div>
   {% if env_keys %}
   <p class="muted small">以下项已由环境变量注入，页面上的值只读、保存也不会写入数据库：
     {{ env_keys|join('、') }}。要改用页面配置，请先移除对应的环境变量。</p>
   {% endif %}
+  <p class="muted small">可以保存多组 Key（例如不同服务商或不同额度），点击「使用此 Key」切换；
+    批改、模型同步与测试连接都会立即改用当前选中的那一组。</p>
+  {% if api_keys and not api_env_managed %}
+  <div class="api-key-wrap">
+  <table class="api-key-table">
+    <thead>
+      <tr><th>名称</th><th>接口基地址</th><th>API Key</th><th>状态</th><th></th></tr>
+    </thead>
+    <tbody>
+    {% for k in api_keys %}
+      <tr class="{% if k.is_active %}cur-row{% endif %}">
+        <td>{{ k.name }}</td>
+        <td><code>{{ k.base_url }}</code></td>
+        <td class="nowrap">{{ k.masked_key }}</td>
+        <td class="nowrap">
+          {% if k.is_active %}<span class="tag-chip ok">当前使用</span>
+          {% else %}<span class="muted small">未启用</span>{% endif %}
+        </td>
+        <td class="nowrap">
+          {% if not k.is_active %}
+          <form method="post" action="{{ url_for('settings_api_key_activate', key_id=k.id) }}"
+                style="display:inline">
+            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+            <button type="submit" class="ghost small">使用此 Key</button>
+          </form>
+          {% endif %}
+          <form method="post" action="{{ url_for('settings_api_key_delete', key_id=k.id) }}"
+                style="display:inline"
+                onsubmit="return confirm('确定删除「{{ k.name }}」吗？')">
+            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+            <button type="submit" class="ghost small danger-text">删除</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+  {% if not api_env_managed %}
+  <form method="post" action="{{ url_for('settings_api_key_add') }}" class="stack-form api-key-add">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <label>名称（可选）
+      <input name="name" maxlength="60" placeholder="例如 TokenHub 主账号">
+    </label>
+    <label>接口基地址
+      <input name="base_url" required placeholder="https://tokenhub.tencentmaas.com/v1">
+    </label>
+    <label>API Key
+      <input name="api_key" type="password" required placeholder="粘贴 API Key">
+    </label>
+    <label class="check-line">
+      <input type="checkbox" name="use_now" value="1" checked style="width:auto">
+      保存后立即使用
+    </label>
+    <button type="submit">新增 API Key</button>
+  </form>
+  {% endif %}
+  <details class="api-catalog">
+    <summary>查看已收录的服务入口</summary>
+    <table class="small">
+      <tr><th>服务</th><th>基地址</th><th>模型示例（需支持图片）</th></tr>
+      {% for entry in model_catalog %}
+      <tr>
+        <td>{{ entry.name }}</td>
+        <td>{{ entry.base_url }}</td>
+        <td>
+          {{ entry.models[0].model }}
+          {%- if entry.models|length > 1 %} 等 {{ entry.models|length }} 个{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+  </details>
+</div>
+
+<div class="card narrow">
+  <h2>AI 模型清单与批阅设置</h2>
   <p class="muted small">需要支持图片输入的多模态模型：批阅时会把学生作业与标准答案的每一页渲染成图片一起发送，不做切题。</p>
   <p class="muted small">纯文本模型无法读取扫描件；模型输出上限建议 ≥32k，否则长作业容易被截断。</p>
-  <table class="small">
-    <tr><th>服务</th><th>基地址</th><th>模型示例（需支持图片）</th></tr>
-    {% for entry in model_catalog %}
-    <tr>
-      <td>{{ entry.name }}</td>
-      <td>{{ entry.base_url }}</td>
-      <td>
-        {{ entry.models[0].model }}
-        {%- if entry.models|length > 1 %} 等 {{ entry.models|length }} 个{% endif %}
-      </td>
-    </tr>
-    {% endfor %}
-  </table>
   <p class="muted small">下方会根据当前基地址识别入口，直接列出该入口的全部模型与单价，无需逐个试。</p>
   <form method="post" class="stack-form" style="margin-top:14px">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <label>接口基地址
-      <input name="ai_api_url" value="{{ cfg.ai_api_url }}" placeholder="https://api.openai.com/v1">
-    </label>
-    <label>API Key
-      <input name="ai_api_key" type="password" value=""
-             placeholder="{% if cfg.ai_api_key %}已保存（留空则不修改）{% else %}粘贴 API Key{% endif %}">
-    </label>
     {% set row_models = model_rows|map(attribute='model')|list %}
     <section class="model-picker" aria-label="当前入口的模型与价格">
       <div class="model-picker-head">

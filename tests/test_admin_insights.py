@@ -590,5 +590,96 @@ class TokenHubModelSyncTest(unittest.TestCase):
         self.assertEqual(price[2], "TokenHub 公开价目")
 
 
+class ApiKeyManagementTest(unittest.TestCase):
+    """老师页面的多组 AI API Key：新增、切换、删除与状态展示。"""
+
+    def setUp(self):
+        app_module.app.config.update(TESTING=True)
+        con = sqlite3.connect(app_module.DB_PATH)
+        for table in ("ai_api_keys", "settings", "users"):
+            con.execute(f"DELETE FROM {table}")
+        con.execute(
+            "INSERT INTO users(id,username,password_hash,display_name,role,active,"
+            "must_change_password) VALUES(2,'teacher1','x','老师一','teacher',1,0)")
+        con.commit()
+        con.close()
+        self.client = app_module.app.test_client()
+        with self.client.session_transaction() as sess:
+            sess["uid"] = 2
+            sess["_csrf"] = "test-token"
+
+    def post(self, path, **data):
+        data.setdefault("_csrf", "test-token")
+        return self.client.post(path, data=data, follow_redirects=False)
+
+    def keys(self):
+        con = sqlite3.connect(app_module.DB_PATH)
+        con.row_factory = sqlite3.Row
+        rows = con.execute(
+            "SELECT id,name,base_url,api_key,is_active FROM ai_api_keys "
+            "WHERE teacher_id=2 ORDER BY id").fetchall()
+        setting = con.execute(
+            "SELECT value FROM settings WHERE teacher_id=2 AND key='ai_api_key'").fetchone()
+        con.close()
+        return rows, (setting["value"] if setting else None)
+
+    def test_add_activate_and_delete_keys(self):
+        self.assertEqual(self.client.get("/settings").status_code, 200)
+        self.post("/settings/api-keys/add", name="主账号", base_url="https://ai.one/v1",
+                  api_key="sk-first-123456", use_now="1")
+        rows, active_key = self.keys()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["is_active"], 1)
+        self.assertEqual(active_key, "sk-first-123456")
+
+        self.post("/settings/api-keys/add", name="备用", base_url="https://ai.two/v1",
+                  api_key="sk-second-654321")
+        rows, active_key = self.keys()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([r["is_active"] for r in rows], [1, 0])
+        self.assertEqual(active_key, "sk-first-123456")
+
+        self.post(f"/settings/api-keys/{rows[1]['id']}/activate")
+        rows, active_key = self.keys()
+        self.assertEqual([r["is_active"] for r in rows], [0, 1])
+        self.assertEqual(active_key, "sk-second-654321")
+
+        self.post(f"/settings/api-keys/{rows[1]['id']}/delete")
+        rows, active_key = self.keys()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["is_active"], 1)
+        self.assertEqual(active_key, "sk-first-123456")
+
+    def test_settings_page_shows_configured_status_and_masks_key(self):
+        self.post("/settings/api-keys/add", name="主账号", base_url="https://ai.one/v1",
+                  api_key="sk-secret-abcdef", use_now="1")
+        html = self.client.get("/settings").get_data(as_text=True)
+        self.assertIn("当前 AI API 已配置", html)
+        self.assertIn("主账号", html)
+        self.assertIn("当前使用", html)
+        self.assertIn("sk-s", html)
+        self.assertNotIn("sk-secret-abcdef", html)
+        self.assertGreater(html.find("AI API 配置"), -1)
+        self.assertLess(html.find("AI API 配置"), html.find("AI 模型清单与批阅设置"))
+
+    def test_invalid_key_is_rejected(self):
+        self.post("/settings/api-keys/add", name="坏地址", base_url="ftp://nope",
+                  api_key="sk-x")
+        rows, _ = self.keys()
+        self.assertEqual(rows, [])
+
+    def test_other_teachers_key_cannot_be_activated(self):
+        con = sqlite3.connect(app_module.DB_PATH)
+        con.execute(
+            "INSERT INTO ai_api_keys(teacher_id,name,base_url,api_key,is_active) "
+            "VALUES(3,'别人','https://ai.one/v1','sk-other',0)")
+        con.commit()
+        con.close()
+        self.post("/settings/api-keys/1/activate")
+        rows, active_key = self.keys()
+        self.assertEqual(rows, [])
+        self.assertIsNone(active_key)
+
+
 if __name__ == "__main__":
     unittest.main()

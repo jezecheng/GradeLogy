@@ -1000,6 +1000,18 @@ CREATE TABLE IF NOT EXISTS settings(
   key TEXT NOT NULL,
   value TEXT DEFAULT '',
   PRIMARY KEY(teacher_id, key));
+-- 老师可保存多个 AI API Key，is_active=1 的那条会被写入 settings 的 ai_api_url/ai_api_key，
+-- 这样批改、同步模型、测试连接等既有调用链不需要感知多 Key。
+CREATE TABLE IF NOT EXISTS ai_api_keys(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  teacher_id INTEGER NOT NULL,
+  name TEXT DEFAULT '',
+  base_url TEXT NOT NULL DEFAULT '',
+  api_key TEXT NOT NULL,
+  is_active INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS idx_ai_api_keys_teacher ON ai_api_keys(teacher_id, is_active);
 CREATE TABLE IF NOT EXISTS ai_operations(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   teacher_id INTEGER NOT NULL REFERENCES users(id),
@@ -1218,6 +1230,19 @@ def init_db():
     # 课程可多名老师共同管理：把每门课的原创建者补进 course_teachers
     con.execute("INSERT OR IGNORE INTO course_teachers(course_id, teacher_id) "
                 "SELECT id, teacher_id FROM courses")
+    # 轻量迁移：旧的单条 AI 配置导入多 Key 列表，页面改为在 ai_api_keys 中管理
+    legacy = con.execute(
+        "SELECT teacher_id, "
+        "MAX(CASE WHEN key='ai_api_url' THEN value END), "
+        "MAX(CASE WHEN key='ai_api_key' THEN value END) "
+        "FROM settings WHERE key IN ('ai_api_url','ai_api_key') GROUP BY teacher_id").fetchall()
+    for teacher_id, base_url, api_key in legacy:
+        has_key = con.execute("SELECT 1 FROM ai_api_keys WHERE teacher_id=? LIMIT 1",
+                              (teacher_id,)).fetchone()
+        if not has_key and (api_key or "").strip():
+            con.execute(
+                "INSERT INTO ai_api_keys(teacher_id,name,base_url,api_key,is_active) "
+                "VALUES(?,?,?,?,1)", (teacher_id, "默认配置", base_url or "", api_key))
     if con.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
         con.execute("INSERT INTO users(username,password_hash,display_name,role,must_change_password) "
                     "VALUES(?,?,?,?,1)",
@@ -1256,6 +1281,48 @@ def save_setting(teacher_id, key, value):
         "INSERT INTO settings(teacher_id,key,value) VALUES(?,?,?) "
         "ON CONFLICT(teacher_id,key) DO UPDATE SET value=excluded.value",
         (teacher_id, key, value))
+
+
+# ---------- 老师：多组 AI API Key ----------
+def _mask_api_key(value):
+    """列表里只展示 Key 首尾，避免明文出现在页面和截图里。"""
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "••••"
+    return f"{value[:4]}…{value[-4:]}"
+
+
+def _api_key_rows(teacher_id):
+    rows = get_db().execute(
+        "SELECT id,name,base_url,api_key,is_active,created_at FROM ai_api_keys "
+        "WHERE teacher_id=? ORDER BY is_active DESC, id DESC", (teacher_id,)).fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["masked_key"] = _mask_api_key(item["api_key"])
+        result.append(item)
+    return result
+
+
+def _activate_api_key(teacher_id, key_id):
+    """指定当前使用的 Key：同步写回 settings，让批改、同步、测试连接沿用同一份配置。"""
+    db = get_db()
+    row = db.execute("SELECT base_url,api_key FROM ai_api_keys WHERE id=? AND teacher_id=?",
+                     (key_id, teacher_id)).fetchone()
+    if row is None:
+        return False
+    db.execute("UPDATE ai_api_keys SET is_active=0 WHERE teacher_id=?", (teacher_id,))
+    db.execute("UPDATE ai_api_keys SET is_active=1, updated_at=CURRENT_TIMESTAMP "
+               "WHERE id=?", (key_id,))
+    save_setting(teacher_id, "ai_api_url", row["base_url"] or "")
+    save_setting(teacher_id, "ai_api_key", row["api_key"])
+    return True
+
+
+def _valid_api_base_url(value):
+    return bool(re.fullmatch(r"https?://[^\s]{3,500}", value or ""))
 
 
 # ---------- AI 操作与逐次调用用量 ----------
@@ -3463,6 +3530,7 @@ def _settings_context(extra=None):
     conf = {k: get_setting(g.user["id"], k)
             for k in ("ai_api_url", "ai_api_key", "ai_model", "ai_demo", "ai_offpeak_only")}
     view = build_model_rows(g.user["id"], conf["ai_api_url"], get_db())
+    api_keys = _api_key_rows(g.user["id"])
     ctx = {
         "cfg": conf,
         "env_keys": [k for k, v in ENV_AI_SETTINGS.items() if v],
@@ -3472,6 +3540,10 @@ def _settings_context(extra=None):
         "est_tokens_input": EST_TOKENS_INPUT,
         "est_tokens_output": EST_TOKENS_OUTPUT,
         "price_import": None,
+        "api_keys": api_keys,
+        "active_api_key": next((k for k in api_keys if k["is_active"]), None),
+        "api_configured": bool(conf["ai_api_key"]),
+        "api_env_managed": any(ENV_AI_SETTINGS.get(k) for k in ("ai_api_url", "ai_api_key")),
     }
     if extra:
         ctx.update(extra)
@@ -3485,19 +3557,86 @@ def settings_page():
         if request.form.get("demo_only"):
             save_setting(g.user["id"], "ai_demo", "1" if request.form.get("ai_demo") else "")
         else:
-            for k in ("ai_api_url", "ai_api_key", "ai_model"):
-                if ENV_AI_SETTINGS.get(k):
-                    continue  # 已由环境变量注入，页面设置不覆盖，也不写库
-                value = request.form.get(k, "").strip()
-                if k == "ai_api_key" and not value:
-                    continue  # Key 留空表示不修改，避免误清空
-                save_setting(g.user["id"], k, value)
+            # API 基地址与 Key 由「AI API 配置」卡片单独管理，这里只保存模型偏好
+            if not ENV_AI_SETTINGS.get("ai_model"):
+                save_setting(g.user["id"], "ai_model",
+                             request.form.get("ai_model", "").strip())
             save_setting(g.user["id"], "ai_demo", "1" if request.form.get("ai_demo") else "")
             save_setting(g.user["id"], "ai_offpeak_only", "1" if request.form.get("ai_offpeak_only") else "")
         get_db().commit()
         flash("已保存")
         return redirect(url_for("settings_page"))
     return render_template("settings.html", **_settings_context())
+
+
+@app.route("/settings/api-keys/add", methods=["POST"])
+@role_required("teacher")
+def settings_api_key_add():
+    if any(ENV_AI_SETTINGS.get(k) for k in ("ai_api_url", "ai_api_key")):
+        flash("AI API 已由环境变量注入，页面上的 Key 管理不会生效")
+        return redirect(url_for("settings_page"))
+    name = (request.form.get("name") or "").strip()[:60]
+    base_url = (request.form.get("base_url") or "").strip().rstrip("/")
+    api_key = (request.form.get("api_key") or "").strip()
+    if not _valid_api_base_url(base_url):
+        flash("接口基地址需要以 http:// 或 https:// 开头")
+        return redirect(url_for("settings_page"))
+    if not api_key:
+        flash("请填写 API Key")
+        return redirect(url_for("settings_page"))
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO ai_api_keys(teacher_id,name,base_url,api_key) VALUES(?,?,?,?)",
+        (g.user["id"], name or "未命名 Key", base_url, api_key))
+    # 勾选「保存后立即使用」或当前还没有可用 Key 时，新 Key 直接生效
+    if request.form.get("use_now") or not any(k["is_active"] for k in _api_key_rows(g.user["id"])):
+        _activate_api_key(g.user["id"], cur.lastrowid)
+    db.commit()
+    flash("已保存 API Key")
+    return redirect(url_for("settings_page"))
+
+
+@app.route("/settings/api-keys/<int:key_id>/activate", methods=["POST"])
+@role_required("teacher")
+def settings_api_key_activate(key_id):
+    if any(ENV_AI_SETTINGS.get(k) for k in ("ai_api_url", "ai_api_key")):
+        flash("AI API 已由环境变量注入，页面上的 Key 管理不会生效")
+        return redirect(url_for("settings_page"))
+    if _activate_api_key(g.user["id"], key_id):
+        get_db().commit()
+        flash("已切换当前使用的 AI API")
+    else:
+        flash("未找到该 API Key")
+    return redirect(url_for("settings_page"))
+
+
+@app.route("/settings/api-keys/<int:key_id>/delete", methods=["POST"])
+@role_required("teacher")
+def settings_api_key_delete(key_id):
+    if any(ENV_AI_SETTINGS.get(k) for k in ("ai_api_url", "ai_api_key")):
+        flash("AI API 已由环境变量注入，页面上的 Key 管理不会生效")
+        return redirect(url_for("settings_page"))
+    db = get_db()
+    row = db.execute("SELECT is_active FROM ai_api_keys WHERE id=? AND teacher_id=?",
+                     (key_id, g.user["id"])).fetchone()
+    if row is None:
+        flash("未找到该 API Key")
+        return redirect(url_for("settings_page"))
+    db.execute("DELETE FROM ai_api_keys WHERE id=?", (key_id,))
+    if row["is_active"]:
+        # 删除当前 Key 后自动切换到最近保存的一条，避免批改突然无法调用
+        nxt = db.execute("SELECT id FROM ai_api_keys WHERE teacher_id=? "
+                         "ORDER BY id DESC LIMIT 1", (g.user["id"],)).fetchone()
+        db.commit()
+        if nxt:
+            _activate_api_key(g.user["id"], nxt["id"])
+        else:
+            save_setting(g.user["id"], "ai_api_url", "")
+            save_setting(g.user["id"], "ai_api_key", "")
+            save_setting(g.user["id"], "ai_model", "")
+    db.commit()
+    flash("已删除该 API Key")
+    return redirect(url_for("settings_page"))
 
 
 @app.route("/settings/models/sync", methods=["POST"])
