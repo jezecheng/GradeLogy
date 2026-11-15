@@ -23,14 +23,15 @@
 
 <h1>我的提示词</h1>
 <p class="muted">
-  这里管理 AI 批改作业与生成批改报告所用的提示词。系统内置两条默认提示词，全局可用、不可删除；
-  建议复制成自己的副本后再修改，改到满意后到具体课程页选择本课程使用哪一条。
+  这里管理 AI 批改作业、生成批改报告、以及横向 / 纵向知识点分析所用的提示词。系统为每类内置一条默认提示词，
+  全局可用、不可删除；建议复制成自己的副本后再修改，改到满意后到具体课程页选择本课程使用哪一条。
 </p>
 <p class="muted small">
-  提示词只写「规则与要求」即可：JSON 输出格式由系统自动追加，保证批阅结果能被程序解析。
+  提示词只写「角色、规则与要求」即可：JSON 输出格式由系统自动追加，保证结果能被程序解析。
+  知识点分析提示词的输入数据通过占位符注入，保留占位符即可按讲次 / 学生自动填充。
 </p>
 
-{% for kind in ['grade', 'report'] %}
+{% for kind in ['grade', 'report', 'tag_horizontal', 'tag_vertical'] %}
 <div class="card">
   <div class="card-head">
     <h2>{{ kind_label[kind] }}提示词</h2>
@@ -43,12 +44,15 @@
       <input type="hidden" name="kind" value="{{ kind }}">
       <h2>新建{{ kind_label[kind] }}提示词</h2>
       <label>名称
-        <input name="name" placeholder="如：{{ '严格按配平扣分' if kind == 'grade' else '鼓励式评语' }}" required>
+        <input name="name" required placeholder="如：{% if kind == 'grade' %}严格按配平扣分{% elif kind == 'report' %}鼓励式评语{% elif kind == 'tag_horizontal' %}侧重计算类错题{% else %}先补前置再练综合{% endif %}">
       </label>
       <label>提示词内容
         <textarea name="content" rows="12" required
-                  placeholder="写清批阅/评语的规则与要求；不需要写 JSON 输出格式。"></textarea>
+                  placeholder="{% if kind in ['grade', 'report'] %}写清批阅 / 评语的规则与要求；不需要写 JSON 输出格式。{% else %}写清角色、诊断口径与教学建议要求；可用下方占位符引用输入数据，不需要写 JSON 输出格式。{% endif %}"></textarea>
       </label>
+      {% if placeholder_hints[kind] %}
+      <p class="muted small">{{ placeholder_hints[kind] }}</p>
+      {% endif %}
       <p class="muted small">保存后可在「具体课程 → 提示词配置」里选用；建议先在副本上测试效果。</p>
       <div class="modal-actions">
         <button type="button" class="ghost" data-dialog-close>取消</button>
@@ -71,6 +75,9 @@
       <span class="muted small">不可删除、不可修改</span>
     </summary>
     <div class="prompt-body">
+      {% if placeholder_hints[p.kind] %}
+      <p class="muted small">{{ placeholder_hints[p.kind] }}</p>
+      {% endif %}
       <textarea rows="10" readonly>{{ p.content }}</textarea>
       <div class="prompt-actions">
         <form method="post" action="{{ url_for('prompt_copy', pid=p.id) }}">
@@ -92,6 +99,9 @@
       <span class="muted small">可编辑、可删除</span>
     </summary>
     <div class="prompt-body">
+      {% if placeholder_hints[p.kind] %}
+      <p class="muted small">{{ placeholder_hints[p.kind] }}</p>
+      {% endif %}
       <form method="post" action="{{ url_for('prompt_save', pid=p.id) }}" class="stack-form">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
         <label>名称

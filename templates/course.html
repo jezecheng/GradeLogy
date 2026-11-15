@@ -81,7 +81,7 @@
     <h2>提示词配置</h2>
     <a class="btn-link" href="{{ url_for('prompts_page') }}">管理我的提示词 →</a>
   </div>
-  <p class="muted small">本课程 AI 批改作业、生成批改报告时使用的提示词。
+  <p class="muted small">本课程 AI 批改作业、生成批改报告、进行横向 / 纵向知识点分析时使用的提示词。
     不选则使用系统内置默认提示词；每位共同管理老师自建的提示词都可以在这里选用。</p>
   <form method="post" action="{{ url_for('course_prompts_save', cid=course.id) }}"
         class="stack-form" style="max-width:560px">
@@ -101,6 +101,26 @@
         <option value="0" {% if not course.report_prompt_id %}selected{% endif %}>系统内置默认提示词</option>
         {% for p in report_prompts if not p.is_default %}
         <option value="{{ p.id }}" {% if course.report_prompt_id == p.id %}selected{% endif %}>
+          {{ p.name }}{% if p.owner %}（{{ p.owner }}）{% endif %}
+        </option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>横向分析提示词（单讲次全班共性问题）
+      <select name="tag_horizontal_prompt_id">
+        <option value="0" {% if not course.tag_horizontal_prompt_id %}selected{% endif %}>系统内置默认提示词</option>
+        {% for p in tag_horizontal_prompts if not p.is_default %}
+        <option value="{{ p.id }}" {% if course.tag_horizontal_prompt_id == p.id %}selected{% endif %}>
+          {{ p.name }}{% if p.owner %}（{{ p.owner }}）{% endif %}
+        </option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>纵向分析提示词（单个学生跨讲次）
+      <select name="tag_vertical_prompt_id">
+        <option value="0" {% if not course.tag_vertical_prompt_id %}selected{% endif %}>系统内置默认提示词</option>
+        {% for p in tag_vertical_prompts if not p.is_default %}
+        <option value="{{ p.id }}" {% if course.tag_vertical_prompt_id == p.id %}selected{% endif %}>
           {{ p.name }}{% if p.owner %}（{{ p.owner }}）{% endif %}
         </option>
         {% endfor %}

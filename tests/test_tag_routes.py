@@ -37,6 +37,7 @@ class TagRouteTest(unittest.TestCase):
         con = self._db()
         for table in _TABLES:
             con.execute(f"DELETE FROM {table}")
+        con.execute("DELETE FROM prompts WHERE is_default=0")
         con.commit()
         con.close()
 
@@ -168,8 +169,11 @@ class TagRouteTest(unittest.TestCase):
             403)
 
     def test_horizontal_analysis_saves_markdown(self):
-        result = {"summary": "整体判断", "points": [
-            {"tag": "氧化还原反应", "problem": "配平错误多", "advice": "专项练习"}]}
+        result = {"overall_summary": "整体判断",
+                  "high_risk_topics": [{"topic_name": "氧化还原反应",
+                                        "error_rate": "100%",
+                                        "common_pitfall": "配平错误多"}],
+                  "teaching_suggestions": ["专项练习配平"]}
         with mock.patch.object(app_module, "_ai_endpoint",
                                return_value=("http://api", "key", "model", "")), \
                 mock.patch.object(app_module, "ai_horizontal_analysis",
@@ -177,6 +181,7 @@ class TagRouteTest(unittest.TestCase):
             resp = self._post("lecture_tag_analysis", hid=20)
         self.assertEqual(resp.status_code, 302)
         ai.assert_called_once()
+        self.assertIn("化学", ai.call_args[0][0]["subject_and_course"])
         con = self._db()
         row = con.execute(
             "SELECT * FROM tag_analyses WHERE kind='horizontal' AND lecture_id=20"
@@ -185,6 +190,7 @@ class TagRouteTest(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertIn("整体判断", row["content_md"])
         self.assertIn("配平错误多", row["content_md"])
+        self.assertIn("专项练习配平", row["content_md"])
         self.assertIn("氧化还原反应", row["stats_json"])
 
     def test_horizontal_analysis_requires_tags(self):
@@ -225,10 +231,11 @@ class TagRouteTest(unittest.TestCase):
         self.assertEqual(count, 0)
 
     def test_vertical_analysis_saves_markdown(self):
-        result = {"summary": "纵向判断",
-                  "weak_tags": [{"tag": "氧化还原反应", "trend": "多讲反复出错",
-                                 "advice": "复习电子守恒"}],
-                  "strengths": "计算稳定"}
+        result = {"progress_highlights": ["计算稳定"],
+                  "root_cause_diagnosis": [{"weakness_chain": "氧化还原 -> 电化学",
+                                            "analysis": "电子守恒未掌握"}],
+                  "habit_alerts": ["漏写单位"],
+                  "action_plan": ["复习电子守恒"]}
         with mock.patch.object(app_module, "_ai_endpoint",
                                return_value=("http://api", "key", "model", "")), \
                 mock.patch.object(app_module, "ai_vertical_analysis",
@@ -236,15 +243,20 @@ class TagRouteTest(unittest.TestCase):
             resp = self._post("student_tag_analysis", cid=10, sid=4)
         self.assertEqual(resp.status_code, 302)
         ai.assert_called_once()
+        context = ai.call_args[0][0]
+        self.assertEqual(context["student_name"], "学生")
+        self.assertIn("系统暂未内置学科知识图谱", context["kg_weakness_chains"])
         con = self._db()
         row = con.execute(
             "SELECT * FROM tag_analyses WHERE kind='vertical' AND student_id=4"
         ).fetchone()
         con.close()
         self.assertIsNotNone(row)
-        self.assertIn("纵向判断", row["content_md"])
-        self.assertIn("复习电子守恒", row["content_md"])
         self.assertIn("计算稳定", row["content_md"])
+        self.assertIn("电子守恒未掌握", row["content_md"])
+        self.assertIn("漏写单位", row["content_md"])
+        self.assertIn("复习电子守恒", row["content_md"])
+        self.assertIn("mastery", row["stats_json"])
 
     def test_vertical_analysis_requires_tagged_errors(self):
         con = self._db()
@@ -260,6 +272,72 @@ class TagRouteTest(unittest.TestCase):
             "SELECT COUNT(*) FROM tag_analyses WHERE kind='vertical'").fetchone()[0]
         con.close()
         self.assertEqual(count, 0)
+
+    def test_prompts_page_lists_all_kinds_and_placeholders(self):
+        resp = self.client.get(self.url("prompts_page"))
+        self.assertEqual(resp.status_code, 200)
+        html = resp.get_data(as_text=True)
+        for text in ("横向分析提示词", "纵向分析提示词",
+                     "默认横向知识点分析提示词", "默认纵向知识点分析提示词",
+                     "{aggregated_question_stats}", "{module_mastery_stats}"):
+            self.assertIn(text, html)
+
+    def test_course_custom_horizontal_prompt_is_passed_to_ai(self):
+        con = self._db()
+        con.execute(
+            "INSERT INTO prompts(teacher_id,kind,name,content) VALUES(2,?,?,?)",
+            ("tag_horizontal", "自定义横向", "自定义横向口径"))
+        pid = con.execute("SELECT id FROM prompts WHERE name='自定义横向'").fetchone()[0]
+        con.execute("UPDATE courses SET tag_horizontal_prompt_id=? WHERE id=10", (pid,))
+        con.commit()
+        con.close()
+        result = {"overall_summary": "s", "high_risk_topics": [],
+                  "teaching_suggestions": []}
+        with mock.patch.object(app_module, "_ai_endpoint",
+                               return_value=("http://api", "key", "model", "")), \
+                mock.patch.object(app_module, "ai_horizontal_analysis",
+                                  return_value=result) as ai:
+            resp = self._post("lecture_tag_analysis", hid=20)
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(ai.call_args.kwargs["prompt"], "自定义横向口径")
+
+    def test_course_prompts_save_stores_tag_prompts(self):
+        con = self._db()
+        con.executemany(
+            "INSERT INTO prompts(teacher_id,kind,name,content) VALUES(2,?,?,?)",
+            [("tag_horizontal", "横向A", "a"), ("tag_vertical", "纵向A", "b")])
+        hpid = con.execute("SELECT id FROM prompts WHERE name='横向A'").fetchone()[0]
+        vpid = con.execute("SELECT id FROM prompts WHERE name='纵向A'").fetchone()[0]
+        con.commit()
+        con.close()
+        resp = self._post("course_prompts_save", {
+            "grade_prompt_id": "0", "report_prompt_id": "0",
+            "tag_horizontal_prompt_id": str(hpid),
+            "tag_vertical_prompt_id": str(vpid)}, cid=10)
+        self.assertEqual(resp.status_code, 302)
+        con = self._db()
+        row = con.execute("SELECT tag_horizontal_prompt_id, tag_vertical_prompt_id "
+                          "FROM courses WHERE id=10").fetchone()
+        con.close()
+        self.assertEqual(row["tag_horizontal_prompt_id"], hpid)
+        self.assertEqual(row["tag_vertical_prompt_id"], vpid)
+
+    def test_course_prompts_save_rejects_other_teachers_prompt(self):
+        con = self._db()
+        con.execute(
+            "INSERT INTO prompts(teacher_id,kind,name,content) VALUES(3,?,?,?)",
+            ("tag_vertical", "别人的纵向", "x"))
+        pid = con.execute("SELECT id FROM prompts WHERE name='别人的纵向'").fetchone()[0]
+        con.commit()
+        con.close()
+        resp = self._post("course_prompts_save", {
+            "tag_vertical_prompt_id": str(pid)}, cid=10)
+        self.assertEqual(resp.status_code, 302)
+        con = self._db()
+        stored = con.execute(
+            "SELECT tag_vertical_prompt_id FROM courses WHERE id=10").fetchone()[0]
+        con.close()
+        self.assertEqual(stored, 0)
 
 
 if __name__ == "__main__":

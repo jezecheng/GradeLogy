@@ -679,7 +679,7 @@ def ai_usage(teacher_id, days=7):
 
 
 def list_prompts(teacher_id, kind=None):
-    """可用的批改/报告提示词：系统内置 + 本人自建（与提示词页面口径一致）。"""
+    """可用的提示词：批改、报告、横向/纵向分析，系统内置 + 本人自建（与提示词页面口径一致）。"""
     sql = ("SELECT p.id, p.kind, p.name, p.is_default, p.teacher_id, p.updated_at,"
            "length(p.content) AS content_length,"
            "CASE WHEN p.is_default=1 THEN '系统内置' "
@@ -1151,8 +1151,10 @@ TOOLS = [
                       "按操作类型与日期拆分。",
           {"days": {"type": "integer", "description": "统计最近多少天，默认 7，最大 90"}},
           []),
-    _spec("list_prompts", "列出可用的批改/报告提示词（系统内置 + 自己创建的），不含正文。",
-          {"kind": {"type": "string", "description": "grade（批改）或 report（报告），可省略"}},
+    _spec("list_prompts", "列出可用的提示词（批改、报告、横向/纵向分析；系统内置 + 自己创建的），不含正文。",
+          {"kind": {"type": "string",
+                    "description": "grade（批改）、report（报告）、tag_horizontal（横向分析）"
+                                   "或 tag_vertical（纵向分析），可省略"}},
           []),
     _spec("get_prompt", "读取某个提示词的完整内容。ID 来自 list_prompts。",
           {"prompt_id": {"type": "integer", "description": "提示词 ID"}},

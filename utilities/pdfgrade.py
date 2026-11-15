@@ -523,60 +523,135 @@ def ai_lecture_summary(qstats, api_url, api_key, model, max_tokens=4096, usage_h
 
 # ---------- 基于知识点标签的横向/纵向分析 ----------
 
-HORIZONTAL_TAG_PROMPT = (
-    "你是教研组组长。下面给出某讲作业按知识点标签汇总的全班判定统计"
-    "（对/半对/错/无法判定），以及错题的代表性评语。\n"
-    "请找出全班普遍存在的知识点问题，并给出教学建议。\n"
-    "只输出 JSON，不要输出解释或代码块标记：\n"
-    '{"summary":"整体判断（100~200 字）",'
-    '"points":[{"tag":"知识点标签","problem":"多数学生的具体问题（60~120 字）",'
-    '"advice":"下次课的教学建议（40~100 字）"}]}\n'
-    "规则：\n"
-    "1. tag 必须使用数据里出现的标签原文，不要自造新标签；按问题普遍程度排序，最多 6 条。\n"
-    "2. 只依据给定数据，不要编造学生没写的内容；错误率低的标签不要硬列为问题。\n"
-    "3. problem 要写清错在哪一步或哪个概念，避免空泛。"
+DEFAULT_TAG_HORIZONTAL_PROMPT = (
+    "你是资深学科教学教研员与数据分析专家。现在需要基于本讲次全体学生的作业批改统计数据，"
+    "为授课教师生成一份客观、精准的《讲评课教学诊断报告》。\n\n"
+    "### 输入数据\n"
+    "- 学科与课程：{subject_and_course}\n"
+    "- 作业/讲次名称：{lecture_name}\n"
+    "- 参与批改总人数：{total_students}\n"
+    "- 题目与知识点统计列表（含题号、关联知识点、全班错误率、典型错误 comment 摘录）：\n"
+    "{aggregated_question_stats}\n\n"
+    "### 红线与要求\n"
+    "1. **严格基于数据**：所有错误率、人数比例、典型错误特征必须严格依据输入统计，"
+    "严禁编造未出现的错误类型或主观臆测原因。\n"
+    "2. **聚焦共性痛点**：重点剖析错误率较高的题目（如错误率 ≥ 40%），"
+    "从“核心概念/原理理解偏差”、“解题思路/逻辑断层”、“审题与作答规范性问题”三个维度"
+    "归纳全班共性盲区。\n"
+    "3. **知识图谱关联（如有）**：若输入数据中包含知识点关联或前置依赖信息，"
+    "需指出高频错题共同指向的底层核心知识模块。\n"
+    "4. **可执行性**：教学建议必须具体、可落地，明确指出讲评课的时间分配重点与前置概念补充方向。"
 )
 
-VERTICAL_TAG_PROMPT = (
-    "你是该学生的任课老师。下面给出这个学生在本课程多次作业中，"
-    "错或半对的题目按知识点标签汇总的记录。\n"
-    "请结合同一知识点在不同讲次、不同题目里的反复出错情况，判断真正薄弱的知识点。\n"
-    "只输出 JSON，不要输出解释或代码块标记：\n"
-    '{"summary":"整体判断（100~200 字）",'
-    '"weak_tags":[{"tag":"知识点标签","trend":"在哪些讲次/题目反复出错、错误表现（60~120 字）",'
-    '"advice":"针对该生的练习建议（40~100 字）"}],'
-    '"strengths":"相对掌握较好的方面（60~120 字，没有就留空）"}\n'
-    "规则：\n"
-    "1. tag 必须使用数据中出现的标签原文，按薄弱程度排序，最多 6 条。\n"
-    "2. 只依据给定记录，不要编造；同一标签跨讲次重复出现时要明确指出。\n"
-    "3. 建议要具体可执行，不要只说「多加练习」。"
+TAG_HORIZONTAL_OUTPUT_CONTRACT = (
+    "### 输出格式（严格输出合法 JSON）\n"
+    "{\n"
+    '  "overall_summary": "一句话客观概括本讲次全班整体掌握情况与核心问题（100字以内）",\n'
+    '  "high_risk_topics": [\n'
+    "    {\n"
+    '      "topic_name": "薄弱知识点或题号范围",\n'
+    '      "error_rate": "错误率百分比",\n'
+    '      "common_pitfall": "全班共性错误模式与典型失分点剖析（80字以内）"\n'
+    "    }\n"
+    "  ],\n"
+    '  "teaching_suggestions": [\n'
+    '    "针对下一节讲评课的具体教学与重点拆解建议（最多3条，按优先级排序，每条不超过80字）"\n'
+    "  ]\n"
+    "}"
 )
 
+TAG_HORIZONTAL_PROMPT = DEFAULT_TAG_HORIZONTAL_PROMPT + "\n\n" + TAG_HORIZONTAL_OUTPUT_CONTRACT
 
-def ai_horizontal_analysis(stats, api_url, api_key, model,
-                           max_tokens=4096, usage_hook=None):
-    """按讲次聚合的知识点统计，生成全班共性问题分析；失败返回 {}。"""
-    payload = []
-    for row in (stats or []):
-        total = (row.get("n_right", 0) + row.get("n_partial", 0)
-                 + row.get("n_wrong", 0) + row.get("n_unknown", 0))
-        if not total:      # 还没有批改结果的标签不进入分析，避免干扰判断
-            continue
-        payload.append({
-            "tag": row.get("tag", ""),
-            "questions": row.get("question_nos") or [],
-            "students": row.get("n_students", 0),
-            "right": row.get("n_right", 0),
-            "partial": row.get("n_partial", 0),
-            "wrong": row.get("n_wrong", 0),
-            "unknown": row.get("n_unknown", 0),
-            "comments": (row.get("sample_comments") or [])[:3],
-        })
-        if len(payload) >= 16:
-            break
-    content = [{"type": "text", "text": HORIZONTAL_TAG_PROMPT + "\n\n数据：\n" +
-                json.dumps(payload, ensure_ascii=False)}]
-    reply, finish, err = llm.chat(api_url, api_key, model, content,
+DEFAULT_TAG_VERTICAL_PROMPT = (
+    "你是资深的个性化学习规划师与学情诊断专家。现在需要结合某位学生近 {lecture_count} 讲的"
+    "累计作业表现及知识图谱关联数据，为其生成一份《阶段性学情诊断与提分方案》。\n\n"
+    "### 输入数据\n"
+    "- 学科与课程：{subject_and_course}\n"
+    "- 学生姓名：{student_name}\n"
+    "- 覆盖讲次范围：{lecture_range}\n"
+    "- 各知识模块累计掌握度统计：{module_mastery_stats}\n"
+    "- 知识图谱诊断出的“跨讲次关联薄弱链”（前置基础知识点 -> 衍生错题知识点）："
+    "{kg_weakness_chains}\n"
+    "- 高频错误类型与作答习惯统计：{error_habit_stats}\n"
+    "- 近期表现与早期表现对比趋势：{trend_data}\n\n"
+    "### 红线与要求\n"
+    "1. **数据支撑，严禁空谈**：所有诊断结论必须有输入数据、知识模块名称或具体讲次题号作为支撑，"
+    "严禁脱离事实写泛泛而谈的套话。\n"
+    "2. **穿透表象找根因**：不要只罗列学生做错了哪些题。必须结合“跨讲次关联薄弱链”，"
+    "向学生解释清楚后续综合题卡壳的底层前置知识漏洞。\n"
+    "3. **区分“知识漏洞”与“作答习惯”**：明确剥离“核心原理/方法未掌握”导致的硬性失分，"
+    "与“审题遗漏、格式不规范、计算粗心、未作答”导致的习惯性失分。\n"
+    "4. **语气与激励**：保持客观、专业且富有建设性的鼓励语气，保护学生学习信心。"
+)
+
+TAG_VERTICAL_OUTPUT_CONTRACT = (
+    "### 输出格式（严格输出合法 JSON）\n"
+    "{\n"
+    '  "progress_highlights": [\n'
+    '    "肯定学生近期掌握较好或进步明显的知识模块/作答习惯（1-2条，每条不超过60字）"\n'
+    "  ],\n"
+    '  "root_cause_diagnosis": [\n'
+    "    {\n"
+    '      "weakness_chain": "前置知识点 -> 关联薄弱知识点",\n'
+    '      "analysis": "结合具体错题表现，剖析知识断层的根本原因（不超过100字）"\n'
+    "    }\n"
+    "  ],\n"
+    '  "habit_alerts": [\n'
+    '    "跨讲次反复出现的非知识性失分习惯（如无明显习惯问题，输出空数组 []）"\n'
+    "  ],\n"
+    '  "action_plan": [\n'
+    '    "未来两周的具体复习与练习路径建议（严格遵循‘先补前置基础 -> 再练综合应用’的递进顺序，'
+    '最多3条，每条不超过80字）"\n'
+    "  ]\n"
+    "}"
+)
+
+TAG_VERTICAL_PROMPT = DEFAULT_TAG_VERTICAL_PROMPT + "\n\n" + TAG_VERTICAL_OUTPUT_CONTRACT
+
+
+def _prompt_value(value):
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _compose_tag_prompt(template, contract, values):
+    """拼装分析提示词：自定义提示词同样追加系统输出契约，并替换数据占位符。
+
+    自定义提示词若删掉了部分占位符，未注入的数据仍会附在末尾，避免模型无数据可用。
+    """
+    base = (template.strip() + "\n" + contract
+            if template.strip() else contract)
+    text = base
+    missing = []
+    for key, value in values.items():
+        token = "{" + key + "}"
+        if token in text:
+            text = text.replace(token, _prompt_value(value))
+        else:
+            missing.append(f"- {key}：{_prompt_value(value)}")
+    if missing:
+        text += "\n\n数据：\n" + "\n".join(missing)
+    return text
+
+
+def ai_horizontal_analysis(context, api_url, api_key, model,
+                           max_tokens=4096, prompt="", usage_hook=None):
+    """按讲次生成全班教学诊断；context 提供提示词所需的各项数据。
+
+    context 键：subject_and_course / lecture_name / total_students /
+    aggregated_question_stats。
+    """
+    values = {
+        "subject_and_course": context.get("subject_and_course", ""),
+        "lecture_name": context.get("lecture_name", ""),
+        "total_students": str(context.get("total_students", 0)),
+        "aggregated_question_stats": context.get("aggregated_question_stats") or [],
+    }
+    text = _compose_tag_prompt(prompt or DEFAULT_TAG_HORIZONTAL_PROMPT,
+                               TAG_HORIZONTAL_OUTPUT_CONTRACT, values)
+    reply, finish, err = llm.chat(api_url, api_key, model,
+                                  [{"type": "text", "text": text}],
                                   max_tokens=max_tokens, timeout=180, retries=1,
                                   usage_hook=usage_hook)
     if err:
@@ -584,28 +659,35 @@ def ai_horizontal_analysis(stats, api_url, api_key, model,
     data = llm.extract_json(reply)
     if not isinstance(data, dict):
         return {}
-    points = [p for p in (data.get("points") or []) if isinstance(p, dict)][:6]
-    summary = str(data.get("summary", "")).strip()
-    if not summary and not points:
+    summary = str(data.get("overall_summary") or data.get("summary") or "").strip()
+    topics = [t for t in (data.get("high_risk_topics") or []) if isinstance(t, dict)][:8]
+    suggestions = data.get("teaching_suggestions") or []
+    if isinstance(suggestions, str):
+        suggestions = [suggestions]
+    suggestions = [str(s).strip() for s in suggestions if str(s).strip()][:3]
+    if not summary and not topics and not suggestions:
         return {}
-    return {"summary": summary, "points": points}
+    return {"overall_summary": summary, "high_risk_topics": topics,
+            "teaching_suggestions": suggestions}
 
 
-def ai_vertical_analysis(stats, student_name, course_name, api_url, api_key, model,
-                         max_tokens=4096, usage_hook=None):
-    """按学生跨讲次聚合的错题标签，生成纵向薄弱点分析；失败返回 {}。"""
-    payload = {"student": student_name, "course": course_name, "weak_tags": []}
-    for row in (stats or [])[:16]:
-        payload["weak_tags"].append({
-            "tag": row.get("tag", ""),
-            "wrong": row.get("n_wrong", 0),
-            "partial": row.get("n_partial", 0),
-            "lectures": row.get("n_lectures", 0),
-            "episodes": (row.get("episodes") or [])[:6],
-        })
-    content = [{"type": "text", "text": VERTICAL_TAG_PROMPT + "\n\n数据：\n" +
-                json.dumps(payload, ensure_ascii=False)}]
-    reply, finish, err = llm.chat(api_url, api_key, model, content,
+def ai_vertical_analysis(context, api_url, api_key, model,
+                         max_tokens=4096, prompt="", usage_hook=None):
+    """按学生跨讲次生成阶段诊断；context 提供提示词所需的各项数据。"""
+    values = {
+        "lecture_count": str(context.get("lecture_count", 0)),
+        "subject_and_course": context.get("subject_and_course", ""),
+        "student_name": context.get("student_name", ""),
+        "lecture_range": context.get("lecture_range", ""),
+        "module_mastery_stats": context.get("module_mastery_stats") or [],
+        "kg_weakness_chains": context.get("kg_weakness_chains", ""),
+        "error_habit_stats": context.get("error_habit_stats") or [],
+        "trend_data": context.get("trend_data") or [],
+    }
+    text = _compose_tag_prompt(prompt or DEFAULT_TAG_VERTICAL_PROMPT,
+                               TAG_VERTICAL_OUTPUT_CONTRACT, values)
+    reply, finish, err = llm.chat(api_url, api_key, model,
+                                  [{"type": "text", "text": text}],
                                   max_tokens=max_tokens, timeout=180, retries=1,
                                   usage_hook=usage_hook)
     if err:
@@ -613,9 +695,18 @@ def ai_vertical_analysis(stats, student_name, course_name, api_url, api_key, mod
     data = llm.extract_json(reply)
     if not isinstance(data, dict):
         return {}
-    weak = [w for w in (data.get("weak_tags") or []) if isinstance(w, dict)][:6]
-    summary = str(data.get("summary", "")).strip()
-    strengths = str(data.get("strengths", "")).strip()
-    if not summary and not weak and not strengths:
+    highlights = _str_list(data.get("progress_highlights"), 2)
+    root_cause = [r for r in (data.get("root_cause_diagnosis") or [])
+                  if isinstance(r, dict)][:6]
+    habits = _str_list(data.get("habit_alerts"), 5)
+    plan = _str_list(data.get("action_plan"), 3)
+    if not highlights and not root_cause and not habits and not plan:
         return {}
-    return {"summary": summary, "weak_tags": weak, "strengths": strengths}
+    return {"progress_highlights": highlights, "root_cause_diagnosis": root_cause,
+            "habit_alerts": habits, "action_plan": plan}
+
+
+def _str_list(value, limit):
+    if isinstance(value, str):
+        value = [value]
+    return [str(item).strip() for item in (value or []) if str(item).strip()][:limit]

@@ -133,8 +133,46 @@ def lecture_stats(db, lecture_id):
     return out
 
 
-def student_stats(db, course_id, student_id):
-    """把学生的错/半对记录按知识点标签跨讲次聚合，返回薄弱点列表。"""
+def lecture_question_stats(db, lecture_id):
+    """按题号聚合全班判定，供横向提示词使用（含标签、错误率、典型评语）。"""
+    tag_rows = db.execute(
+        "SELECT question_no,tag FROM question_tags "
+        "WHERE lecture_id=? AND TRIM(tag)<>''", (lecture_id,)).fetchall()
+    by_no = _tags_by_no(tag_rows)
+    q_rows = db.execute(
+        "SELECT q.no,q.verdict,q.ai_comment FROM questions q "
+        "JOIN submissions s ON s.id=q.submission_id "
+        "WHERE s.lecture_id=? AND q.verdict<>'' ORDER BY q.id", (lecture_id,)).fetchall()
+    stats = {}
+    for q in q_rows:
+        no = str(q["no"] or "").strip()
+        if not no:
+            continue
+        item = stats.setdefault(no, {
+            "no": no, "tags": [], "total": 0, "right": 0,
+            "partial": 0, "wrong": 0, "unknown": 0, "comments": []})
+        item["total"] += 1
+        key = _VERDICT_FIELD.get(q["verdict"], "")
+        if key:
+            item[key[2:]] += 1      # n_right -> right
+        for tag in _matched_tags(by_no, no):
+            if tag not in item["tags"]:
+                item["tags"].append(tag)
+        comment = str(q["ai_comment"] or "").strip()
+        if (q["verdict"] in ("错", "半对") and comment
+                and comment not in item["comments"] and len(item["comments"]) < 3):
+            item["comments"].append(comment)
+    out = []
+    for item in stats.values():
+        item["error_rate"] = round(
+            (item["wrong"] + item["partial"]) * 100 / item["total"], 1)
+        out.append(item)
+    out.sort(key=lambda x: (-x["error_rate"], _no_key(x["no"])))
+    return out
+
+
+def student_mastery_stats(db, course_id, student_id):
+    """按知识点标签聚合该生在本课程各讲的全部判定，用于纵向提示词。"""
     tag_rows = db.execute(
         "SELECT t.lecture_id,t.question_no,t.tag FROM question_tags t "
         "JOIN lectures l ON l.id=t.lecture_id WHERE l.course_id=?",
@@ -152,7 +190,7 @@ def student_stats(db, course_id, student_id):
         "SELECT l.id AS lecture_id,q.no,q.verdict,q.ai_comment FROM questions q "
         "JOIN submissions s ON s.id=q.submission_id "
         "JOIN lectures l ON l.id=s.lecture_id "
-        "WHERE s.student_id=? AND l.course_id=? AND q.verdict IN ('错','半对') "
+        "WHERE s.student_id=? AND l.course_id=? AND q.verdict<>'' "
         "ORDER BY l.id,q.id", (student_id, course_id)).fetchall()
 
     stats = {}
@@ -162,31 +200,93 @@ def student_stats(db, course_id, student_id):
         no = str(q["no"] or "").strip()
         for tag in _matched_tags(by_lecture.get(lid, {}), no):
             item = stats.setdefault(tag, {
-                "tag": tag, "n_wrong": 0, "n_partial": 0,
-                "lecture_ids": set(), "episodes": []})
+                "tag": tag, "n_total": 0, "n_right": 0, "n_partial": 0,
+                "n_wrong": 0, "n_unknown": 0, "lecture_ids": set(),
+                "episodes": [], "comments": []})
+            item["n_total"] += 1
+            field = _VERDICT_FIELD.get(q["verdict"])
+            if field:
+                item[field] += 1
             item["lecture_ids"].add(lid)
-            if q["verdict"] == "错":
-                item["n_wrong"] += 1
-            else:
-                item["n_partial"] += 1
-            mark = (tag, lid, no)
-            if mark not in seen_episode and len(item["episodes"]) < 8:
-                seen_episode.add(mark)
-                item["episodes"].append({
-                    "lecture": titles.get(lid, ""),
-                    "lecture_id": lid,
-                    "no": no,
-                    "verdict": q["verdict"],
-                    "comment": str(q["ai_comment"] or "").strip(),
-                })
+            comment = str(q["ai_comment"] or "").strip()
+            if q["verdict"] in ("错", "半对"):
+                mark = (tag, lid, no)
+                if mark not in seen_episode and len(item["episodes"]) < 8:
+                    seen_episode.add(mark)
+                    item["episodes"].append({
+                        "lecture": titles.get(lid, ""),
+                        "lecture_id": lid,
+                        "no": no,
+                        "verdict": q["verdict"],
+                        "comment": comment,
+                    })
+                if comment and comment not in item["comments"] and len(item["comments"]) < 3:
+                    item["comments"].append(comment)
 
     out = []
     for item in stats.values():
         item["n_lectures"] = len(item.pop("lecture_ids"))
+        item["mastery"] = round(
+            (item["n_right"] + item["n_partial"] * 0.5) * 100
+            / max(item["n_total"], 1), 1)
         out.append(item)
-    out.sort(key=lambda x: (-x["n_wrong"], -x["n_partial"],
-                            -x["n_lectures"], x["tag"]))
+    out.sort(key=lambda x: (x["mastery"], -x["n_wrong"], x["tag"]))
     return out
+
+
+def student_stats(db, course_id, student_id):
+    """把学生的错/半对记录按知识点标签跨讲次聚合，返回薄弱点列表。"""
+    rows = [row for row in student_mastery_stats(db, course_id, student_id)
+            if row["n_wrong"] or row["n_partial"]]
+    rows.sort(key=lambda x: (-x["n_wrong"], -x["n_partial"],
+                             -x["n_lectures"], x["tag"]))
+    return rows
+
+
+def student_trend(db, course_id, student_id):
+    """按讲次给出该生的判定趋势，供纵向提示词比较近期与早期表现。"""
+    rows = db.execute(
+        "SELECT l.id,l.title,COUNT(q.id) AS total,"
+        "SUM(CASE WHEN q.verdict='对' THEN 1 ELSE 0 END) AS right_n,"
+        "SUM(CASE WHEN q.verdict='半对' THEN 1 ELSE 0 END) AS partial_n,"
+        "SUM(CASE WHEN q.verdict='错' THEN 1 ELSE 0 END) AS wrong_n "
+        "FROM questions q JOIN submissions s ON s.id=q.submission_id "
+        "JOIN lectures l ON l.id=s.lecture_id "
+        "WHERE s.student_id=? AND l.course_id=? AND q.verdict<>'' "
+        "GROUP BY l.id ORDER BY l.id", (student_id, course_id)).fetchall()
+    return [{
+        "lecture": row["title"], "total": row["total"],
+        "right": row["right_n"], "partial": row["partial_n"],
+        "wrong": row["wrong_n"],
+        "error_rate": round((row["wrong_n"] + row["partial_n"]) * 100
+                            / max(row["total"], 1), 1),
+    } for row in rows]
+
+
+_HABIT_KEYWORDS = (
+    ("未作答/空白", ("未作答", "空白", "没写", "未写", "空着")),
+    ("计算/粗心", ("计算", "算错", "粗心", "数值")),
+    ("单位/有效数字", ("单位", "有效数字", "保留")),
+    ("审题/看错", ("审题", "看错", "漏看", "题意")),
+    ("格式/书写", ("格式", "书写", "不规范", "符号")),
+)
+
+
+def habit_stats(db, course_id, student_id):
+    """从错题评语中做关键词统计，区分知识性失分与作答习惯问题。"""
+    rows = db.execute(
+        "SELECT q.ai_comment FROM questions q "
+        "JOIN submissions s ON s.id=q.submission_id "
+        "JOIN lectures l ON l.id=s.lecture_id "
+        "WHERE s.student_id=? AND l.course_id=? AND q.verdict IN ('错','半对') "
+        "AND TRIM(q.ai_comment)<>''", (student_id, course_id)).fetchall()
+    counts = {}
+    for row in rows:
+        comment = str(row["ai_comment"])
+        for name, words in _HABIT_KEYWORDS:
+            if any(word in comment for word in words):
+                counts[name] = counts.get(name, 0) + 1
+    return [{"type": name, "count": count} for name, count in counts.items()]
 
 
 def latest_analysis(db, kind, lecture_id=0, student_id=0):
@@ -200,55 +300,54 @@ def latest_analysis(db, kind, lecture_id=0, student_id=0):
         "ORDER BY id DESC LIMIT 1", (student_id,)).fetchone()
 
 
-def render_horizontal_md(result, stats):
-    """把横向分析结果渲染成 Markdown，标签后附带对应判定统计。"""
-    by_tag = {s["tag"]: s for s in stats or []}
-    lines = ["## 总体判断", str(result.get("summary") or "—").strip(), "",
-             "## 共性问题"]
-    points = result.get("points") or []
-    if not points:
-        lines.append("本次数据还不足以归纳共性问题。")
-    for point in points:
-        tag = str(point.get("tag") or "").strip()
-        stat = by_tag.get(tag)
-        if stat:
-            labels = "、".join(f"第{n}题" for n in stat["question_nos"][:6])
-            head = (f"- **{tag}**（{labels}；错 {stat['n_wrong']}、"
-                    f"半对 {stat['n_partial']}，涉及 {stat['n_students']} 人）")
-        else:
-            head = f"- **{tag}**"
-        lines.append(head)
-        if point.get("problem"):
-            lines.append(f"  - 问题：{str(point['problem']).strip()}")
-        if point.get("advice"):
-            lines.append(f"  - 教学建议：{str(point['advice']).strip()}")
+def render_horizontal_md(result, stats=None):
+    """把横向诊断结果渲染成 Markdown（stats 参数保留用于兼容旧调用）。"""
+    lines = ["## 整体掌握情况",
+             str(result.get("overall_summary") or "—").strip(), "",
+             "## 高风险知识点"]
+    topics = result.get("high_risk_topics") or []
+    if not topics:
+        lines.append("本次数据还不足以归纳高风险知识点。")
+    for topic in topics:
+        name = str(topic.get("topic_name") or "未命名知识点").strip()
+        rate = str(topic.get("error_rate") or "").strip()
+        lines.append(f"- **{name}**" + (f"（错误率 {rate}）" if rate else ""))
+        pitfall = str(topic.get("common_pitfall") or "").strip()
+        if pitfall:
+            lines.append(f"  - 共性失分点：{pitfall}")
+    suggestions = result.get("teaching_suggestions") or []
+    if suggestions:
+        lines += ["", "## 讲评课建议"]
+        for i, item in enumerate(suggestions, 1):
+            lines.append(f"{i}. {str(item).strip()}")
     return "\n".join(lines)
 
 
-def render_vertical_md(result, stats):
-    """把纵向分析结果渲染成 Markdown，标签后附上跨讲次出错记录。"""
-    by_tag = {s["tag"]: s for s in stats or []}
-    lines = ["## 总体判断", str(result.get("summary") or "—").strip(), "",
-             "## 反复出错的知识点"]
-    weak = result.get("weak_tags") or []
-    if not weak:
-        lines.append("暂时没有发现跨讲次反复出错的知识点。")
-    for item in weak:
-        tag = str(item.get("tag") or "").strip()
-        stat = by_tag.get(tag)
-        if stat:
-            lectures = "、".join(dict.fromkeys(
-                e["lecture"] for e in stat["episodes"] if e.get("lecture")))
-            head = (f"- **{tag}**（{lectures or '—'}；错 {stat['n_wrong']}、"
-                    f"半对 {stat['n_partial']}，涉及 {stat['n_lectures']} 讲）")
-        else:
-            head = f"- **{tag}**"
-        lines.append(head)
-        if item.get("trend"):
-            lines.append(f"  - 表现：{str(item['trend']).strip()}")
-        if item.get("advice"):
-            lines.append(f"  - 练习建议：{str(item['advice']).strip()}")
-    strengths = str(result.get("strengths") or "").strip()
-    if strengths:
-        lines += ["", "## 相对优势", strengths]
+def render_vertical_md(result, stats=None):
+    """把纵向诊断结果渲染成 Markdown（stats 参数保留用于兼容旧调用）。"""
+    highlights = result.get("progress_highlights") or []
+    lines = ["## 进步与亮点"]
+    lines += [f"- {str(item).strip()}" for item in highlights] or ["- 暂未发现明显进步点。"]
+
+    lines += ["", "## 根因诊断"]
+    root_cause = result.get("root_cause_diagnosis") or []
+    if not root_cause:
+        lines.append("暂未发现明确的知识断层。")
+    for item in root_cause:
+        chain = str(item.get("weakness_chain") or "").strip()
+        analysis = str(item.get("analysis") or "").strip()
+        lines.append(f"- **{chain or '知识断层'}**")
+        if analysis:
+            lines.append(f"  - {analysis}")
+
+    habits = result.get("habit_alerts") or []
+    if habits:
+        lines += ["", "## 作答习惯提醒"]
+        lines += [f"- {str(item).strip()}" for item in habits]
+
+    plan = result.get("action_plan") or []
+    if plan:
+        lines += ["", "## 未来两周行动方案"]
+        for i, item in enumerate(plan, 1):
+            lines.append(f"{i}. {str(item).strip()}")
     return "\n".join(lines)

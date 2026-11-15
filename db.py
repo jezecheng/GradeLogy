@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS courses(
   teacher_id INTEGER NOT NULL REFERENCES users(id),
   grade_prompt_id INTEGER DEFAULT 0,
   report_prompt_id INTEGER DEFAULT 0,
+  tag_horizontal_prompt_id INTEGER DEFAULT 0,
+  tag_vertical_prompt_id INTEGER DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS enrollments(
   course_id INTEGER NOT NULL REFERENCES courses(id),
@@ -112,7 +114,7 @@ CREATE TABLE IF NOT EXISTS lesson_plans(
 CREATE TABLE IF NOT EXISTS prompts(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   teacher_id INTEGER NOT NULL DEFAULT 0,
-  kind TEXT NOT NULL CHECK(kind IN ('grade','report')),
+  kind TEXT NOT NULL,
   name TEXT NOT NULL,
   content TEXT DEFAULT '',
   is_default INTEGER DEFAULT 0,
@@ -304,9 +306,31 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=()):
             con.execute(f"ALTER TABLE lectures ADD COLUMN {col} TEXT DEFAULT ''")
     # 轻量迁移：课程级提示词配置（0 表示使用系统内置默认提示词）
     ccols = {r[1] for r in con.execute("PRAGMA table_info(courses)")}
-    for col in ("grade_prompt_id", "report_prompt_id"):
+    for col in ("grade_prompt_id", "report_prompt_id",
+                "tag_horizontal_prompt_id", "tag_vertical_prompt_id"):
         if col not in ccols:
             con.execute(f"ALTER TABLE courses ADD COLUMN {col} INTEGER DEFAULT 0")
+    # 轻量迁移：提示词类型从「批改/报告」扩展到知识点分析，移除旧 CHECK 约束
+    prompt_sql = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='prompts'").fetchone()
+    if prompt_sql and "CHECK(kind" in (prompt_sql[0] or ""):
+        con.executescript("""
+            ALTER TABLE prompts RENAME TO prompts_old;
+            CREATE TABLE prompts(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              teacher_id INTEGER NOT NULL DEFAULT 0,
+              kind TEXT NOT NULL,
+              name TEXT NOT NULL,
+              content TEXT DEFAULT '',
+              is_default INTEGER DEFAULT 0,
+              created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+              updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
+            INSERT INTO prompts(id,teacher_id,kind,name,content,is_default,
+                                created_at,updated_at)
+              SELECT id,teacher_id,kind,name,content,is_default,
+                     created_at,updated_at FROM prompts_old;
+            DROP TABLE prompts_old;
+        """)
     # 系统内置提示词：全局可用、不可删除，代码升级时内容随之更新
     for kind, name, content in default_prompts:
         row = con.execute("SELECT id FROM prompts WHERE is_default=1 AND kind=?",

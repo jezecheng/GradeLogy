@@ -75,19 +75,72 @@ class TagStatsTest(unittest.TestCase):
         self.assertEqual([e["lecture"] for e in redox["episodes"]],
                          ["第一讲", "第二讲"])
 
+    def test_lecture_question_stats_aggregates_by_no(self):
+        stats = tags.lecture_question_stats(self.con, 20)
+        third = next(s for s in stats if s["no"] == "3")
+        self.assertEqual(third["total"], 2)
+        self.assertEqual(third["wrong"], 1)
+        self.assertEqual(third["partial"], 1)
+        self.assertEqual(third["error_rate"], 100.0)
+        self.assertIn("氧化还原反应", third["tags"])
+        self.assertIn("未配平", third["comments"])
+        # 9.1 应能匹配到题号 9 的标签
+        sub = next(s for s in stats if s["no"] == "9.1")
+        self.assertEqual(sub["error_rate"], 0.0)
+        self.assertIn("化学平衡", sub["tags"])
+
+    def test_lecture_question_stats_empty(self):
+        self.assertEqual(tags.lecture_question_stats(self.con, 999), [])
+
+    def test_student_mastery_stats_includes_all_verdicts(self):
+        stats = tags.student_mastery_stats(self.con, 10, 2)
+        redox = next(s for s in stats if s["tag"] == "氧化还原反应")
+        self.assertEqual(redox["n_total"], 2)
+        self.assertEqual(redox["n_wrong"], 2)
+        self.assertEqual(redox["mastery"], 0.0)
+        self.assertEqual(redox["n_lectures"], 2)
+        self.assertEqual([e["lecture"] for e in redox["episodes"]],
+                         ["第一讲", "第二讲"])
+
+    def test_student_mastery_stats_empty(self):
+        self.assertEqual(tags.student_mastery_stats(self.con, 999, 2), [])
+
+    def test_student_trend_lists_each_lecture(self):
+        trend = tags.student_trend(self.con, 10, 2)
+        self.assertEqual([t["lecture"] for t in trend], ["第一讲", "第二讲"])
+        self.assertEqual(trend[0]["error_rate"], 50.0)
+        self.assertEqual(trend[1]["error_rate"], 100.0)
+
+    def test_habit_stats_counts_keywords(self):
+        self.con.execute("INSERT INTO questions(submission_id,no,verdict,ai_comment)"
+                         " VALUES(32,'4','错','未作答，单位写错')")
+        habits = {h["type"]: h["count"]
+                  for h in tags.habit_stats(self.con, 10, 2)}
+        self.assertEqual(habits.get("未作答/空白"), 1)
+        self.assertEqual(habits.get("单位/有效数字"), 1)
+        self.assertNotIn("计算/粗心", habits)
+
     def test_render_helpers_include_tag_evidence(self):
         horizontal = tags.render_horizontal_md(
-            {"summary": "整体偏弱", "points": [{"tag": "氧化还原反应",
-                                              "problem": "配平不熟", "advice": "专项训练"}]},
-            tags.lecture_stats(self.con, 20))
+            {"overall_summary": "整体偏弱",
+             "high_risk_topics": [{"topic_name": "氧化还原反应",
+                                   "error_rate": "100%", "common_pitfall": "配平不熟"}],
+             "teaching_suggestions": ["专项训练"]},
+            tags.lecture_question_stats(self.con, 20))
+        self.assertIn("整体偏弱", horizontal)
         self.assertIn("配平不熟", horizontal)
-        self.assertIn("涉及 2 人", horizontal)
+        self.assertIn("错误率 100%", horizontal)
+        self.assertIn("专项训练", horizontal)
         vertical = tags.render_vertical_md(
-            {"summary": "反复出错", "weak_tags": [{"tag": "氧化还原反应",
-                                                  "trend": "两讲都错", "advice": "复习电子守恒"}],
-             "strengths": "计算较稳"},
-            tags.student_stats(self.con, 10, 2))
-        self.assertIn("两讲都错", vertical)
+            {"progress_highlights": ["计算较稳"],
+             "root_cause_diagnosis": [{"weakness_chain": "氧化还原 -> 电化学",
+                                       "analysis": "电子守恒没掌握"}],
+             "habit_alerts": ["漏写单位"],
+             "action_plan": ["复习电子守恒"]},
+            tags.student_mastery_stats(self.con, 10, 2))
+        self.assertIn("计算较稳", vertical)
+        self.assertIn("电子守恒没掌握", vertical)
+        self.assertIn("漏写单位", vertical)
         self.assertIn("复习电子守恒", vertical)
 
     def test_lecture_stats_empty_when_no_tags(self):
@@ -132,11 +185,15 @@ class TagStatsTest(unittest.TestCase):
         self.assertEqual(tags.student_stats(self.con, 999, 2), [])
 
     def test_render_helpers_handle_empty_analysis(self):
-        horizontal = tags.render_horizontal_md({"summary": "", "points": []}, [])
-        self.assertIn("本次数据还不足以归纳共性问题", horizontal)
-        vertical = tags.render_vertical_md({"summary": "", "weak_tags": []}, [])
-        self.assertIn("暂时没有发现跨讲次反复出错的知识点", vertical)
-        self.assertNotIn("相对优势", vertical)
+        horizontal = tags.render_horizontal_md(
+            {"overall_summary": "", "high_risk_topics": [], "teaching_suggestions": []})
+        self.assertIn("本次数据还不足以归纳高风险知识点", horizontal)
+        vertical = tags.render_vertical_md(
+            {"progress_highlights": [], "root_cause_diagnosis": [],
+             "habit_alerts": [], "action_plan": []})
+        self.assertIn("暂未发现明确的知识断层", vertical)
+        self.assertIn("暂未发现明显进步点", vertical)
+        self.assertNotIn("作答习惯提醒", vertical)
 
 
 class TagAITest(unittest.TestCase):
@@ -170,29 +227,46 @@ class TagAITest(unittest.TestCase):
         self.assertIsNone(rows)
         self.assertIn("生成知识点标签", err)
 
-    def test_horizontal_analysis_parses_points(self):
-        reply = json.dumps({"summary": "整体判断", "points": [
-            {"tag": "氧化还原反应", "problem": "配平错误多", "advice": "专项练习"}]},
+    def test_horizontal_analysis_parses_topics(self):
+        reply = json.dumps({
+            "overall_summary": "整体判断",
+            "high_risk_topics": [{"topic_name": "氧化还原反应",
+                                  "error_rate": "62.5%",
+                                  "common_pitfall": "配平错误多"}],
+            "teaching_suggestions": ["专项练习", "重讲电子守恒", "补前置概念", "第四条应被截断"]},
             ensure_ascii=False)
+        context = {
+            "subject_and_course": "高一化学 · 必修一",
+            "lecture_name": "第一讲",
+            "total_students": 32,
+            "aggregated_question_stats": [
+                {"no": "3", "tags": ["氧化还原反应"], "error_rate": 62.5}],
+        }
         with mock.patch.object(pdfgrade.llm, "chat",
                                return_value=(reply, "stop", "")):
-            result = pdfgrade.ai_horizontal_analysis(
-                [{"tag": "氧化还原反应", "n_wrong": 3, "question_nos": ["3"]}],
-                "http://api", "key", "model")
-        self.assertEqual(result["summary"], "整体判断")
-        self.assertEqual(result["points"][0]["tag"], "氧化还原反应")
+            result = pdfgrade.ai_horizontal_analysis(context, "u", "k", "m")
+        self.assertEqual(result["overall_summary"], "整体判断")
+        self.assertEqual(result["high_risk_topics"][0]["topic_name"], "氧化还原反应")
+        self.assertEqual(len(result["teaching_suggestions"]), 3)
 
-    def test_vertical_analysis_parses_weak_tags(self):
-        reply = json.dumps({"summary": "纵向判断", "weak_tags": [
-            {"tag": "化学平衡", "trend": "两讲都错", "advice": "回看例题"}],
-            "strengths": "计算稳定"}, ensure_ascii=False)
+    def test_vertical_analysis_parses_diagnosis(self):
+        reply = json.dumps({
+            "progress_highlights": ["计算较稳定"],
+            "root_cause_diagnosis": [{"weakness_chain": "氧化还原 -> 电化学",
+                                      "analysis": "电子守恒未掌握"}],
+            "habit_alerts": ["漏写单位"],
+            "action_plan": ["先补氧化还原", "再练综合题", "第三条", "第四条应被截断"]},
+            ensure_ascii=False)
+        context = {"student_name": "李一", "subject_and_course": "化学",
+                   "lecture_count": 2, "module_mastery_stats": []}
         with mock.patch.object(pdfgrade.llm, "chat",
                                return_value=(reply, "stop", "")):
-            result = pdfgrade.ai_vertical_analysis(
-                [{"tag": "化学平衡", "n_wrong": 2, "n_lectures": 2}],
-                "李一", "化学", "http://api", "key", "model")
-        self.assertEqual(result["weak_tags"][0]["tag"], "化学平衡")
-        self.assertEqual(result["strengths"], "计算稳定")
+            result = pdfgrade.ai_vertical_analysis(context, "u", "k", "m")
+        self.assertEqual(result["progress_highlights"], ["计算较稳定"])
+        self.assertEqual(result["root_cause_diagnosis"][0]["weakness_chain"],
+                         "氧化还原 -> 电化学")
+        self.assertEqual(result["habit_alerts"], ["漏写单位"])
+        self.assertEqual(len(result["action_plan"]), 3)
 
     def test_analyze_question_tags_without_questions(self):
         rows, err = pdfgrade.analyze_question_tags("/tmp/a.pdf", [], "u", "k", "m")
@@ -237,41 +311,79 @@ class TagAITest(unittest.TestCase):
         self.assertEqual(rows[0]["tags"], ["重复", "概念辨析", "一", "二"])
         self.assertEqual(rows[0]["category"], "概念")
 
-    def test_horizontal_analysis_filters_ungraded_tags(self):
+    def test_horizontal_analysis_uses_custom_prompt_and_injects_data(self):
         captured = {}
 
         def fake_chat(*args, **kwargs):
             captured["content"] = args[3]
-            return (json.dumps({"summary": "s", "points": []}), "stop", "")
+            return (json.dumps({"overall_summary": "s", "high_risk_topics": [],
+                                "teaching_suggestions": []}), "stop", "")
 
-        stats = [
-            {"tag": "未批改标签", "n_right": 0, "n_partial": 0,
-             "n_wrong": 0, "n_unknown": 0},
-            {"tag": "有数据标签", "n_right": 1, "n_partial": 0,
-             "n_wrong": 2, "n_unknown": 0},
-        ]
+        context = {
+            "subject_and_course": "高一化学",
+            "lecture_name": "第一讲",
+            "total_students": 30,
+            "aggregated_question_stats": [{"no": "3", "tags": ["有数据标签"],
+                                           "error_rate": 80.0}],
+        }
         with mock.patch.object(pdfgrade.llm, "chat", side_effect=fake_chat):
-            result = pdfgrade.ai_horizontal_analysis(stats, "u", "k", "m")
-        self.assertEqual(result["summary"], "s")
+            pdfgrade.ai_horizontal_analysis(
+                context, "u", "k", "m", prompt="自定义口径：只分析计算题")
         prompt = captured["content"][0]["text"]
-        self.assertNotIn("未批改标签", prompt)
+        self.assertIn("自定义口径：只分析计算题", prompt)
         self.assertIn("有数据标签", prompt)
+        self.assertIn("高一化学", prompt)
+        self.assertIn("overall_summary", prompt)   # 系统仍追加 JSON 输出契约
+
+    def test_vertical_analysis_uses_custom_prompt_and_injects_data(self):
+        captured = {}
+
+        def fake_chat(*args, **kwargs):
+            captured["content"] = args[3]
+            return (json.dumps({"progress_highlights": ["好"], "root_cause_diagnosis": [],
+                                "habit_alerts": [], "action_plan": []}), "stop", "")
+
+        context = {
+            "lecture_count": 3,
+            "subject_and_course": "高一化学",
+            "student_name": "李一",
+            "lecture_range": "第一讲 - 第三讲",
+            "module_mastery_stats": [{"tag": "化学平衡", "mastery": 40}],
+            "kg_weakness_chains": "系统暂未内置学科知识图谱",
+            "error_habit_stats": [{"type": "计算/粗心", "count": 2}],
+            "trend_data": [{"lecture": "第一讲", "error_rate": 50.0}],
+        }
+        with mock.patch.object(pdfgrade.llm, "chat", side_effect=fake_chat):
+            pdfgrade.ai_vertical_analysis(
+                context, "u", "k", "m", prompt="自定义口径：先补前置再练综合")
+        prompt = captured["content"][0]["text"]
+        self.assertIn("自定义口径：先补前置再练综合", prompt)
+        self.assertIn("李一", prompt)
+        self.assertIn("化学平衡", prompt)
+        self.assertIn("系统暂未内置学科知识图谱", prompt)
+        self.assertIn("action_plan", prompt)
 
     def test_analysis_functions_return_empty_on_model_error(self):
         with mock.patch.object(pdfgrade.llm, "chat",
                                return_value=("", "stop", "boom")):
-            self.assertEqual(pdfgrade.ai_horizontal_analysis(
-                [{"tag": "x", "n_wrong": 1}], "u", "k", "m"), {})
-            self.assertEqual(pdfgrade.ai_vertical_analysis(
-                [{"tag": "x", "n_wrong": 1}], "李一", "化学", "u", "k", "m"), {})
+            self.assertEqual(pdfgrade.ai_horizontal_analysis({}, "u", "k", "m"), {})
+            self.assertEqual(pdfgrade.ai_vertical_analysis({}, "u", "k", "m"), {})
 
     def test_analysis_functions_return_empty_on_invalid_json(self):
         with mock.patch.object(pdfgrade.llm, "chat",
                                return_value=("not json", "stop", "")):
-            self.assertEqual(pdfgrade.ai_horizontal_analysis(
-                [{"tag": "x", "n_wrong": 1}], "u", "k", "m"), {})
-            self.assertEqual(pdfgrade.ai_vertical_analysis(
-                [{"tag": "x", "n_wrong": 1}], "李一", "化学", "u", "k", "m"), {})
+            self.assertEqual(pdfgrade.ai_horizontal_analysis({}, "u", "k", "m"), {})
+            self.assertEqual(pdfgrade.ai_vertical_analysis({}, "u", "k", "m"), {})
+
+    def test_analysis_functions_return_empty_when_result_blank(self):
+        blank = json.dumps({"overall_summary": "", "high_risk_topics": [],
+                            "teaching_suggestions": [], "progress_highlights": [],
+                            "root_cause_diagnosis": [], "habit_alerts": [],
+                            "action_plan": []})
+        with mock.patch.object(pdfgrade.llm, "chat",
+                               return_value=(blank, "stop", "")):
+            self.assertEqual(pdfgrade.ai_horizontal_analysis({}, "u", "k", "m"), {})
+            self.assertEqual(pdfgrade.ai_vertical_analysis({}, "u", "k", "m"), {})
 
 
 if __name__ == "__main__":

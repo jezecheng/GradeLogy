@@ -55,6 +55,8 @@ from utilities.report import _overall_text, build_report_md, render_markdown
 from utilities.uploads import (_student_files, _validate_upload, allowed_file, file_list,
                                save_upload)
 from utilities.pdfgrade import (DEFAULT_GRADE_PROMPT, DEFAULT_REPORT_PROMPT,
+                                DEFAULT_TAG_HORIZONTAL_PROMPT,
+                                DEFAULT_TAG_VERTICAL_PROMPT,
                                 ai_horizontal_analysis, ai_lecture_summary,
                                 ai_report_comment, ai_vertical_analysis,
                                 analyze_answer_pdf, analyze_question_tags,
@@ -391,7 +393,11 @@ def init_db():
     database.init_db(
         upload_migrator=_migrate_upload_layout,
         default_prompts=(("grade", "默认批改提示词", DEFAULT_GRADE_PROMPT),
-                         ("report", "默认报告提示词", DEFAULT_REPORT_PROMPT)),
+                         ("report", "默认报告提示词", DEFAULT_REPORT_PROMPT),
+                         ("tag_horizontal", "默认横向知识点分析提示词",
+                          DEFAULT_TAG_HORIZONTAL_PROMPT),
+                         ("tag_vertical", "默认纵向知识点分析提示词",
+                          DEFAULT_TAG_VERTICAL_PROMPT)),
         default_passwords=DEFAULT_PASSWORDS)
 
 
@@ -454,8 +460,19 @@ def _activate_api_key(teacher_id, key_id):
     return True
 
 
-# ---------- 提示词（批改 / 报告）----------
-PROMPT_KIND_LABEL = {"grade": "批改", "report": "报告"}
+# ---------- 提示词（批改 / 报告 / 知识点分析）----------
+PROMPT_KINDS = ("grade", "report", "tag_horizontal", "tag_vertical")
+PROMPT_KIND_LABEL = {"grade": "批改", "report": "报告",
+                     "tag_horizontal": "横向分析", "tag_vertical": "纵向分析"}
+PROMPT_PLACEHOLDER_HINTS = {
+    "grade": "",
+    "report": "",
+    "tag_horizontal": ("可用占位符：{subject_and_course}、{lecture_name}、"
+                       "{total_students}、{aggregated_question_stats}"),
+    "tag_vertical": ("可用占位符：{lecture_count}、{subject_and_course}、"
+                     "{student_name}、{lecture_range}、{module_mastery_stats}、"
+                     "{kg_weakness_chains}、{error_habit_stats}、{trend_data}"),
+}
 
 
 def _prompt_content(kind, prompt_id):
@@ -1189,6 +1206,8 @@ def course_detail(cid):
                            teacher_candidates=teacher_candidates,
                            grade_prompts=_prompt_options(cid, "grade"),
                            report_prompts=_prompt_options(cid, "report"),
+                           tag_horizontal_prompts=_prompt_options(cid, "tag_horizontal"),
+                           tag_vertical_prompts=_prompt_options(cid, "tag_vertical"),
                            exports=_course_exports(cid),
                            can_manage_teachers=is_course_owner(course))
 
@@ -1555,6 +1574,13 @@ def _answer_pages_note(picked, total):
     return f"已保存页码：{len(picked)}/{total} 页，只发送这些页。"
 
 
+def _course_label(course):
+    """课程名称 + 简介，用作分析提示词里的「学科与课程」。"""
+    name = course["name"] or ""
+    desc = (course["description"] or "").strip() if "description" in course.keys() else ""
+    return f"{name}（{desc}）" if desc else name
+
+
 def _ai_endpoint(teacher_id):
     """取当前可用的 AI 配置；不可用时返回 (\"\", \"\", \"\", 原因)。"""
     if get_setting(teacher_id, "ai_demo") == "1":
@@ -1779,14 +1805,26 @@ def lecture_tag_analysis(hid):
     hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
     if not hw:
         abort(404)
-    own_course(hw["course_id"])
+    course = own_course(hw["course_id"])
     stats = tag_utils.lecture_stats(db, hid)
     if not stats:
         flash("本讲还没有知识点标签；请先在「作业范围」保存一次，系统会自动调用 AI 标注。")
         return redirect(url_for("lecture_detail", hid=hid))
-    if not any(s["n_total"] for s in stats):
+    question_stats = tag_utils.lecture_question_stats(db, hid)
+    if not question_stats:
         flash("本讲还没有批改完成的作业，暂时无法做知识点分析。")
         return redirect(url_for("lecture_detail", hid=hid))
+    total_students = db.execute(
+        "SELECT COUNT(DISTINCT q.submission_id) FROM questions q "
+        "JOIN submissions s ON s.id=q.submission_id "
+        "WHERE s.lecture_id=? AND q.verdict<>''", (hid,)).fetchone()[0]
+    context = {
+        "subject_and_course": _course_label(course),
+        "lecture_name": hw["title"],
+        "total_students": total_students,
+        "aggregated_question_stats": question_stats,
+    }
+    prompt = _prompt_content("tag_horizontal", course["tag_horizontal_prompt_id"])
     api_url, api_key, model, err = _ai_endpoint(g.user["id"])
     if err:
         flash(f"知识点分析未生成：{err}")
@@ -1795,7 +1833,8 @@ def lecture_tag_analysis(hid):
         g.user["id"], "tag_horizontal", model,
         course_id=hw["course_id"], lecture_id=hid)
     try:
-        result = ai_horizontal_analysis(stats, api_url, api_key, model,
+        result = ai_horizontal_analysis(context, api_url, api_key, model,
+                                        prompt=prompt,
                                         usage_hook=operation["usage_hook"])
     except Exception as e:
         _finish_ai_operation(operation, "failed", str(e))
@@ -1805,11 +1844,11 @@ def lecture_tag_analysis(hid):
     if not result:
         flash(error)
         return redirect(url_for("lecture_detail", hid=hid))
-    md = tag_utils.render_horizontal_md(result, stats)
+    md = tag_utils.render_horizontal_md(result)
     db.execute("INSERT INTO tag_analyses(teacher_id,course_id,lecture_id,kind,"
                "content_md,stats_json) VALUES(?,?,?,'horizontal',?,?)",
                (g.user["id"], hw["course_id"], hid, md,
-                json.dumps(stats, ensure_ascii=False)))
+                json.dumps(question_stats, ensure_ascii=False)))
     db.commit()
     log.info("横向知识点分析完成 lecture=%s by=%s", hid, g.user["username"])
     flash("全班知识点分析已生成")
@@ -1949,10 +1988,28 @@ def student_tag_analysis(cid, sid):
     db = get_db()
     student = own_student(cid, sid)
     course = own_course(cid)
-    stats = tag_utils.student_stats(db, cid, sid)
-    if not stats:
+    mastery = tag_utils.student_mastery_stats(db, cid, sid)
+    weak = [row for row in mastery if row["n_wrong"] or row["n_partial"]]
+    if not weak:
         flash("暂时没有可分析的数据：需要先给讲次生成知识点标签，并且该生有批改结果。")
         return redirect(url_for("student_detail", cid=cid, sid=sid))
+    trend = tag_utils.student_trend(db, cid, sid)
+    titles = [row["lecture"] for row in trend]
+    lecture_range = (f"{titles[0]} ~ {titles[-1]}（共 {len(titles)} 讲）"
+                     if len(titles) > 1 else (titles[0] if titles else ""))
+    context = {
+        "lecture_count": len(trend),
+        "subject_and_course": _course_label(course),
+        "student_name": student["display_name"],
+        "lecture_range": lecture_range,
+        "module_mastery_stats": mastery,
+        "kg_weakness_chains": (
+            "系统暂未内置学科知识图谱；请仅依据同一或相近标签在不同讲次的重复出错"
+            "推断前置基础与衍生知识点，不要编造数据中不存在的依赖关系。"),
+        "error_habit_stats": tag_utils.habit_stats(db, cid, sid),
+        "trend_data": trend,
+    }
+    prompt = _prompt_content("tag_vertical", course["tag_vertical_prompt_id"])
     api_url, api_key, model, err = _ai_endpoint(g.user["id"])
     if err:
         flash(f"纵向分析未生成：{err}")
@@ -1960,8 +2017,8 @@ def student_tag_analysis(cid, sid):
     operation = _start_ai_operation(
         g.user["id"], "tag_vertical", model, course_id=cid)
     try:
-        result = ai_vertical_analysis(stats, student["display_name"], course["name"],
-                                      api_url, api_key, model,
+        result = ai_vertical_analysis(context, api_url, api_key, model,
+                                      prompt=prompt,
                                       usage_hook=operation["usage_hook"])
     except Exception as e:
         _finish_ai_operation(operation, "failed", str(e))
@@ -1971,10 +2028,13 @@ def student_tag_analysis(cid, sid):
     if not result:
         flash(error)
         return redirect(url_for("student_detail", cid=cid, sid=sid))
-    md = tag_utils.render_vertical_md(result, stats)
+    md = tag_utils.render_vertical_md(result)
     db.execute("INSERT INTO tag_analyses(teacher_id,course_id,lecture_id,student_id,"
                "kind,content_md,stats_json) VALUES(?,?,0,?,'vertical',?,?)",
-               (g.user["id"], cid, sid, md, json.dumps(stats, ensure_ascii=False)))
+               (g.user["id"], cid, sid, md,
+                json.dumps({"mastery": mastery, "trend": trend,
+                            "habits": context["error_habit_stats"]},
+                           ensure_ascii=False)))
     db.commit()
     log.info("纵向知识点分析完成 course=%s student=%s by=%s",
              cid, sid, g.user["username"])
@@ -2434,7 +2494,8 @@ def prompts_page():
     mine = db.execute("SELECT * FROM prompts WHERE teacher_id=? ORDER BY kind, id DESC",
                       (g.user["id"],)).fetchall()
     return render_template("prompts.html", defaults=defaults, mine=mine,
-                           kind_label=PROMPT_KIND_LABEL)
+                           kind_label=PROMPT_KIND_LABEL,
+                           placeholder_hints=PROMPT_PLACEHOLDER_HINTS)
 
 
 @_routes.route("/prompts/create", methods=["POST"])
@@ -2516,8 +2577,9 @@ def prompt_delete(pid):
         return redirect(url_for("prompts_page"))
     db = get_db()
     # 引用了这条提示词的课程回落到系统默认提示词
-    db.execute("UPDATE courses SET grade_prompt_id=0 WHERE grade_prompt_id=?", (pid,))
-    db.execute("UPDATE courses SET report_prompt_id=0 WHERE report_prompt_id=?", (pid,))
+    for col in ("grade_prompt_id", "report_prompt_id",
+                "tag_horizontal_prompt_id", "tag_vertical_prompt_id"):
+        db.execute(f"UPDATE courses SET {col}=0 WHERE {col}=?", (pid,))
     db.execute("DELETE FROM prompts WHERE id=?", (pid,))
     db.commit()
     flash(f"提示词「{row['name']}」已删除")
@@ -2527,19 +2589,25 @@ def prompt_delete(pid):
 @_routes.route("/course/<oid:cid>/prompts", methods=["POST"])
 @role_required("teacher")
 def course_prompts_save(cid):
-    """为整门课程选定批改 / 报告提示词。"""
+    """为整门课程选定批改 / 报告 / 知识点分析提示词。"""
     course = own_course(cid)
     db = get_db()
     picked = {}
-    for field, kind in (("grade_prompt_id", "grade"), ("report_prompt_id", "report")):
+    fields = (("grade_prompt_id", "grade"), ("report_prompt_id", "report"),
+              ("tag_horizontal_prompt_id", "tag_horizontal"),
+              ("tag_vertical_prompt_id", "tag_vertical"))
+    for field, kind in fields:
         pid = request.form.get(field, type=int) or 0
         allowed = {r["id"] for r in _prompt_options(cid, kind)}
         if pid and pid not in allowed:
             flash("所选提示词不在本课程可用范围内，已保留原设置")
             pid = course[field] or 0
         picked[field] = pid
-    db.execute("UPDATE courses SET grade_prompt_id=?, report_prompt_id=? WHERE id=?",
-               (picked["grade_prompt_id"], picked["report_prompt_id"], cid))
+    db.execute("UPDATE courses SET grade_prompt_id=?, report_prompt_id=?,"
+               " tag_horizontal_prompt_id=?, tag_vertical_prompt_id=? WHERE id=?",
+               (picked["grade_prompt_id"], picked["report_prompt_id"],
+                picked["tag_horizontal_prompt_id"],
+                picked["tag_vertical_prompt_id"], cid))
     db.commit()
     flash("本课程的提示词配置已更新")
     return redirect(url_for("course_detail", cid=cid))
