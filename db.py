@@ -215,6 +215,69 @@ CREATE TABLE IF NOT EXISTS tag_analyses(
   created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS idx_tag_analyses_lecture ON tag_analyses(kind, lecture_id, id);
 CREATE INDEX IF NOT EXISTS idx_tag_analyses_student ON tag_analyses(kind, student_id, id);
+-- 学科知识图谱：图本身、原始资料、切块文本、概念节点与前置/包含/相关边
+-- 全部驻留 data.sqlite；资料文件位于 uploads/kg/<graph_id>/，随备份包一起迁移
+CREATE TABLE IF NOT EXISTS knowledge_graphs(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  subject TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  grade_level TEXT DEFAULT '',
+  created_by INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS idx_knowledge_graphs_subject ON knowledge_graphs(subject);
+CREATE TABLE IF NOT EXISTS kg_materials(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  graph_id INTEGER NOT NULL REFERENCES knowledge_graphs(id),
+  filename TEXT NOT NULL,
+  stored_name TEXT NOT NULL,
+  mime TEXT DEFAULT '',
+  size INTEGER DEFAULT 0,
+  sha256 TEXT NOT NULL,
+  page_count INTEGER DEFAULT 0,
+  char_count INTEGER DEFAULT 0,
+  status TEXT NOT NULL DEFAULT '待建图',
+  error TEXT DEFAULT '',
+  uploaded_by INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(graph_id, sha256));
+CREATE INDEX IF NOT EXISTS idx_kg_materials_graph ON kg_materials(graph_id, id);
+CREATE TABLE IF NOT EXISTS kg_chunks(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  graph_id INTEGER NOT NULL,
+  material_id INTEGER NOT NULL REFERENCES kg_materials(id),
+  page_no INTEGER DEFAULT 0,
+  chunk_no INTEGER DEFAULT 0,
+  content TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_kg_chunks_material ON kg_chunks(material_id, chunk_no);
+CREATE TABLE IF NOT EXISTS kg_nodes(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  graph_id INTEGER NOT NULL REFERENCES knowledge_graphs(id),
+  name TEXT NOT NULL,
+  normalized TEXT NOT NULL,
+  category TEXT DEFAULT '',
+  definition TEXT DEFAULT '',
+  aliases TEXT DEFAULT '',
+  source_materials TEXT DEFAULT '',
+  confidence REAL DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(graph_id, normalized));
+CREATE INDEX IF NOT EXISTS idx_kg_nodes_graph ON kg_nodes(graph_id, name);
+CREATE TABLE IF NOT EXISTS kg_edges(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  graph_id INTEGER NOT NULL REFERENCES knowledge_graphs(id),
+  src_id INTEGER NOT NULL REFERENCES kg_nodes(id),
+  dst_id INTEGER NOT NULL REFERENCES kg_nodes(id),
+  relation TEXT NOT NULL DEFAULT 'prerequisite',
+  evidence TEXT DEFAULT '',
+  source_materials TEXT DEFAULT '',
+  confidence REAL DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(graph_id, src_id, dst_id, relation));
+CREATE INDEX IF NOT EXISTS idx_kg_edges_graph ON kg_edges(graph_id, src_id);
+CREATE INDEX IF NOT EXISTS idx_kg_edges_dst ON kg_edges(graph_id, dst_id);
 -- 价目表：静态清单之外的覆盖值（目前由价目截图识别后确认写入），按模型 ID 全局生效
 CREATE TABLE IF NOT EXISTS model_prices(
   model TEXT PRIMARY KEY,

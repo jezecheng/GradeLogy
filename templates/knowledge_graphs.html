@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}学科知识图谱{% endblock %}
+{% block content %}
+<style>
+.kg-group { margin-bottom: 18px; }
+.kg-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 12px 2px; border-bottom: 1px solid #eef0f3; }
+.kg-row:last-child { border-bottom: 0; }
+.kg-name { font-weight: 600; font-size: 15px; }
+.kg-name a { color: inherit; text-decoration: none; }
+.kg-name a:hover { color: #1456f0; }
+.kg-meta { color: #6b7280; font-size: 13px; }
+.subject-badge { background: #eef2ff; color: #1456f0; border-radius: 999px;
+  padding: 2px 10px; font-size: 12px; }
+</style>
+
+<div class="card-head">
+  <h1>学科知识图谱</h1>
+  <button type="button" class="small" data-dialog-open="kg-create">＋ 新建图谱</button>
+</div>
+<p class="muted">
+  上传教材、考纲、讲义等资料，系统会抽取概念与前置 / 包含 / 相关关系，逐步构建学科知识图谱。
+  图谱按学科共享：所有老师可查看，创建者与管理员可上传资料或删除。
+</p>
+<p class="muted small">
+  原始资料保存在 <code>uploads/kg/</code>，图谱数据保存在数据库内，二者都会进入系统备份包，
+  灾备或迁移时一并带走。
+</p>
+
+<dialog id="kg-create" class="modal">
+  <form method="post" action="{{ url_for('knowledge_graph_create') }}" class="stack-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <h2>新建知识图谱</h2>
+    <label>学科
+      <input name="subject" required maxlength="40" placeholder="如：高中化学">
+    </label>
+    <label>图谱名称
+      <input name="name" required maxlength="80" placeholder="如：高中化学必修知识图谱">
+    </label>
+    <label>学段 / 适用年级（可选）
+      <input name="grade_level" maxlength="40" placeholder="如：高一">
+    </label>
+    <label>说明（可选）
+      <textarea name="description" rows="3" maxlength="300"
+                placeholder="覆盖范围、资料来源或使用约定"></textarea>
+    </label>
+    <p class="muted small">创建后上传 PDF / Markdown / TXT 资料即可开始建图。</p>
+    <div class="modal-actions">
+      <button type="button" class="ghost" data-dialog-close>取消</button>
+      <button type="submit">创建</button>
+    </div>
+  </form>
+</dialog>
+
+{% if not graphs %}
+<p class="muted">还没有知识图谱，点右上角「＋ 新建图谱」开始。</p>
+{% endif %}
+
+{% for subject, items in graphs|groupby('subject') %}
+<div class="card">
+  <div class="card-head">
+    <h2><span class="subject-badge">{{ subject }}</span></h2>
+  </div>
+  {% for g in items %}
+  <div class="kg-row">
+    <span class="kg-name">
+      <a href="{{ url_for('knowledge_graph_detail', gid=g.id) }}">{{ g.name }}</a>
+    </span>
+    {% if g.grade_level %}<span class="kg-meta">{{ g.grade_level }}</span>{% endif %}
+    <span class="kg-meta">{{ g.n_materials }} 份资料 · {{ g.n_nodes }} 个概念 · {{ g.n_edges }} 条关系</span>
+    <span class="kg-meta">更新于 {{ g.updated_at }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% endfor %}
+{% endblock %}

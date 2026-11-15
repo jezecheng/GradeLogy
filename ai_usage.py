@@ -27,6 +27,7 @@ AI_OPERATION_LABEL = {
     "question_tagging": "知识点标注",
     "tag_horizontal": "横向知识点分析",
     "tag_vertical": "纵向知识点分析",
+    "kg_build": "知识图谱构建",
     "grade": "作业批阅",
     "lecture_summary": "讲次汇总",
     "report_generate": "批改报告评价",

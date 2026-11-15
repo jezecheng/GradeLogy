@@ -19,6 +19,7 @@
     <a href="{{ url_for('admin_users') }}">系统管理</a>
   {% elif g.user.role == 'teacher' %}
     <a href="{{ url_for('courses') }}">我的课程</a>
+    <a href="{{ url_for('knowledge_graphs') }}">知识图谱</a>
     <a href="{{ url_for('prompts_page') }}">我的提示词</a>
     <a href="{{ url_for('settings_page') }}">AI 设置</a>
     <span class="grading-queue" id="grading-queue" hidden>

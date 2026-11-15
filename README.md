@@ -30,6 +30,7 @@
 - **考试成绩**：按考试录入每个学生的分数与评语，保存即对学生可见
 - **AI 批阅**：学生作业与标准答案两份文件整页渲染后一起送入多模态模型，逐题输出 OCR、判定（对 / 半对 / 错 / 无法判定）与评语，并按判定统计正确率
 - **知识点标签与薄弱点分析**：保存作业范围时顺带为每道题生成知识点标签并写入 `question_tags`；批阅后可按标签做横向分析（同一讲全班共性问题）与纵向分析（同一学生跨讲次反复出错的知识点），结果保存在 `tag_analyses`。两类分析均有系统默认提示词，可复制 / 编辑，并在课程页按课程选择
+- **学科知识图谱**：导航栏「知识图谱」按学科管理，上传教材 / 考纲 / 讲义（PDF、Markdown、TXT）后由 AI 抽取概念与前置 / 包含 / 相关关系，按别名增量合并、按文件指纹去重，资料可删除并回收其独有节点；原始资料位于 `uploads/kg/`，图谱数据位于 `knowledge_graphs` / `kg_nodes` / `kg_edges` 等表，随备份与恢复整体迁移
 - **Digital Assistant 数字助手**：管理员、教师、学生登录后右下角都有对话面板（系统助手 / 教学助手 / 学习助手），可用自然语言查询各自可见的数据，也能检索站内使用文档；所有查询按角色和归属过滤，只读。首次进入会有气泡与呼吸动画引导
 - **MCP 服务目录**：内置 `mcp_server.py`，可向 Trae、Claude Desktop、Cursor 等 MCP 客户端开放 `ask_help`、`list_courses`、`list_lectures`、`lecture_status`、`find_student`、`student_report`、`list_exams`、`exam_scores`、`course_overview`、`pending_work`、`grading_queue`、`search_reports`、`ai_usage`、`list_prompts`、`get_prompt`、`lesson_plan`、`lecture_scope` 17 个只读工具；仅允许教师账号，按课程归属授权，不提供写操作
 - **人工复核**：两栏同屏，可修改 OCR、判定与评语；保存即向学生发布

@@ -4,6 +4,7 @@
 角色：admin（用户管理）/ teacher（课程、讲次、考试、批改、AI 设置）/ student（提交与查看批改）
 """
 import fcntl
+import hashlib
 import io
 import json
 import logging
@@ -50,6 +51,8 @@ from model_catalog import (EST_TOKENS_INPUT, EST_TOKENS_OUTPUT, MODEL_CATALOG,
                            start_model_sync, tokenhub_suitable_model_ids)
 from model_catalog import sync_models_for_teacher as _sync_models_for_teacher
 from utilities import assistant, course_export, llm, logview, roster, storage
+from utilities import knowledge_graph as kg_utils
+from utilities import kg_text
 from utilities import tags as tag_utils
 from utilities.report import _overall_text, build_report_md, render_markdown
 from utilities.uploads import (_student_files, _validate_upload, allowed_file, file_list,
@@ -2613,6 +2616,211 @@ def course_prompts_save(cid):
     return redirect(url_for("course_detail", cid=cid))
 
 
+# ---------- 老师：学科知识图谱 ----------
+def _kg_graph(gid, edit=False):
+    """图谱按学科共享：所有老师可查看，仅创建者与管理员可修改。"""
+    row = get_db().execute("SELECT * FROM knowledge_graphs WHERE id=?",
+                           (gid,)).fetchone()
+    if not row:
+        abort(404)
+    if edit and g.user["role"] != "admin" and row["created_by"] != g.user["id"]:
+        abort(403)
+    return row
+
+
+def _kg_start_build(graph_id, material_id, teacher_id):
+    """后台构建图谱：请求返回后继续跑，资料状态可刷新查看。"""
+    threading.Thread(target=_kg_build_worker,
+                     args=(graph_id, material_id, teacher_id), daemon=True).start()
+
+
+def _kg_build_worker(graph_id, material_id, teacher_id):
+    with app.app_context():
+        db = get_db()
+        try:
+            api_url, api_key, model, err = _ai_endpoint(teacher_id)
+            if err:
+                db.execute("UPDATE kg_materials SET status=?, error=? WHERE id=?",
+                           (kg_utils.STATUS_FAILED, err, material_id))
+                db.commit()
+                return
+            operation = _start_ai_operation(teacher_id, "kg_build", model)
+            try:
+                result = kg_utils.build_material(
+                    db, material_id, api_url, api_key, model,
+                    usage_hook=operation["usage_hook"])
+            except Exception as e:  # noqa: BLE001 后台任务失败写入资料状态
+                _finish_ai_operation(operation, "failed", str(e))
+                db.execute("UPDATE kg_materials SET status=?, error=? WHERE id=?",
+                           (kg_utils.STATUS_FAILED, str(e)[:500], material_id))
+                db.commit()
+                log.exception("知识图谱构建失败 material=%s", material_id)
+                return
+            if result:
+                _finish_ai_operation(operation, "success", "")
+            else:
+                row = db.execute("SELECT error FROM kg_materials WHERE id=?",
+                                 (material_id,)).fetchone()
+                _finish_ai_operation(operation, "failed", row["error"] if row else "")
+        finally:
+            close_db()
+
+
+@_routes.route("/knowledge-graphs")
+@role_required("teacher", "admin")
+def knowledge_graphs():
+    rows = get_db().execute("""
+        SELECT g.*,
+          (SELECT COUNT(*) FROM kg_materials m WHERE m.graph_id=g.id) AS n_materials,
+          (SELECT COUNT(*) FROM kg_nodes n WHERE n.graph_id=g.id) AS n_nodes,
+          (SELECT COUNT(*) FROM kg_edges e WHERE e.graph_id=g.id) AS n_edges
+        FROM knowledge_graphs g ORDER BY g.subject, g.name""").fetchall()
+    return render_template("knowledge_graphs.html", graphs=rows)
+
+
+@_routes.route("/knowledge-graphs/create", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_create():
+    subject = request.form.get("subject", "").strip()[:40]
+    name = request.form.get("name", "").strip()[:80]
+    if not subject or not name:
+        flash("学科与图谱名称都不能为空")
+        return redirect(url_for("knowledge_graphs"))
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO knowledge_graphs(subject,name,description,grade_level,created_by)"
+        " VALUES(?,?,?,?,?)",
+        (subject, name, request.form.get("description", "").strip()[:300],
+         request.form.get("grade_level", "").strip()[:40], g.user["id"]))
+    db.commit()
+    log.info("新建知识图谱 user=%s#%s subject=%s name=%s",
+             g.user["username"], g.user["id"], subject, name)
+    flash(f"已创建知识图谱「{name}」，接下来上传教材、考纲或讲义来构建它")
+    return redirect(url_for("knowledge_graph_detail", gid=cur.lastrowid))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>")
+@role_required("teacher", "admin")
+def knowledge_graph_detail(gid):
+    graph = _kg_graph(gid)
+    db = get_db()
+    materials = db.execute("SELECT * FROM kg_materials WHERE graph_id=? "
+                           "ORDER BY id DESC", (gid,)).fetchall()
+    building = any(m["status"] in (kg_utils.STATUS_PENDING, kg_utils.STATUS_BUILDING)
+                   for m in materials)
+    return render_template(
+        "knowledge_graph.html", graph=graph, materials=materials,
+        counts=kg_utils.graph_counts(db, gid),
+        nodes=kg_utils.list_nodes(db, gid), edges=kg_utils.list_edges(db, gid),
+        building=building, relation_label=kg_utils.RELATION_LABEL,
+        can_edit=g.user["role"] == "admin" or graph["created_by"] == g.user["id"])
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/materials", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_upload(gid):
+    _kg_graph(gid, edit=True)
+    files = [f for f in request.files.getlist("files") if f and f.filename]
+    if not files:
+        flash("请选择要上传的资料文件")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    db = get_db()
+    abs_dir = os.path.join(UPLOAD_DIR, "kg", str(gid))
+    os.makedirs(abs_dir, exist_ok=True)
+    queued = 0
+    for item in files:
+        filename = item.filename
+        ext = os.path.splitext(filename)[1].lower()
+        if ext not in kg_text.KG_EXTENSIONS:
+            flash(f"「{filename}」格式不支持，只接受 PDF / Markdown / TXT")
+            continue
+        stored = f"{datetime.now():%Y%m%d%H%M%S}_{secrets.token_hex(4)}{ext}"
+        abs_path = os.path.join(abs_dir, stored)
+        digest = hashlib.sha256()
+        size = 0
+        too_big = False
+        with open(abs_path, "wb") as fh:
+            while True:
+                chunk = item.stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > cfg.MAX_UPLOAD_MB * 1024 * 1024:
+                    too_big = True
+                    break
+                digest.update(chunk)
+                fh.write(chunk)
+        if too_big:
+            os.remove(abs_path)
+            flash(f"「{filename}」超过 {cfg.MAX_UPLOAD_MB}MB，已跳过")
+            continue
+        sha = digest.hexdigest()
+        duplicate = db.execute(
+            "SELECT id FROM kg_materials WHERE graph_id=? AND sha256=?",
+            (gid, sha)).fetchone()
+        if duplicate:
+            os.remove(abs_path)
+            flash(f"「{filename}」与已上传资料内容相同，未重复导入")
+            continue
+        cur = db.execute(
+            "INSERT INTO kg_materials(graph_id,filename,stored_name,mime,size,sha256,"
+            "status,uploaded_by) VALUES(?,?,?,?,?,?,?,?)",
+            (gid, filename[:200], f"kg/{gid}/{stored}", item.mimetype or "",
+             size, sha, kg_utils.STATUS_PENDING, g.user["id"]))
+        db.commit()
+        material = db.execute("SELECT * FROM kg_materials WHERE id=?",
+                              (cur.lastrowid,)).fetchone()
+        chunks, _truncated = kg_utils.extract_material(db, material, abs_path)
+        if not chunks:
+            failed = db.execute("SELECT error FROM kg_materials WHERE id=?",
+                                (material["id"],)).fetchone()
+            flash(f"「{filename}」解析失败：{failed['error'] if failed else '未知原因'}")
+            continue
+        _kg_start_build(gid, material["id"], g.user["id"])
+        queued += 1
+        flash(f"「{filename}」已解析 {chunks} 个文本块，正在后台构建知识图谱")
+    if queued:
+        db.execute("UPDATE knowledge_graphs SET updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                   (gid,))
+        db.commit()
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+@_routes.route("/knowledge-graphs/materials/<oid:mid>/delete", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_material_delete(mid):
+    db = get_db()
+    material = db.execute("SELECT * FROM kg_materials WHERE id=?", (mid,)).fetchone()
+    if not material:
+        abort(404)
+    _kg_graph(material["graph_id"], edit=True)
+    try:
+        os.remove(os.path.join(UPLOAD_DIR, material["stored_name"]))
+    except OSError:
+        pass
+    kg_utils.delete_material(db, material)
+    flash(f"已删除资料「{material['filename']}」及其独有节点")
+    return redirect(url_for("knowledge_graph_detail", gid=material["graph_id"]))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/delete", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_delete(gid):
+    graph = _kg_graph(gid, edit=True)
+    db = get_db()
+    db.execute("DELETE FROM kg_chunks WHERE graph_id=?", (gid,))
+    db.execute("DELETE FROM kg_edges WHERE graph_id=?", (gid,))
+    db.execute("DELETE FROM kg_nodes WHERE graph_id=?", (gid,))
+    db.execute("DELETE FROM kg_materials WHERE graph_id=?", (gid,))
+    db.execute("DELETE FROM knowledge_graphs WHERE id=?", (gid,))
+    db.commit()
+    shutil.rmtree(os.path.join(UPLOAD_DIR, "kg", str(gid)), ignore_errors=True)
+    log.info("删除知识图谱 user=%s#%s id=%s name=%s",
+             g.user["username"], g.user["id"], gid, graph["name"])
+    flash(f"已删除知识图谱「{graph['name']}」")
+    return redirect(url_for("knowledge_graphs"))
+
+
 @_routes.route("/assistant/chat", methods=["POST"])
 @role_required("admin", "teacher", "student")
 def assistant_chat():
@@ -3117,7 +3325,9 @@ def _build_backup_zip(dest):
     con = sqlite3.connect(DB_PATH)
     try:
         counts = {t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-                  for t in ("users", "courses", "lectures", "exams", "submissions", "questions")}
+                  for t in ("users", "courses", "lectures", "exams", "submissions",
+                            "questions", "knowledge_graphs", "kg_materials",
+                            "kg_nodes", "kg_edges")}
     finally:
         con.close()
     manifest = {"app": "GradeLogy", "version": cfg.APP_VERSION,

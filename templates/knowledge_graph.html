@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% block title %}{{ graph.name }}{% endblock %}
+{% block content %}
+<style>
+.kg-stats { display: flex; gap: 18px; flex-wrap: wrap; margin: 10px 0 4px; }
+.kg-stat { background: #f7f8fa; border-radius: 10px; padding: 10px 16px; min-width: 96px; }
+.kg-stat b { display: block; font-size: 20px; }
+.kg-stat span { color: #6b7280; font-size: 12px; }
+.subject-badge { background: #eef2ff; color: #1456f0; border-radius: 999px;
+  padding: 2px 10px; font-size: 12px; }
+.status { border-radius: 999px; padding: 2px 10px; font-size: 12px; white-space: nowrap; }
+.status-pending { background: #fff7e6; color: #ad6800; }
+.status-building { background: #e6f4ff; color: #0958d9; }
+.status-done { background: #e6f6ec; color: #18794e; }
+.status-failed { background: #fff1f0; color: #cf1322; }
+table.kg { width: 100%; border-collapse: collapse; font-size: 14px; }
+table.kg th, table.kg td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #eef0f3;
+  vertical-align: top; }
+table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
+.kg-name { font-weight: 600; }
+.kg-note { color: #8a8f99; font-size: 12px; }
+.kg-arrow { color: #8a8f99; margin: 0 4px; }
+</style>
+
+<p class="muted small"><a href="{{ url_for('knowledge_graphs') }}">← 返回知识图谱列表</a></p>
+<div class="card-head">
+  <h1>{{ graph.name }} <span class="subject-badge">{{ graph.subject }}</span></h1>
+  {% if can_edit %}
+  <form method="post" action="{{ url_for('knowledge_graph_delete', gid=graph.id) }}"
+        onsubmit="return confirm('删除该知识图谱及全部资料？此操作不可恢复。')">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <button class="ghost small">删除图谱</button>
+  </form>
+  {% endif %}
+</div>
+<p class="muted">
+  {% if graph.grade_level %}{{ graph.grade_level }} · {% endif %}
+  {% if graph.description %}{{ graph.description }} · {% endif %}
+  创建于 {{ graph.created_at }}，最近更新 {{ graph.updated_at }}
+</p>
+
+<div class="kg-stats">
+  <div class="kg-stat"><b>{{ counts.materials }}</b><span>资料</span></div>
+  <div class="kg-stat"><b>{{ counts.nodes }}</b><span>概念节点</span></div>
+  <div class="kg-stat"><b>{{ counts.edges }}</b><span>关系边</span></div>
+  <div class="kg-stat"><b>{{ counts.chunks }}</b><span>文本块</span></div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>资料与建图</h2></div>
+  {% if can_edit %}
+  <form method="post" action="{{ url_for('knowledge_graph_upload', gid=graph.id) }}"
+        enctype="multipart/form-data" class="stack-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <label>上传资料（可多选）
+      <input type="file" name="files" multiple accept=".pdf,.md,.markdown,.txt" required>
+    </label>
+    <p class="muted small">
+      支持 PDF / Markdown / TXT；单份资料最多取前 12 万字用于建图。
+      重复内容按文件指纹自动跳过，新增资料只合并差异，不会重建整张图。
+    </p>
+    <div><button type="submit">上传并构建</button></div>
+  </form>
+  {% else %}
+  <p class="muted small">你不是该图谱的创建者，只能查看；如需补充资料请联系创建者或管理员。</p>
+  {% endif %}
+
+  {% if materials %}
+  <table class="kg">
+    <thead><tr><th>资料</th><th>大小</th><th>解析</th><th>状态</th><th>上传时间</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
+    <tbody>
+      {% for m in materials %}
+      <tr>
+        <td>
+          <div class="kg-name">{{ m.filename }}</div>
+          {% if m.error %}<div class="kg-note">{{ m.error }}</div>{% endif %}
+        </td>
+        <td>{{ (m.size / 1024) | round(0) | int }} KB</td>
+        <td>{{ m.page_count }} 页 / {{ m.char_count }} 字</td>
+        <td>
+          {% if m.status == '完成' %}<span class="status status-done">完成</span>
+          {% elif m.status == '建图中' %}<span class="status status-building">建图中</span>
+          {% elif m.status == '失败' %}<span class="status status-failed">失败</span>
+          {% else %}<span class="status status-pending">{{ m.status }}</span>{% endif %}
+        </td>
+        <td>{{ m.created_at }}</td>
+        {% if can_edit %}
+        <td>
+          <form method="post"
+                action="{{ url_for('knowledge_graph_material_delete', mid=m.id) }}"
+                onsubmit="return confirm('删除这份资料？仅由它支撑的概念与关系会一并移除。')">
+            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+            <button class="ghost small">删除</button>
+          </form>
+        </td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted small">还没有资料。上传第一份教材或考纲即可冷启动图谱。</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>概念节点 <span class="muted small">（前 200 个）</span></h2></div>
+  {% if nodes %}
+  <table class="kg">
+    <thead><tr><th>概念</th><th>分类</th><th>定义</th><th>别名</th><th>置信度</th></tr></thead>
+    <tbody>
+      {% for n in nodes %}
+      {% set aliases = n.aliases | fromjson if n.aliases else [] %}
+      <tr>
+        <td class="kg-name">{{ n.name }}</td>
+        <td>{{ n.category or '—' }}</td>
+        <td>{{ n.definition or '—' }}</td>
+        <td class="kg-note">{{ aliases | join('、') if aliases else '—' }}</td>
+        <td>{{ ((n.confidence or 0) * 100) | round(0) | int }}%</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted small">暂无概念。资料构建完成后会出现在这里。</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>关系边 <span class="muted small">（前 200 条）</span></h2></div>
+  {% if edges %}
+  <table class="kg">
+    <thead><tr><th>关系</th><th>依据</th><th>置信度</th></tr></thead>
+    <tbody>
+      {% for e in edges %}
+      <tr>
+        <td>
+          <span class="kg-name">{{ e.src_name }}</span>
+          <span class="kg-arrow">—{{ relation_label.get(e.relation, e.relation) }}→</span>
+          <span class="kg-name">{{ e.dst_name }}</span>
+        </td>
+        <td class="kg-note">{{ e.evidence or '—' }}</td>
+        <td>{{ ((e.confidence or 0) * 100) | round(0) | int }}%</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted small">暂无关系。可再上传覆盖更完整的教材或考纲。</p>
+  {% endif %}
+</div>
+
+{% if building %}
+<script>
+  // 后台建图期间自动刷新，完成后自然停止
+  setTimeout(function () { window.location.reload(); }, 6000);
+</script>
+{% endif %}
+{% endblock %}
