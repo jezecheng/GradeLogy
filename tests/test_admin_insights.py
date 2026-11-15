@@ -539,7 +539,7 @@ class TokenHubModelSyncTest(unittest.TestCase):
     def setUp(self):
         app_module.app.config.update(TESTING=True)
         con = sqlite3.connect(app_module.DB_PATH)
-        for table in ("model_sync", "model_sync_state", "model_prices", "settings", "users"):
+        for table in ("ai_api_keys", "model_sync", "model_sync_state", "model_prices", "settings", "users"):
             con.execute(f"DELETE FROM {table}")
         con.execute(
             "INSERT INTO users(id,username,password_hash,display_name,role,active,"
@@ -616,7 +616,7 @@ class ApiKeyManagementTest(unittest.TestCase):
         con = sqlite3.connect(app_module.DB_PATH)
         con.row_factory = sqlite3.Row
         rows = con.execute(
-            "SELECT id,name,base_url,api_key,is_active FROM ai_api_keys "
+            "SELECT id,name,base_url,api_key,model,is_active FROM ai_api_keys "
             "WHERE teacher_id=2 ORDER BY id").fetchall()
         setting = con.execute(
             "SELECT value FROM settings WHERE teacher_id=2 AND key='ai_api_key'").fetchone()
@@ -679,6 +679,58 @@ class ApiKeyManagementTest(unittest.TestCase):
         rows, active_key = self.keys()
         self.assertEqual(rows, [])
         self.assertIsNone(active_key)
+
+    def test_url_only_env_still_allows_managing_keys(self):
+        """只注入 AI_API_URL 时不能把 Key 管理整块隐藏，否则老师无法新增第二套配置。"""
+        with mock.patch.dict(app_module.ENV_AI_SETTINGS, {"ai_api_url": "https://env.example/v1"}):
+            html = self.client.get("/settings").get_data(as_text=True)
+            self.assertIn("新增 API Key", html)
+            self.post("/settings/api-keys/add", name="腾讯云", base_url="https://hub.example/v1",
+                      api_key="sk-env-url", model="deepseek-v4.1-flash", use_now="1")
+            with app_module.app.test_request_context("/"):
+                self.assertEqual(app_module.get_setting(2, "ai_api_url"), "https://hub.example/v1")
+                self.assertEqual(app_module.get_setting(2, "ai_model"), "deepseek-v4.1-flash")
+        rows, _ = self.keys()
+        self.assertEqual(len(rows), 1)
+
+    def test_each_config_keeps_its_own_url_key_and_model(self):
+        self.post("/settings/api-keys/add", name="阿里云", base_url="https://aliyun.example/v1",
+                  api_key="sk-aliyun", model="qwen-vl-max", use_now="1")
+        self.post("/settings/api-keys/add", name="腾讯云", base_url="https://tencent.example/v1",
+                  api_key="sk-tencent", model="deepseek-v4.1-flash")
+        rows, _ = self.keys()
+        self.assertEqual(len(rows), 2)
+
+        self.post(f"/settings/api-keys/{rows[1]['id']}/activate")
+        with app_module.app.test_request_context("/"):
+            self.assertEqual(app_module.get_setting(2, "ai_api_url"), "https://tencent.example/v1")
+            self.assertEqual(app_module.get_setting(2, "ai_api_key"), "sk-tencent")
+            self.assertEqual(app_module.get_setting(2, "ai_model"), "deepseek-v4.1-flash")
+
+        self.post(f"/settings/api-keys/{rows[0]['id']}/activate")
+        with app_module.app.test_request_context("/"):
+            self.assertEqual(app_module.get_setting(2, "ai_api_url"), "https://aliyun.example/v1")
+            self.assertEqual(app_module.get_setting(2, "ai_api_key"), "sk-aliyun")
+            self.assertEqual(app_module.get_setting(2, "ai_model"), "qwen-vl-max")
+
+    def test_per_key_connection_test_uses_that_config(self):
+        """每行测试只使用该行的地址、Key 和模型，不受当前选中项影响。"""
+        self.post("/settings/api-keys/add", name="阿里云", base_url="https://aliyun.example/v1",
+                  api_key="sk-aliyun", model="qwen-vl-max", use_now="1")
+        self.post("/settings/api-keys/add", name="腾讯云", base_url="https://tencent.example/v1",
+                  api_key="sk-tencent", model="deepseek-v4.1-flash")
+        rows, _ = self.keys()
+        with mock.patch.object(app_module, "_probe_ai_config", return_value="连接成功") as probe:
+            self.post(f"/settings/api-keys/{rows[1]['id']}/test")
+        probe.assert_called_once_with("https://tencent.example/v1", "sk-tencent",
+                                      "deepseek-v4.1-flash")
+
+    def test_saving_model_updates_active_config(self):
+        self.post("/settings/api-keys/add", name="阿里云", base_url="https://aliyun.example/v1",
+                  api_key="sk-aliyun", use_now="1")
+        self.post("/settings", ai_model="qwen-vl-plus", ai_demo="", ai_offpeak_only="")
+        rows, _ = self.keys()
+        self.assertEqual(rows[0]["model"], "qwen-vl-plus")
 
 
 if __name__ == "__main__":

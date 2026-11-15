@@ -184,16 +184,27 @@ def resolve_config(teacher_id=None):
     if not os.path.exists(DB_PATH):
         return cfg
     con = sqlite3.connect(DB_PATH)
+    active = None
     try:
         if teacher_id is None:
             row = con.execute(
                 "SELECT teacher_id FROM settings WHERE key='ai_api_key' AND value!='' "
                 "ORDER BY teacher_id LIMIT 1").fetchone()
             if not row:
+                row = con.execute(
+                    "SELECT teacher_id FROM ai_api_keys WHERE is_active=1 "
+                    "ORDER BY teacher_id LIMIT 1").fetchone()
+            if not row:
                 return cfg
             teacher_id = row[0]
         rows = con.execute("SELECT key, value FROM settings WHERE teacher_id=?",
                            (teacher_id,)).fetchall()
+        try:
+            active = con.execute(
+                "SELECT base_url,api_key,model FROM ai_api_keys WHERE teacher_id=? "
+                "AND is_active=1 ORDER BY id DESC LIMIT 1", (teacher_id,)).fetchone()
+        except sqlite3.Error:
+            active = None
     finally:
         con.close()
     d = dict(rows)
@@ -201,11 +212,19 @@ def resolve_config(teacher_id=None):
               "api_key": d.get("ai_api_key") or "",
               "model": d.get("ai_model") or "",
               "extra": (d.get("ai_prompt") or "").strip()}
+    # 页面选中的那套配置优先，保证阿里云/腾讯云等多套入口各自独立
+    if active:
+        result["api_url"] = (active[0] or "").rstrip("/")
+        result["api_key"] = active[1] or ""
+        if active[2]:
+            result["model"] = active[2]
     # 环境变量优先：容器部署时 Key 走 secrets/env，不落数据库
-    if config.AI_API_URL:
-        result["api_url"] = config.AI_API_URL.rstrip("/")
     if config.AI_API_KEY:
         result["api_key"] = config.AI_API_KEY
+        if config.AI_API_URL:
+            result["api_url"] = config.AI_API_URL.rstrip("/")
+    elif config.AI_API_URL and not active:
+        result["api_url"] = config.AI_API_URL.rstrip("/")
     if config.AI_MODEL:
         result["model"] = config.AI_MODEL
     return result

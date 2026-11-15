@@ -60,22 +60,6 @@
 <h1>AI 批阅设置</h1>
 
 <div class="card narrow">
-  <h2>演示模式（没有 API 时用）</h2>
-  <p class="muted small">勾选后点「AI 批阅」不会联网：生成 6 道占位结果，
-    你可以照常体验逐题核对、修改 OCR、填写标准答案、保存和查看学生端效果。真实使用时请取消勾选。</p>
-  <form method="post">
-    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <input type="hidden" name="demo_only" value="1">
-    <label class="check-line">
-      <input type="checkbox" name="ai_demo" value="1" {% if cfg.ai_demo == '1' %}checked{% endif %}
-             style="width:auto">
-      启用演示模式（不调用 AI）
-    </label>
-    <button type="submit">保存</button>
-  </form>
-</div>
-
-<div class="card narrow">
   <h2>AI API 配置</h2>
   <div class="api-status {% if api_configured %}ok{% endif %}">
     {% if api_configured %}
@@ -85,7 +69,7 @@
     {% elif active_api_key %}
     <div class="muted small">
       正在使用：{{ active_api_key.name }} · <code>{{ active_api_key.base_url }}</code>
-      · Key {{ active_api_key.masked_key }}
+      · Key {{ active_api_key.masked_key }} · 模型 {{ active_api_key.model or "未选择" }}
     </div>
     {% else %}
     <div class="muted small">当前基地址 <code>{{ cfg.ai_api_url or "未填写" }}</code></div>
@@ -96,16 +80,17 @@
     {% endif %}
   </div>
   {% if env_keys %}
-  <p class="muted small">以下项已由环境变量注入，页面上的值只读、保存也不会写入数据库：
-    {{ env_keys|join('、') }}。要改用页面配置，请先移除对应的环境变量。</p>
+  <p class="muted small">环境变量已注入：{{ env_keys|join('、') }}。
+    {% if api_env_managed %}API Key 由环境变量接管，页面上的 Key 管理不会生效。
+    {% else %}保存的配置会优先用于调用；只有未选择任何配置时才使用环境变量的默认值。{% endif %}</p>
   {% endif %}
-  <p class="muted small">可以保存多组 Key（例如不同服务商或不同额度），点击「使用此 Key」切换；
-    批改、模型同步与测试连接都会立即改用当前选中的那一组。</p>
+  <p class="muted small">可以保存多组配置（例如阿里云一套、腾讯云两套），各自保存基地址、Key 与模型，
+    点击「使用此 Key」切换；每行都能单独「测试连接」，互不影响。</p>
   {% if api_keys and not api_env_managed %}
   <div class="api-key-wrap">
   <table class="api-key-table">
     <thead>
-      <tr><th>名称</th><th>接口基地址</th><th>API Key</th><th>状态</th><th></th></tr>
+      <tr><th>名称</th><th>接口基地址</th><th>API Key</th><th>模型</th><th>状态</th><th></th></tr>
     </thead>
     <tbody>
     {% for k in api_keys %}
@@ -113,11 +98,17 @@
         <td>{{ k.name }}</td>
         <td><code>{{ k.base_url }}</code></td>
         <td class="nowrap">{{ k.masked_key }}</td>
+        <td>{{ k.model or "—" }}</td>
         <td class="nowrap">
           {% if k.is_active %}<span class="tag-chip ok">当前使用</span>
           {% else %}<span class="muted small">未启用</span>{% endif %}
         </td>
         <td class="nowrap">
+          <form method="post" action="{{ url_for('settings_api_key_test', key_id=k.id) }}"
+                style="display:inline">
+            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+            <button type="submit" class="ghost small">测试连接</button>
+          </form>
           {% if not k.is_active %}
           <form method="post" action="{{ url_for('settings_api_key_activate', key_id=k.id) }}"
                 style="display:inline">
@@ -142,13 +133,16 @@
   <form method="post" action="{{ url_for('settings_api_key_add') }}" class="stack-form api-key-add">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <label>名称（可选）
-      <input name="name" maxlength="60" placeholder="例如 TokenHub 主账号">
+      <input name="name" maxlength="60" placeholder="例如 阿里云百炼、腾讯云主账号">
     </label>
     <label>接口基地址
       <input name="base_url" required placeholder="https://tokenhub.tencentmaas.com/v1">
     </label>
     <label>API Key
       <input name="api_key" type="password" required placeholder="粘贴 API Key">
+    </label>
+    <label>模型（可选，便于单独测试这套配置）
+      <input name="model" maxlength="120" placeholder="例如 deepseek-v4.1-flash">
     </label>
     <label class="check-line">
       <input type="checkbox" name="use_now" value="1" checked style="width:auto">
@@ -173,6 +167,22 @@
       {% endfor %}
     </table>
   </details>
+</div>
+
+<div class="card narrow">
+  <h2>演示模式（没有 API 时用）</h2>
+  <p class="muted small">勾选后点「AI 批阅」不会联网：生成 6 道占位结果，
+    你可以照常体验逐题核对、修改 OCR、填写标准答案、保存和查看学生端效果。真实使用时请取消勾选。</p>
+  <form method="post">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <input type="hidden" name="demo_only" value="1">
+    <label class="check-line">
+      <input type="checkbox" name="ai_demo" value="1" {% if cfg.ai_demo == '1' %}checked{% endif %}
+             style="width:auto">
+      启用演示模式（不调用 AI）
+    </label>
+    <button type="submit">保存</button>
+  </form>
 </div>
 
 <div class="card narrow">
