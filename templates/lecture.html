@@ -245,13 +245,26 @@
       {% elif s.report_md %}
         <span class="pending-badge">报告草稿</span>
       {% endif %}
+      {% set job = grade_jobs.get(s.id) %}
+      {% set job_status = job.status if job else '' %}
       <form method="post" action="{{ url_for('submission_grade', sid=s.id) }}" class="grade-form"
             data-has-result="{{ '1' if (s.n_questions or s.status == '已批改') else '0' }}">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-        <button class="small" {% if not grade_ready %}disabled title="请先上传教师版答案并划定作业范围"{% endif %}>{{ '重新批阅' if s.status == '待批改' or s.feedback else 'AI 批阅' }}</button>
+        <button class="small" data-grade-btn="{{ s.id }}"
+                {% if not grade_ready or job_status in ('queued', 'running') %}disabled title="{% if job_status in ('queued', 'running') %}这份作业正在后台批阅{% else %}请先上传教师版答案并划定作业范围{% endif %}"{% endif %}>
+          {% if job_status == 'queued' %}排队中…
+          {% elif job_status == 'running' %}批阅中…
+          {% elif job_status == 'failed' %}重试批阅
+          {% else %}{{ '重新批阅' if s.status == '待批改' or s.feedback else 'AI 批阅' }}{% endif %}
+        </button>
       </form>
     </div>
-    <p class="muted small grade-hint" hidden>正在把作业与标准答案交给 AI，约 1~3 分钟，请勿刷新或重复点击。</p>
+    <p class="muted small grade-hint" {% if job_status not in ('queued', 'running') %}hidden{% endif %}>
+      {% if job_status == 'queued' %}已加入批阅队列，等待后台处理；可以离开本页。{% else %}正在后台批阅，约 1~3 分钟；可以离开本页，稍后回来查看。{% endif %}
+    </p>
+    {% if job_status == 'failed' %}
+    <p class="muted small danger-text">上次后台批阅失败：{{ job.error }}</p>
+    {% endif %}
     {% if s.grader %}<p class="muted small">批改来源：{{ s.grader }} · 更新于 {{ s.updated_at }}</p>{% endif %}
     {% if s.feedback %}<pre class="feedback">{{ s.feedback }}</pre>{% endif %}
   </div>
@@ -361,7 +374,7 @@
     }
   });
 })();
-// 批阅是同步长任务：提交后禁用按钮并显示小圆环，避免重复点击重复调用 AI
+// 批阅已改为后台队列：提交后立即返回，这里只负责提交瞬间的按钮反馈
 (function () {
   document.querySelectorAll('form.grade-form').forEach(function (form) {
     function start() {
@@ -490,6 +503,28 @@
     }
     busyOn(form.querySelector('button'), '生成中…');
   });
+})();
+</script>
+<script>
+// 后台批阅中：轮询状态；全部结束后自动刷新，关闭浏览器不影响任务
+(function () {
+  if ({{ 'true' if grading_active else 'false' }}) {
+    var timer = setInterval(function () {
+      fetch("{{ url_for('lecture_grading_status', hid=hw.id) }}",
+            {headers: {'Accept': 'application/json'}})
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data.active) { clearInterval(timer); location.reload(); return; }
+          Object.keys(data.jobs).forEach(function (sid) {
+            var btn = document.querySelector('button[data-grade-btn="' + sid + '"]');
+            if (!btn) return;
+            var st = data.jobs[sid].status;
+            if (st === 'queued') btn.textContent = '排队中…';
+            else if (st === 'running') btn.textContent = '批阅中…';
+          });
+        }).catch(function () {});
+    }, 4000);
+  }
 })();
 </script>
 {% endblock %}

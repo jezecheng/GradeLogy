@@ -24,6 +24,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from html.parser import HTMLParser
@@ -1262,6 +1263,10 @@ def init_db():
         _migrate_upload_layout(con)
     except OSError:
         log.exception("附件目录迁移失败，旧路径仍可用")
+    # 上次进程退出时未完成的批阅任务无法恢复，标记失败以便老师重新提交
+    con.execute("UPDATE ai_operations SET status='failed', error=?, "
+                "finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running')",
+                ("服务重启，批阅任务已中断，请重新提交",))
     con.commit()
     con.close()
     try:
@@ -1364,11 +1369,11 @@ AI_OPERATION_LABEL = {
     "report_comment": "重新生成总评",
     "price_import": "价目截图识别",
 }
-AI_STATUS_LABEL = {"running": "进行中", "success": "成功", "failed": "失败"}
+AI_STATUS_LABEL = {"queued": "排队中", "running": "进行中", "success": "成功", "failed": "失败"}
 
 
 def _start_ai_operation(teacher_id, operation_type, model, course_id=None,
-                        lecture_id=None, submission_id=None):
+                        lecture_id=None, submission_id=None, status="running"):
     """创建一次用户操作；每次点击/重试都使用新的 operation_id。"""
     preset = next((m for m in MODEL_PRESETS if m["model"] == model), None)
     price_in = preset["price_in"] if preset else None
@@ -1395,8 +1400,9 @@ def _start_ai_operation(teacher_id, operation_type, model, course_id=None,
     db = get_db()
     cur = db.execute(
         "INSERT INTO ai_operations(teacher_id,operation_type,course_id,lecture_id,"
-        "submission_id,model,status,started_at) VALUES(?,?,?,?,?,?,'running',?)",
-        (teacher_id, operation_type, course_id, lecture_id, submission_id, model, started_at))
+        "submission_id,model,status,started_at) VALUES(?,?,?,?,?,?,?,?)",
+        (teacher_id, operation_type, course_id, lecture_id, submission_id, model,
+         status, started_at))
     db.commit()
     operation = {"id": cur.lastrowid, "pricing": pricing, "finished": False}
     operation["usage_hook"] = lambda event: _record_ai_usage(operation, event)
@@ -2800,9 +2806,17 @@ def lecture_detail(hid):
     answer_picked = _page_list(hw["answer_pages"])
 
     acc_by = _accuracy_by_submission(db, [s["id"] for s in subs])
+    grade_jobs = {r["submission_id"]: r for r in db.execute(
+        "SELECT o.submission_id,o.status,o.error FROM ai_operations o "
+        "JOIN (SELECT submission_id,MAX(id) AS max_id FROM ai_operations "
+        "WHERE operation_type='grade' GROUP BY submission_id) m ON m.max_id=o.id "
+        "JOIN submissions s ON s.id=o.submission_id WHERE s.lecture_id=?", (hid,))}
     return render_template("lecture.html", hw=hw, course=course, subs=subs, students=students,
                            qstats=qstats, n_subs=n_subs, n_graded=n_graded, n_reviewed=n_reviewed,
                            answer_total=answer_total, answer_picked=answer_picked,
+                           grade_jobs=grade_jobs,
+                           grading_active=any(j["status"] in ("queued", "running")
+                                              for j in grade_jobs.values()),
                            acc_by=acc_by, ai_operations=_ai_operation_history(lecture_id=hid, limit=8))
 
 
@@ -3227,89 +3241,210 @@ _GRADING = set()
 _GRADING_LOCK = threading.Lock()
 
 
+def _grading_concurrency():
+    try:
+        return max(1, min(4, int(os.environ.get("GRADING_CONCURRENCY", "2"))))
+    except (TypeError, ValueError):
+        return 2
+
+
+# 真实批阅放到后台线程池：提交后立即返回，关闭浏览器不影响任务继续。
+# 默认并发 2，避免同时打满模型服务的限流。
+_GRADING_POOL = ThreadPoolExecutor(max_workers=_grading_concurrency(),
+                                   thread_name_prefix="grading")
+
+
+def _latest_grade_job(db, sid):
+    return db.execute(
+        "SELECT status,error FROM ai_operations WHERE submission_id=? "
+        "AND operation_type='grade' ORDER BY id DESC LIMIT 1", (sid,)).fetchone()
+
+
+def _save_grading_result(db, sid, gen):
+    """把模型返回的逐题结果写入数据库；演示模式和后台任务共用。"""
+    db.execute("DELETE FROM questions WHERE submission_id=?", (sid,))
+    for i, q in enumerate(gen["questions"], 1):
+        comment = (q.get("comment") or "").strip()
+        db.execute(
+            "INSERT INTO questions(submission_id,no,page_no,image_path,ocr_text,"
+            "standard_answer,note,verdict,ai_comment) VALUES(?,?,?,?,?,?,?,?,?)",
+            (sid, q.get("no") or str(i), 1, "", q.get("ocr", ""),
+             q.get("standard_answer", ""), comment, q.get("verdict", ""), comment))
+    summary = gen.get("summary") or {}
+    db.execute("UPDATE submissions SET status='待批改', ai_summary=?, "
+               "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+               (json.dumps(summary, ensure_ascii=False) if summary else "", sid))
+    db.commit()
+
+
+def _run_grading_job(teacher_id, sid, operation):
+    """后台批阅：不依赖任何浏览器请求，完成后直接把结果写入数据库。"""
+    with app.app_context():
+        try:
+            db = get_db()
+            db.execute("UPDATE ai_operations SET status='running', started_at=? "
+                       "WHERE id=? AND status='queued'",
+                       (datetime.now().isoformat(sep=" ", timespec="milliseconds"),
+                        operation["id"]))
+            db.commit()
+            sub = db.execute("SELECT * FROM submissions WHERE id=?", (sid,)).fetchone()
+            if not sub:
+                _finish_ai_operation(operation, "failed", "作业不存在")
+                return
+            hw = db.execute("SELECT * FROM lectures WHERE id=?",
+                            (sub["lecture_id"],)).fetchone()
+            course = db.execute("SELECT * FROM courses WHERE id=?",
+                                (hw["course_id"],)).fetchone()
+            if not hw["answer_pdf"]:
+                _finish_ai_operation(operation, "failed", "教师版标准答案已缺失，请重新上传")
+                return
+            gen = run_grading(
+                teacher_id, file_list(sub["file_path"]), hw["answer_pdf"],
+                scope=_scope_instruction(hw),
+                answer_pages=_page_list(hw["answer_pages"]),
+                prompt=_prompt_content("grade", course["grade_prompt_id"]),
+                usage_hook=operation["usage_hook"])
+            if gen["error"]:
+                _finish_ai_operation(operation, "failed", gen["error"])
+                log.warning("后台批阅失败 submission=%s 原因=%s", sid, gen["error"])
+                return
+            _save_grading_result(db, sid, gen)
+            _finish_ai_operation(operation, "success")
+            try:
+                generate_report(db, sid, teacher_id)
+            except Exception:  # 报告生成失败不影响批阅结果本身
+                log.exception("生成批改报告失败 submission=%s", sid)
+            log.info("后台批阅完成 submission=%s 题数=%s", sid, len(gen["questions"]))
+        except Exception as e:
+            log.exception("后台批阅异常 submission=%s", sid)
+            _finish_ai_operation(operation, "failed", str(e))
+        finally:
+            with _GRADING_LOCK:
+                _GRADING.discard(sid)
+
+
 @app.route("/submission/<oid:sid>/grade", methods=["POST"])
 @role_required("teacher")
 def submission_grade(sid):
-    """把学生作业和教师版标准答案一起交给支持 PDF 的 AI，逐题批阅。"""
+    """提交批阅任务：真实批阅在后台队列执行，提交后即可离开页面。"""
     db = get_db()
     sub = db.execute("SELECT * FROM submissions WHERE id=?", (sid,)).fetchone()
     if not sub:
         abort(404)
     hw = db.execute("SELECT * FROM lectures WHERE id=?", (sub["lecture_id"],)).fetchone()
     course = own_course(hw["course_id"])
+    back = "review" if request.form.get("back") == "review" else "lecture"
+
+    def _back_to_page():
+        if back == "review":
+            return redirect(url_for("submission_review", sid=sid))
+        return redirect(url_for("lecture_detail", hid=hw["id"]))
+
     if not hw["answer_pdf"]:
         flash("请先上传教师版标准答案 PDF，再开始批阅。")
-        return redirect(url_for("lecture_detail", hid=hw["id"]))
+        return _back_to_page()
     if not (hw["scope_candidates"] or "").strip() or not (hw["scope_selected"] or "").strip():
         flash("请先在「作业范围」选择教师版页码并保存，生成题目清单并勾选本讲题目，再开始批阅。")
-        return redirect(url_for("lecture_detail", hid=hw["id"]))
+        return _back_to_page()
 
     block = _offpeak_block_if_enabled(g.user["id"])
     if block:
         flash(block)
-        return redirect(url_for("lecture_detail", hid=hw["id"]))
+        return _back_to_page()
+
+    if get_setting(g.user["id"], "ai_demo") == "1":
+        # 演示模式是本地占位数据，不需要排队，直接生成
+        try:
+            gen = run_grading(g.user["id"], file_list(sub["file_path"]), hw["answer_pdf"],
+                              scope=_scope_instruction(hw),
+                              answer_pages=_page_list(hw["answer_pages"]),
+                              prompt=_prompt_content("grade", course["grade_prompt_id"]))
+        except Exception as e:
+            log.exception("演示批阅失败 submission=%s", sid)
+            flash(str(e))
+            return _back_to_page()
+        _save_grading_result(db, sid, gen)
+        try:
+            generate_report(db, sid, g.user["id"])
+        except Exception:
+            log.exception("生成批改报告失败 submission=%s", sid)
+        flash(f"演示模式：未调用 AI，已生成 {len(gen['questions'])} 道题，请逐题修正内容")
+        return _back_to_page()
 
     with _GRADING_LOCK:
         if sid in _GRADING:
-            flash("这份作业正在批阅中，请等待本次完成后再操作。")
-            return redirect(url_for("lecture_detail", hid=hw["id"]))
+            flash("这份作业已在批阅队列中，请等待完成后再操作。")
+            return _back_to_page()
         _GRADING.add(sid)
 
-    log.info("开始批阅 submission=%s lecture=%s file=%s answer=%s pages=%s",
-             sid, hw["id"], sub["file_path"], hw["answer_pdf"], hw["answer_pages"])
-    operation = None
-    usage_text = ""
-    try:
-        if get_setting(g.user["id"], "ai_demo") != "1":
-            model = get_setting(g.user["id"], "ai_model")
-            operation = _start_ai_operation(
-                g.user["id"], "grade", model, course_id=hw["course_id"],
-                lecture_id=hw["id"], submission_id=sid)
-        gen = run_grading(g.user["id"], file_list(sub["file_path"]), hw["answer_pdf"],
-                          scope=_scope_instruction(hw),
-                          answer_pages=_page_list(hw["answer_pages"]),
-                          prompt=_prompt_content("grade", course["grade_prompt_id"]),
-                          usage_hook=operation["usage_hook"] if operation else None)
-    except Exception as e:
-        _finish_ai_operation(operation, "failed", str(e))
-        raise
-    finally:
+    active = _latest_grade_job(db, sid)
+    if active is not None and active["status"] in ("queued", "running"):
         with _GRADING_LOCK:
             _GRADING.discard(sid)
-    if operation:
-        _finish_ai_operation(operation, "failed" if gen["error"] else "success", gen["error"])
-        usage_text = _ai_usage_text(
-            _ai_operation_history(operation_id=operation["id"], limit=1)[0])
-    if gen["error"]:
-        log.warning("批阅失败 submission=%s 原因=%s", sid, gen["error"])
-        flash(gen["error"] + ("；" + usage_text if usage_text else ""))
-        return redirect(url_for("lecture_detail", hid=hw["id"]))
+        flash("这份作业已在批阅队列中，请等待完成后再操作。")
+        return _back_to_page()
 
-    db.execute("DELETE FROM questions WHERE submission_id=?", (sid,))
-    for i, q in enumerate(gen["questions"], 1):
-        comment = (q.get("comment") or "").strip()
-        db.execute("INSERT INTO questions(submission_id,no,page_no,image_path,ocr_text,"
-                   "standard_answer,note,verdict,ai_comment) "
-                   "VALUES(?,?,?,?,?,?,?,?,?)",
-                   (sid, q.get("no") or str(i), 1, "", q.get("ocr", ""),
-                    q.get("standard_answer", ""), comment,
-                    q.get("verdict", ""), comment))
-    summary = gen.get("summary") or {}
-    db.execute("UPDATE submissions SET status='待批改', ai_summary=?, "
-               "updated_at=CURRENT_TIMESTAMP WHERE id=?",
-               (json.dumps(summary, ensure_ascii=False) if summary else "", sid))
-    db.commit()
-    count = len(gen["questions"])
+    operation = None
     try:
-        generate_report(db, sid, g.user["id"])
-    except Exception:  # 报告生成失败不影响批阅结果本身
-        log.exception("生成批改报告失败 submission=%s", sid)
-    if gen.get("demo"):
-        msg = f"演示模式：未调用 AI，已生成 {count} 道题，请逐题修正内容"
-    else:
-        msg = f"AI 已批阅 {count} 道题，请逐题核对 OCR、判定与评语。{usage_text}"
-    flash(msg)
-    return redirect(url_for("submission_review", sid=sid))
+        model = get_setting(g.user["id"], "ai_model")
+        operation = _start_ai_operation(
+            g.user["id"], "grade", model, course_id=hw["course_id"],
+            lecture_id=hw["id"], submission_id=sid, status="queued")
+        _GRADING_POOL.submit(_run_grading_job, g.user["id"], sid, operation)
+    except Exception as e:
+        log.exception("加入批阅队列失败 submission=%s", sid)
+        _finish_ai_operation(operation, "failed", str(e))
+        with _GRADING_LOCK:
+            _GRADING.discard(sid)
+        flash("加入批阅队列失败：" + str(e))
+        return _back_to_page()
+
+    log.info("已加入批阅队列 submission=%s lecture=%s file=%s answer=%s pages=%s",
+             sid, hw["id"], sub["file_path"], hw["answer_pdf"], hw["answer_pages"])
+    flash("已加入批阅队列，可以离开本页；完成后回到讲次页或核对页查看结果。")
+    return _back_to_page()
+
+
+@app.route("/lecture/<oid:hid>/grading-status")
+@role_required("teacher")
+def lecture_grading_status(hid):
+    """讲次页轮询：返回本讲每份作业最近的批阅状态。"""
+    db = get_db()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
+    if not hw:
+        abort(404)
+    own_course(hw["course_id"])
+    rows = db.execute(
+        "SELECT o.submission_id,o.status,o.error FROM ai_operations o "
+        "JOIN (SELECT submission_id,MAX(id) AS max_id FROM ai_operations "
+        "WHERE operation_type='grade' GROUP BY submission_id) m ON m.max_id=o.id "
+        "JOIN submissions s ON s.id=o.submission_id WHERE s.lecture_id=?", (hid,)).fetchall()
+    jobs = {str(r["submission_id"]): {"status": r["status"], "error": r["error"] or ""}
+            for r in rows}
+    return jsonify({
+        "jobs": jobs,
+        "active": any(j["status"] in ("queued", "running") for j in jobs.values()),
+    })
+
+
+@app.route("/submission/<oid:sid>/grading-status")
+@role_required("teacher")
+def submission_grading_status(sid):
+    """核对页轮询：返回这一份作业最近的批阅状态。"""
+    db = get_db()
+    sub = db.execute("SELECT lecture_id FROM submissions WHERE id=?", (sid,)).fetchone()
+    if not sub:
+        abort(404)
+    hw = db.execute("SELECT course_id FROM lectures WHERE id=?",
+                    (sub["lecture_id"],)).fetchone()
+    own_course(hw["course_id"])
+    row = _latest_grade_job(db, sid)
+    status = row["status"] if row else ""
+    return jsonify({
+        "status": status,
+        "error": (row["error"] if row else "") or "",
+        "active": status in ("queued", "running"),
+    })
 
 
 @app.route("/submission/<oid:sid>/review")
@@ -3326,6 +3461,7 @@ def submission_review(sid):
     questions = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
                            (sid,)).fetchall()
     return render_template("review.html", sub=sub, hw=hw, course=course, questions=questions,
+                           grade_job=_latest_grade_job(db, sid),
                            ai_operations=_ai_operation_history(submission_id=sid, limit=5))
 
 

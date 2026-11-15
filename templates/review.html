@@ -2,6 +2,7 @@
 {% block title %}逐题批改 - {{ sub.display_name }}{% endblock %}
 {% block content %}
 {% set summary = sub.ai_summary|fromjson %}
+{% set job_status = grade_job.status if grade_job else '' %}
 {% set verdict_cls = {'对': 'right', '半对': 'partial', '错': 'wrong', '无法判定': 'unknown'} %}
 {% set n_total = questions|length %}
 {% set n_right = questions|selectattr('verdict', 'equalto', '对')|list|length %}
@@ -60,10 +61,23 @@
 
 {% if not questions %}
 <div class="card">
+  {% if job_status in ('queued', 'running') %}
+  <p class="muted">这份作业正在后台批阅（{{ '排队中' if job_status == 'queued' else '正在调用 AI' }}），可以离开本页，完成后回到这里查看。</p>
+  {% else %}
   <p class="muted">还没有批阅结果。点「AI 批阅」后，AI 会把整份学生作业与标准答案对照，逐题给出判定与评语。</p>
+  {% endif %}
+  {% if job_status == 'failed' %}
+  <p class="muted danger-text">上次批阅失败：{{ grade_job.error }}</p>
+  {% endif %}
   <form method="post" action="{{ url_for('submission_grade', sid=sub.id) }}" class="review-grade-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <button>AI 批阅</button>
+    <input type="hidden" name="back" value="review">
+    <button {% if job_status in ('queued', 'running') %}disabled{% endif %}>
+      {% if job_status == 'queued' %}排队中…
+      {% elif job_status == 'running' %}批阅中…
+      {% elif job_status == 'failed' %}重试批阅
+      {% else %}AI 批阅{% endif %}
+    </button>
   </form>
 </div>
 {% else %}
@@ -328,6 +342,21 @@
     }
     busyOn(btn, btn.value === 'report' ? '生成中…' : '保存中…');
   });
+})();
+</script>
+<script>
+// 后台批阅中：轮询状态，完成或失败后自动刷新
+(function () {
+  if ({{ 'true' if job_status in ('queued', 'running') else 'false' }}) {
+    var timer = setInterval(function () {
+      fetch("{{ url_for('submission_grading_status', sid=sub.id) }}",
+            {headers: {'Accept': 'application/json'}})
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data.active) { clearInterval(timer); location.reload(); }
+        }).catch(function () {});
+    }, 4000);
+  }
 })();
 </script>
 {% endblock %}

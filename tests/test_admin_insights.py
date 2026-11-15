@@ -7,6 +7,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
@@ -748,6 +749,142 @@ class ApiKeyManagementTest(unittest.TestCase):
         self.assertEqual(rows[1]["model"], "glm-5.3-flash")
         with app_module.app.test_request_context("/"):
             self.assertEqual(app_module.get_setting(2, "ai_model"), "qwen-vl-max")
+
+
+class AsyncGradingTest(unittest.TestCase):
+    """批阅改为后台队列：提交立即返回，关闭页面不影响结果落库。"""
+
+    SID = 500
+
+    def setUp(self):
+        app_module.app.config.update(TESTING=True)
+        con = sqlite3.connect(app_module.DB_PATH)
+        for table in ("ai_usage_events", "ai_operations", "questions", "submissions",
+                      "lectures", "enrollments", "course_teachers", "courses", "users"):
+            con.execute(f"DELETE FROM {table}")
+        con.executemany(
+            "INSERT INTO users(id,username,password_hash,display_name,role,active,"
+            "must_change_password) VALUES(?,?,'x',?,?,1,0)",
+            [(2, "teacher1", "老师一", "teacher"), (4, "student1", "学生一", "student")])
+        con.execute("INSERT INTO courses(id,name,teacher_id) VALUES(30,'数学',2)")
+        con.execute("INSERT INTO course_teachers(course_id,teacher_id) VALUES(30,2)")
+        con.execute(
+            "INSERT INTO lectures(id,course_id,title,answer_pdf,scope_candidates,"
+            "scope_selected) VALUES(100,30,'第1讲','ans.pdf',?,?)",
+            (json.dumps([{"key": "1", "no": "1", "hint": "求极限"}], ensure_ascii=False),
+             json.dumps(["1"])))
+        con.execute(
+            "INSERT INTO submissions(id,lecture_id,student_id,file_path,status) "
+            "VALUES(?,100,4,'stu1','已提交')", (self.SID,))
+        con.commit()
+        con.close()
+        self.settings = {"ai_api_url": "http://ai.local", "ai_api_key": "k",
+                         "ai_model": "model-a"}
+        self.sid_url = app_module._id_signer.dumps(self.SID)
+        self.hid_url = app_module._id_signer.dumps(100)
+        self.client = app_module.app.test_client()
+        with self.client.session_transaction() as sess:
+            sess["uid"] = 2
+            sess["_csrf"] = "test-token"
+
+    def setting(self, _teacher_id, key, default=""):
+        return self.settings.get(key, default)
+
+    def operation(self):
+        con = sqlite3.connect(app_module.DB_PATH)
+        row = con.execute(
+            "SELECT status,error FROM ai_operations WHERE submission_id=? "
+            "ORDER BY id DESC LIMIT 1", (self.SID,)).fetchone()
+        con.close()
+        return row
+
+    def wait_for_finish(self, timeout=5):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            row = self.operation()
+            if row and row[0] in ("success", "failed"):
+                return row
+            time.sleep(0.02)
+        self.fail("后台批阅未在预期时间内完成")
+
+    def grade_payload(self):
+        return {"questions": [{"no": "1", "ocr": "答案", "verdict": "对", "comment": "很好"}],
+                "summary": {"evaluation": "完成度不错"}, "error": ""}
+
+    def test_submit_returns_immediately_and_result_is_saved(self):
+        with mock.patch.object(app_module, "get_setting", side_effect=self.setting), \
+                mock.patch.object(app_module, "file_list", return_value=[]), \
+                mock.patch.object(app_module, "run_grading",
+                                  return_value=self.grade_payload()) as run, \
+                mock.patch.object(app_module, "generate_report") as report:
+            resp = self.client.post(f"/submission/{self.sid_url}/grade",
+                                    data={"_csrf": "test-token", "back": "lecture"})
+            self.assertEqual(resp.status_code, 302)
+            # 返回时任务可能还在排队或已开始，不应是同步等待后的结果
+            self.assertIn(self.operation()[0], ("queued", "running", "success"))
+            row = self.wait_for_finish()
+        self.assertEqual(row[0], "success")
+        run.assert_called_once()
+        report.assert_called_once()
+
+        con = sqlite3.connect(app_module.DB_PATH)
+        n_questions = con.execute("SELECT COUNT(*) FROM questions WHERE submission_id=?",
+                                  (self.SID,)).fetchone()[0]
+        status = con.execute("SELECT status FROM submissions WHERE id=?",
+                             (self.SID,)).fetchone()[0]
+        con.close()
+        self.assertEqual(n_questions, 1)
+        self.assertEqual(status, "待批改")
+
+        data = self.client.get(f"/submission/{self.sid_url}/grading-status").get_json()
+        self.assertFalse(data["active"])
+        lecture = self.client.get(f"/lecture/{self.hid_url}/grading-status").get_json()
+        self.assertEqual(lecture["jobs"][str(self.SID)]["status"], "success")
+        page = self.client.get(f"/lecture/{self.hid_url}")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("重新批阅", page.get_data(as_text=True))
+        review = self.client.get(f"/submission/{self.sid_url}/review")
+        self.assertEqual(review.status_code, 200)
+
+    def test_repeat_click_while_running_does_not_queue_twice(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_grading(*_args, **_kwargs):
+            started.set()
+            release.wait(3)
+            return self.grade_payload()
+
+        with mock.patch.object(app_module, "get_setting", side_effect=self.setting), \
+                mock.patch.object(app_module, "file_list", return_value=[]), \
+                mock.patch.object(app_module, "run_grading", side_effect=slow_grading), \
+                mock.patch.object(app_module, "generate_report"):
+            self.client.post(f"/submission/{self.sid_url}/grade",
+                             data={"_csrf": "test-token"})
+            self.assertTrue(started.wait(2))
+            self.client.post(f"/submission/{self.sid_url}/grade",
+                             data={"_csrf": "test-token"})
+            release.set()
+            row = self.wait_for_finish()
+
+        self.assertEqual(row[0], "success")
+        con = sqlite3.connect(app_module.DB_PATH)
+        n_ops = con.execute("SELECT COUNT(*) FROM ai_operations WHERE submission_id=?",
+                            (self.SID,)).fetchone()[0]
+        con.close()
+        self.assertEqual(n_ops, 1)
+
+    def test_startup_marks_interrupted_jobs_failed(self):
+        con = sqlite3.connect(app_module.DB_PATH)
+        con.execute("INSERT INTO ai_operations(teacher_id,operation_type,submission_id,"
+                    "status,started_at) VALUES(2,'grade',?,'queued',CURRENT_TIMESTAMP)",
+                    (self.SID,))
+        con.commit()
+        con.close()
+        app_module.init_db()
+        row = self.operation()
+        self.assertEqual(row[0], "failed")
+        self.assertIn("重新提交", row[1])
 
 
 if __name__ == "__main__":
