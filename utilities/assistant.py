@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sqlite3
+from datetime import datetime, timedelta
 
 import config
 
@@ -294,6 +295,491 @@ def student_report(teacher_id, course, student, lecture=None):
         db.close()
 
 
+# ---------- 考试与班级进度 ----------
+def _exam(db, course_id, key):
+    """按 ID 或标题片段定位考试。"""
+    key = str(key or "").strip()
+    if key.isdigit():
+        row = db.execute("SELECT * FROM exams WHERE course_id=? AND id=?",
+                         (course_id, int(key))).fetchone()
+        if row:
+            return dict(row)
+    row = db.execute("SELECT * FROM exams WHERE course_id=? AND title LIKE ? "
+                     "ORDER BY id DESC LIMIT 1",
+                     (course_id, f"%{key}%")).fetchone()
+    return dict(row) if row else None
+
+
+def _score_number(value):
+    """把成绩文本尽量转成数字；空值或非数字（如「缺考」）返回 None。"""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _clamp(value, default, top):
+    try:
+        return max(1, min(int(value), top))
+    except (TypeError, ValueError):
+        return default
+
+
+def list_exams(teacher_id, course):
+    db = _db()
+    try:
+        c = _course(db, teacher_id, course)
+        if not c:
+            return {"error": f"没有找到课程「{course}」，可先用 list_courses 查看"}
+        enrolled = len(_enrolled(db, c["id"]))
+        rows = _rows(db.execute("""
+            SELECT x.id, x.title, x.description, x.exam_date, x.full_score,
+              (SELECT COUNT(*) FROM exam_scores s
+                 WHERE s.exam_id=x.id AND TRIM(s.score)<>'') AS scored
+            FROM exams x WHERE x.course_id=?
+            ORDER BY x.exam_date, x.id""", (c["id"],)))
+        for r in rows:
+            r["enrolled"] = enrolled
+            r["missing"] = max(0, enrolled - r["scored"])
+        return {"course": c["name"], "enrolled": enrolled, "exams": rows}
+    finally:
+        db.close()
+
+
+def exam_scores(teacher_id, course, exam):
+    db = _db()
+    try:
+        c = _course(db, teacher_id, course)
+        if not c:
+            return {"error": f"没有找到课程「{course}」，可先用 list_courses 查看"}
+        x = _exam(db, c["id"], exam)
+        if not x:
+            return {"error": f"课程「{c['name']}」下没有找到考试「{exam}」，可先用 list_exams 查看"}
+        rows = _rows(db.execute("""
+            SELECT u.id, u.username, u.display_name AS student,
+                   COALESCE(s.score,'') AS score,
+                   COALESCE(s.comment,'') AS comment, s.updated_at
+            FROM enrollments e JOIN users u ON u.id=e.student_id
+            LEFT JOIN exam_scores s ON s.exam_id=? AND s.student_id=u.id
+            WHERE e.course_id=? ORDER BY u.display_name""", (x["id"], c["id"])))
+        nums = [n for n in (_score_number(r["score"]) for r in rows) if n is not None]
+        return {
+            "course": c["name"], "exam": x["title"], "exam_date": x["exam_date"],
+            "full_score": x["full_score"], "enrolled": len(rows),
+            "scored": len(nums),
+            "average": round(sum(nums) / len(nums), 1) if nums else None,
+            "highest": max(nums) if nums else None,
+            "lowest": min(nums) if nums else None,
+            "students": rows,
+        }
+    finally:
+        db.close()
+
+
+def course_overview(teacher_id, course):
+    db = _db()
+    try:
+        c = _course(db, teacher_id, course)
+        if not c:
+            return {"error": f"没有找到课程「{course}」，可先用 list_courses 查看"}
+        enrolled = len(_enrolled(db, c["id"]))
+        lectures = _rows(db.execute("""
+            SELECT h.id, h.title, h.deadline,
+              (SELECT COUNT(DISTINCT s.student_id) FROM submissions s
+                 WHERE s.lecture_id=h.id) AS submitted,
+              (SELECT COUNT(*) FROM submissions s
+                 WHERE s.lecture_id=h.id AND s.status='已批改') AS graded,
+              (SELECT COUNT(*) FROM submissions s
+                 WHERE s.lecture_id=h.id AND s.report_published=1) AS published,
+              (SELECT COUNT(DISTINCT s.id) FROM submissions s
+                 JOIN questions q ON q.submission_id=s.id
+                 WHERE s.lecture_id=h.id AND s.status='已批改' AND q.reviewed=0) AS pending_review
+            FROM lectures h WHERE h.course_id=?
+            ORDER BY h.title COLLATE NOCASE, h.id""", (c["id"],)))
+        for h in lectures:
+            h["enrolled"] = enrolled
+            h["missing"] = max(0, enrolled - h["submitted"])
+        students = _rows(db.execute("""
+            SELECT u.id, u.username, u.display_name AS student,
+              COUNT(s.id) AS submitted,
+              COALESCE(SUM(CASE WHEN s.status='已批改' THEN 1 ELSE 0 END),0) AS graded,
+              COALESCE(SUM(CASE WHEN s.report_published=1 THEN 1 ELSE 0 END),0) AS published
+            FROM enrollments e JOIN users u ON u.id=e.student_id
+            LEFT JOIN submissions s ON s.student_id=u.id
+               AND s.lecture_id IN (SELECT id FROM lectures WHERE course_id=?)
+            WHERE e.course_id=?
+            GROUP BY u.id ORDER BY u.display_name""", (c["id"], c["id"])))
+        return {
+            "course": c["name"], "enrolled": enrolled,
+            "lecture_count": len(lectures),
+            "exam_count": db.execute("SELECT COUNT(*) FROM exams WHERE course_id=?",
+                                     (c["id"],)).fetchone()[0],
+            "totals": {
+                "submitted": sum(h["submitted"] for h in lectures),
+                "graded": sum(h["graded"] for h in lectures),
+                "published": sum(h["published"] for h in lectures),
+                "pending_review": sum(h["pending_review"] for h in lectures),
+            },
+            "lectures": lectures,
+            "students": students,
+        }
+    finally:
+        db.close()
+
+
+def pending_work(teacher_id, course=None, lecture=None, limit=50):
+    """汇总未提交 / 未批改 / 待人工复核三类待办；可按课程或讲次缩小范围。"""
+    limit = _clamp(limit, 50, 200)
+    db = _db()
+    try:
+        if course:
+            c = _course(db, teacher_id, course)
+            if not c:
+                return {"error": f"没有找到课程「{course}」，可先用 list_courses 查看"}
+            targets = [dict(c)]
+        else:
+            targets = _rows(db.execute("""
+                SELECT c.id, c.name FROM courses c
+                JOIN course_teachers ct ON ct.course_id=c.id AND ct.teacher_id=?
+                ORDER BY c.id DESC""", (teacher_id,)))
+
+        buckets = {"not_submitted": [], "not_graded": [], "pending_review": []}
+        counts = {"not_submitted": 0, "not_graded": 0, "pending_review": 0}
+        scope = []
+        for c in targets:
+            enrolled = _enrolled(db, c["id"])
+            sql = "SELECT h.id, h.title FROM lectures h WHERE h.course_id=?"
+            params = [c["id"]]
+            if lecture:
+                h = _lecture(db, c["id"], lecture)
+                if not h:
+                    return {"error": f"课程「{c['name']}」下没有找到讲次「{lecture}」"}
+                sql += " AND h.id=?"
+                params.append(h["id"])
+            lectures = _rows(db.execute(sql + " ORDER BY h.title COLLATE NOCASE, h.id",
+                                        params))
+            for h in lectures:
+                subs = _rows(db.execute("""
+                    SELECT s.id, s.status, s.student_id, s.created_at,
+                      u.display_name AS student,
+                      (SELECT COUNT(*) FROM questions q
+                         WHERE q.submission_id=s.id AND q.reviewed=0) AS unreviewed
+                    FROM submissions s JOIN users u ON u.id=s.student_id
+                    WHERE s.lecture_id=? ORDER BY u.display_name""", (h["id"],)))
+                submitted = {s["student_id"] for s in subs}
+                scope.append({"course": c["name"], "lecture": h["title"],
+                              "enrolled": len(enrolled), "submitted": len(submitted)})
+
+                for u in enrolled:
+                    if u["id"] not in submitted:
+                        counts["not_submitted"] += 1
+                        if len(buckets["not_submitted"]) < limit:
+                            buckets["not_submitted"].append({
+                                "course": c["name"], "lecture": h["title"],
+                                "student": u["display_name"]})
+                for s in subs:
+                    if s["status"] != "已批改":
+                        counts["not_graded"] += 1
+                        if len(buckets["not_graded"]) < limit:
+                            buckets["not_graded"].append({
+                                "submission_id": s["id"], "course": c["name"],
+                                "lecture": h["title"], "student": s["student"],
+                                "status": s["status"], "submitted_at": s["created_at"]})
+                    elif s["unreviewed"]:
+                        counts["pending_review"] += 1
+                        if len(buckets["pending_review"]) < limit:
+                            buckets["pending_review"].append({
+                                "submission_id": s["id"], "course": c["name"],
+                                "lecture": h["title"], "student": s["student"],
+                                "unreviewed_questions": s["unreviewed"]})
+        return {"scope": scope, "counts": counts, "limit": limit, **buckets}
+    finally:
+        db.close()
+
+
+def grading_queue(teacher_id, limit=20):
+    """后台批阅队列：当前排队/进行中的任务与最近结束的几次。"""
+    limit = _clamp(limit, 20, 50)
+    base = ("SELECT o.id, o.status, o.started_at, o.model, o.error,"
+            "COALESCE(u.display_name,'未知学生') AS student,"
+            "COALESCE(l.title,'未知讲次') AS lecture,"
+            "COALESCE(c.name,'') AS course "
+            "FROM ai_operations o "
+            "LEFT JOIN submissions s ON s.id=o.submission_id "
+            "LEFT JOIN users u ON u.id=s.student_id "
+            "LEFT JOIN lectures l ON l.id=s.lecture_id "
+            "LEFT JOIN courses c ON c.id=l.course_id "
+            "WHERE o.teacher_id=? AND o.operation_type='grade' ")
+    labels = {"queued": "排队中", "running": "进行中", "success": "成功", "failed": "失败"}
+    db = _db()
+    try:
+        active = _rows(db.execute(
+            base + "AND o.status IN ('queued','running') ORDER BY o.id", (teacher_id,)))
+        recent = _rows(db.execute(
+            base + "AND o.status IN ('success','failed') ORDER BY o.id DESC LIMIT ?",
+            (teacher_id, limit)))
+        for r in active + recent:
+            r["status_label"] = labels.get(r["status"], r["status"])
+        return {
+            "queued": sum(1 for r in active if r["status"] == "queued"),
+            "running": sum(1 for r in active if r["status"] == "running"),
+            "active": active,
+            "recent": recent,
+        }
+    finally:
+        db.close()
+
+
+# ---------- 报告检索 / 用量 / 提示词 / 教案 / 作业范围 ----------
+def _pages(value):
+    """把 "1,3,5-7" 形式的页码串解析成升序列表；空值返回 []（表示整份文件）。"""
+    out = set()
+    for part in re.split(r"[,，、\s]+", str(value or "")):
+        if not part:
+            continue
+        m = re.fullmatch(r"(\d+)\s*[-~－]\s*(\d+)", part)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            if a > b:
+                a, b = b, a
+            out.update(range(a, b + 1))
+        elif part.isdigit():
+            out.add(int(part))
+    return sorted(p for p in out if p >= 1)
+
+
+def _snippet(text, keyword, width=60):
+    """截取关键词前后各 width 个字符，便于模型直接引用。"""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    pos = text.lower().find(keyword.lower())
+    if pos < 0:
+        return _cut(text, width * 2)
+    start = max(0, pos - width)
+    end = min(len(text), pos + len(keyword) + width)
+    return (("…" if start else "") + text[start:end].strip()
+            + ("…" if end < len(text) else ""))
+
+
+def search_reports(teacher_id, keyword, course=None, limit=20):
+    """在批改报告、整卷反馈与逐题评语里按关键词检索。"""
+    keyword = (keyword or "").strip()
+    if len(keyword) < 2:
+        return {"error": "请提供至少 2 个字的检索关键词"}
+    limit = _clamp(limit, 20, 50)
+    like = f"%{keyword}%"
+    db = _db()
+    try:
+        course_id = None
+        if course:
+            c = _course(db, teacher_id, course)
+            if not c:
+                return {"error": f"没有找到课程「{course}」，可先用 list_courses 查看"}
+            course_id = c["id"]
+
+        sql = """
+            SELECT s.id AS submission_id, c.name AS course, h.title AS lecture,
+                   u.display_name AS student, s.report_md, s.feedback
+            FROM submissions s
+            JOIN lectures h ON h.id=s.lecture_id
+            JOIN courses c ON c.id=h.course_id
+            JOIN course_teachers ct ON ct.course_id=c.id AND ct.teacher_id=?
+            JOIN users u ON u.id=s.student_id
+            WHERE (s.report_md LIKE ? OR s.feedback LIKE ?)"""
+        params = [teacher_id, like, like]
+        if course_id:
+            sql += " AND c.id=?"
+            params.append(course_id)
+        rows = _rows(db.execute(sql + " ORDER BY s.id DESC LIMIT ?", params + [limit]))
+
+        sql = """
+            SELECT s.id AS submission_id, c.name AS course, h.title AS lecture,
+                   u.display_name AS student, q.no AS question_no, q.ai_comment
+            FROM questions q
+            JOIN submissions s ON s.id=q.submission_id
+            JOIN lectures h ON h.id=s.lecture_id
+            JOIN courses c ON c.id=h.course_id
+            JOIN course_teachers ct ON ct.course_id=c.id AND ct.teacher_id=?
+            JOIN users u ON u.id=s.student_id
+            WHERE q.ai_comment LIKE ?"""
+        params = [teacher_id, like]
+        if course_id:
+            sql += " AND c.id=?"
+            params.append(course_id)
+        comments = _rows(db.execute(sql + " ORDER BY q.id DESC LIMIT ?",
+                                    params + [limit]))
+
+        hits = [{
+            "submission_id": r["submission_id"], "course": r["course"],
+            "lecture": r["lecture"], "student": r["student"],
+            "field": "批改报告",
+            "snippet": _snippet(
+                r["report_md"] if keyword.lower() in (r["report_md"] or "").lower()
+                else r["feedback"], keyword),
+        } for r in rows]
+        hits += [{
+            "submission_id": r["submission_id"], "course": r["course"],
+            "lecture": r["lecture"], "student": r["student"],
+            "field": "题目评语", "question": r["question_no"],
+            "snippet": _snippet(r["ai_comment"], keyword),
+        } for r in comments]
+        return {"keyword": keyword, "course": course or "", "limit": limit,
+                "matched": len(hits), "hits": hits[:limit]}
+    finally:
+        db.close()
+
+
+def ai_usage(teacher_id, days=7):
+    """老师自己的 AI 用量与估算成本：先按操作聚合，再汇总，避免重试放大操作数。"""
+    days = _clamp(days, 7, 90)
+    start = (datetime.now() - timedelta(days=days - 1)).strftime("%Y-%m-%d 00:00:00")
+    base = """
+        WITH operation_usage AS (
+          SELECT o.*, COUNT(e.id) AS request_count,
+            CASE WHEN COUNT(e.total_tokens)>0 THEN SUM(e.total_tokens) END AS total_tokens,
+            CASE WHEN COUNT(e.estimated_cost)>0 THEN SUM(e.estimated_cost) END AS estimated_cost
+          FROM ai_operations o
+          LEFT JOIN ai_usage_events e ON e.operation_id=o.id
+          WHERE o.teacher_id=? AND o.started_at>=?
+          GROUP BY o.id)
+    """
+    db = _db()
+    try:
+        summary = dict(db.execute(base + """
+            SELECT COUNT(*) AS operations,
+              COALESCE(SUM(status='success'),0) AS success,
+              COALESCE(SUM(status='failed'),0) AS failed,
+              COALESCE(SUM(status IN ('queued','running')),0) AS active,
+              COALESCE(SUM(request_count),0) AS requests,
+              SUM(total_tokens) AS total_tokens,
+              SUM(estimated_cost) AS estimated_cost
+            FROM operation_usage""", (teacher_id, start)).fetchone())
+        if summary["estimated_cost"] is not None:
+            summary["estimated_cost"] = round(summary["estimated_cost"], 4)
+        by_type = _rows(db.execute(base + """
+            SELECT operation_type, COUNT(*) AS operations,
+              COALESCE(SUM(request_count),0) AS requests,
+              SUM(total_tokens) AS total_tokens, SUM(estimated_cost) AS estimated_cost
+            FROM operation_usage GROUP BY operation_type
+            ORDER BY operations DESC""", (teacher_id, start)))
+        daily = _rows(db.execute(base + """
+            SELECT substr(started_at,1,10) AS date, COUNT(*) AS operations,
+              COALESCE(SUM(request_count),0) AS requests,
+              SUM(total_tokens) AS total_tokens, SUM(estimated_cost) AS estimated_cost
+            FROM operation_usage GROUP BY substr(started_at,1,10)
+            ORDER BY date DESC""", (teacher_id, start)))
+        return {"days": days, "since": start[:10], "summary": summary,
+                "by_type": by_type, "daily": daily}
+    finally:
+        db.close()
+
+
+def list_prompts(teacher_id, kind=None):
+    """可用的批改/报告提示词：系统内置 + 本人自建（与提示词页面口径一致）。"""
+    sql = ("SELECT p.id, p.kind, p.name, p.is_default, p.teacher_id, p.updated_at,"
+           "length(p.content) AS content_length,"
+           "CASE WHEN p.is_default=1 THEN '系统内置' "
+           "ELSE COALESCE(NULLIF(u.display_name,''),'未知') END AS owner "
+           "FROM prompts p LEFT JOIN users u ON u.id=p.teacher_id "
+           "WHERE (p.is_default=1 OR p.teacher_id=?)")
+    params = [teacher_id]
+    if kind:
+        sql += " AND p.kind=?"
+        params.append(kind)
+    db = _db()
+    try:
+        rows = _rows(db.execute(
+            sql + " ORDER BY p.kind, p.is_default DESC, p.id", params))
+        for r in rows:
+            r["editable"] = bool(not r["is_default"] and r["teacher_id"] == teacher_id)
+        return {"kind": kind or "", "prompts": rows}
+    finally:
+        db.close()
+
+
+def get_prompt(teacher_id, prompt_id):
+    """读取单个提示词全文；仅限系统内置或本人自建。"""
+    try:
+        pid = int(prompt_id)
+    except (TypeError, ValueError):
+        return {"error": "请提供提示词 ID，可先用 list_prompts 查看"}
+    db = _db()
+    try:
+        row = db.execute("""
+            SELECT p.id, p.kind, p.name, p.is_default, p.is_default AS builtin,
+                   p.updated_at, p.content,
+                   CASE WHEN p.is_default=1 THEN '系统内置'
+                        ELSE COALESCE(NULLIF(u.display_name,''),'未知') END AS owner
+            FROM prompts p LEFT JOIN users u ON u.id=p.teacher_id
+            WHERE p.id=? AND (p.is_default=1 OR p.teacher_id=?)""",
+            (pid, teacher_id)).fetchone()
+        if not row:
+            return {"error": f"没有找到提示词 #{pid}"}
+        out = dict(row)
+        out.pop("builtin", None)
+        out["content"] = _cut(out["content"], 8000)
+        return out
+    finally:
+        db.close()
+
+
+def lesson_plan(teacher_id, course):
+    """读取某门课程的教案。"""
+    db = _db()
+    try:
+        c = _course(db, teacher_id, course)
+        if not c:
+            return {"error": f"没有找到课程「{course}」，可先用 list_courses 查看"}
+        rows = _rows(db.execute(
+            "SELECT id, title, updated_at, content FROM lesson_plans "
+            "WHERE course_id=? ORDER BY id DESC", (c["id"],)))
+        for r in rows:
+            r["content"] = _cut(r["content"], 4000)
+        return {"course": c["name"], "plan_count": len(rows), "plans": rows}
+    finally:
+        db.close()
+
+
+def lecture_scope(teacher_id, course, lecture):
+    """某讲次的作业范围、标准答案与学生讲义归属。"""
+    db = _db()
+    try:
+        c = _course(db, teacher_id, course)
+        if not c:
+            return {"error": f"没有找到课程「{course}」，可先用 list_courses 查看"}
+        h = _lecture(db, c["id"], lecture)
+        if not h:
+            return {"error": f"课程「{c['name']}」下没有找到讲次「{lecture}」"}
+        try:
+            keys = json.loads(h["scope_selected"] or "[]")
+            cands = json.loads(h["scope_candidates"] or "[]")
+        except (TypeError, ValueError):
+            keys, cands = [], []
+        by_key = {str(x.get("key")): x for x in cands if isinstance(x, dict)}
+        picked = [{"no": by_key[str(k)].get("no", ""),
+                   "hint": by_key[str(k)].get("hint", "")}
+                  for k in keys if str(k) in by_key]
+        return {
+            "course": c["name"], "lecture": h["title"],
+            "deadline": h["deadline"] or "不限",
+            "description": _cut(h["description"], 800),
+            "answer_pdf": h["answer_pdf"] or "",
+            "answer_pages": _pages(h["answer_pages"]),
+            "student_pdf": h["student_pdf"] or "",
+            "scope_ready": bool((h["scope_selected"] or "").strip()),
+            "scope_question_count": len(keys),
+            "scope_questions": picked,
+            "ready_for_grading": bool(h["answer_pdf"]
+                                      and (h["scope_selected"] or "").strip()),
+        }
+    finally:
+        db.close()
+
+
 # ---------- 工具注册表 ----------
 def _spec(name, desc, props, required):
     return {"name": name, "description": desc,
@@ -322,6 +808,50 @@ TOOLS = [
            "student": {"type": "string", "description": "学生姓名或用户名"},
            "lecture": {"type": "string", "description": "讲次标题或 ID，可省略"}},
           ["course", "student"]),
+    _spec("list_exams", "列出某门课程的考试，含日期、满分、已录分人数与缺录人数。",
+          {"course": {"type": "string", "description": "课程名称或 ID"}},
+          ["course"]),
+    _spec("exam_scores", "查看某次考试的全班成绩：每人分数与评语，以及均分/最高/最低。",
+          {"course": {"type": "string", "description": "课程名称或 ID"},
+           "exam": {"type": "string", "description": "考试名称（可只给片段）或 ID"}},
+          ["course", "exam"]),
+    _spec("course_overview", "课程整体进度：每讲的提交/已批改/报告已发布/待复核人数，"
+                             "以及每个学生的提交与批改统计。问「这门课进度如何」时优先调用。",
+          {"course": {"type": "string", "description": "课程名称或 ID"}},
+          ["course"]),
+    _spec("pending_work", "汇总三类待办：未提交、未批改、已批改但仍有题未人工复核。"
+                          "可按课程或某个讲次缩小范围；不传课程则统计该老师全部课程。",
+          {"course": {"type": "string", "description": "课程名称或 ID，可省略"},
+           "lecture": {"type": "string", "description": "讲次标题或 ID，需同时给 course"},
+           "limit": {"type": "integer", "description": "每类最多返回明细条数，默认 50"}},
+          []),
+    _spec("grading_queue", "查看后台批阅队列：当前排队中/进行中的任务，以及最近几次批阅结果与失败原因。",
+          {"limit": {"type": "integer", "description": "最近记录条数，默认 20"}},
+          []),
+    _spec("search_reports", "在批改报告、整卷反馈与逐题评语里按关键词检索，返回命中片段。"
+                            "适合问「谁的报告提到计算失误」这类问题。",
+          {"keyword": {"type": "string", "description": "检索关键词，至少 2 个字"},
+           "course": {"type": "string", "description": "课程名称或 ID，可省略"},
+           "limit": {"type": "integer", "description": "最多返回条数，默认 20"}},
+          ["keyword"]),
+    _spec("ai_usage", "查看自己近期的 AI 用量：操作数、请求数、token 总量、估算成本，"
+                      "按操作类型与日期拆分。",
+          {"days": {"type": "integer", "description": "统计最近多少天，默认 7，最大 90"}},
+          []),
+    _spec("list_prompts", "列出可用的批改/报告提示词（系统内置 + 自己创建的），不含正文。",
+          {"kind": {"type": "string", "description": "grade（批改）或 report（报告），可省略"}},
+          []),
+    _spec("get_prompt", "读取某个提示词的完整内容。ID 来自 list_prompts。",
+          {"prompt_id": {"type": "integer", "description": "提示词 ID"}},
+          ["prompt_id"]),
+    _spec("lesson_plan", "读取某门课程的教案（标题与正文）。",
+          {"course": {"type": "string", "description": "课程名称或 ID"}},
+          ["course"]),
+    _spec("lecture_scope", "查看某讲次的作业范围：已选题目、标准答案文件与答案页、"
+                           "学生版讲义，以及是否具备批阅条件。",
+          {"course": {"type": "string", "description": "课程名称或 ID"},
+           "lecture": {"type": "string", "description": "讲次标题（可只给片段）或 ID"}},
+          ["course", "lecture"]),
 ]
 
 
@@ -341,6 +871,31 @@ def call_tool(name, args, teacher_id):
         elif name == "student_report":
             out = student_report(teacher_id, args.get("course", ""),
                                  args.get("student", ""), args.get("lecture"))
+        elif name == "list_exams":
+            out = list_exams(teacher_id, args.get("course", ""))
+        elif name == "exam_scores":
+            out = exam_scores(teacher_id, args.get("course", ""), args.get("exam", ""))
+        elif name == "course_overview":
+            out = course_overview(teacher_id, args.get("course", ""))
+        elif name == "pending_work":
+            out = pending_work(teacher_id, args.get("course") or None,
+                               args.get("lecture") or None, args.get("limit"))
+        elif name == "grading_queue":
+            out = grading_queue(teacher_id, args.get("limit"))
+        elif name == "search_reports":
+            out = search_reports(teacher_id, args.get("keyword", ""),
+                                 args.get("course") or None, args.get("limit"))
+        elif name == "ai_usage":
+            out = ai_usage(teacher_id, args.get("days"))
+        elif name == "list_prompts":
+            out = list_prompts(teacher_id, args.get("kind") or None)
+        elif name == "get_prompt":
+            out = get_prompt(teacher_id, args.get("prompt_id"))
+        elif name == "lesson_plan":
+            out = lesson_plan(teacher_id, args.get("course", ""))
+        elif name == "lecture_scope":
+            out = lecture_scope(teacher_id, args.get("course", ""),
+                                args.get("lecture", ""))
         else:
             out = {"error": f"未知工具 {name}"}
     except Exception as e:  # 工具异常不该打断对话

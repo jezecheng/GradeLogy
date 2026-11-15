@@ -259,7 +259,7 @@ AI 批阅完成后会自动生成一份 Markdown 批改报告（逐题明细表�
 }
 ```
 
-- 工具与页面助手完全相同：`ask_help`、`list_courses`、`list_lectures`、`lecture_status`、`find_student`、`student_report`
+- 工具与页面助手完全相同：`ask_help`、`list_courses`、`list_lectures`、`lecture_status`、`find_student`、`student_report`、`list_exams`、`exam_scores`、`course_overview`、`pending_work`、`grading_queue`、`search_reports`、`ai_usage`、`list_prompts`、`get_prompt`、`lesson_plan`、`lecture_scope`
 - 只对老师账号开放：`GRADELOGY_TEACHER` 填的不是老师账号时，进程直接退出
 - 只读，不含任何写操作；数据库路径默认取 `DATA_DIR/data.sqlite`，可用 `DB_PATH` 覆盖
 
