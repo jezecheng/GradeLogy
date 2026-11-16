@@ -111,6 +111,14 @@
       <span class="muted small">共 {{ answer_total }} 页 ·
         将发送 <b id="page-count">{{ answer_picked|length if answer_picked else answer_total }}</b> 页给模型</span>
     </div>
+    {% if answer_total == 0 %}
+    <p class="muted small" style="color:#c0392b; background:#fdf0ef; padding:10px 12px; border-radius:6px">
+      无法读取这份 PDF 的页数（pdfium 解析失败），因此无法生成缩略图和题目清单。
+      这通常是 PDF 文件本身的问题（如加密、损坏、特殊格式）。
+      建议：用其他工具重新导出/打印为 PDF 后再上传；或到「管理后台 → 日志」查看 app.log 中的
+      <code>pdf_page_count</code> 错误详情。
+    </p>
+    {% endif %}
     <p class="muted small">学生交的是哪几页，这里就只勾哪几页；未勾选任何页码时使用整份答案。
       保存后立即用这些页生成题目清单，同时也用于 AI 批阅；只发送相关页可以明显减少图片数量与 token 消耗。</p>
     <form method="post" action="{{ url_for('lecture_answer_pages', hid=hw.id) }}" id="page-form"

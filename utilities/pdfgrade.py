@@ -86,7 +86,11 @@ def _render_pdf_pages(path, label, pages=None):
     减少发给模型的图片数量与 token 消耗。
     """
     parts = []
-    doc = pdfium.PdfDocument(path)
+    try:
+        doc = pdfium.PdfDocument(path)
+    except Exception as e:
+        log.exception("_render_pdf_pages: pdfium 打开失败 path=%s label=%s", path, label)
+        return None, f"{label}PDF 读取失败：{e}"
     try:
         total = len(doc)
         if pages:
@@ -104,16 +108,22 @@ def _render_pdf_pages(path, label, pages=None):
             img.save(buf, format="JPEG", quality=JPEG_QUALITY)
             parts.append(_image_part("image/jpeg", buf.getvalue()))
             bitmap.close()
+    except Exception as e:
+        log.exception("_render_pdf_pages: 渲染失败 path=%s label=%s", path, label)
+        return None, f"{label}PDF 渲染失败：{e}"
     finally:
         doc.close()
+    log.info("_render_pdf_pages: 渲染完成 path=%s label=%s 页数=%d", path, label, len(parts))
     return parts, ""
 
 
 def pdf_page_count(path):
     """返回 PDF 页数；非 PDF 或读取失败返回 0。"""
     if not path or not os.path.exists(path):
+        log.warning("pdf_page_count: 文件不存在 path=%s", path)
         return 0
     if os.path.splitext(path)[1].lower() != ".pdf":
+        log.warning("pdf_page_count: 非 PDF 文件 path=%s", path)
         return 0
     try:
         doc = pdfium.PdfDocument(path)
@@ -122,14 +132,21 @@ def pdf_page_count(path):
         finally:
             doc.close()
     except Exception:
+        log.exception("pdf_page_count: pdfium 读取失败 path=%s size=%d",
+                      path, os.path.getsize(path))
         return 0
 
 
 def render_page_jpeg(path, page_no, scale=0.9, quality=65):
     """渲染单页为 JPEG 字节，供页码选择界面做缩略图预览；页码越界返回 None。"""
     if not path or not os.path.exists(path) or page_no < 1:
+        log.warning("render_page_jpeg: 文件不存在或页码非法 path=%s page=%s", path, page_no)
         return None
-    doc = pdfium.PdfDocument(path)
+    try:
+        doc = pdfium.PdfDocument(path)
+    except Exception:
+        log.exception("render_page_jpeg: pdfium 打开失败 path=%s", path)
+        return None
     try:
         if page_no > len(doc):
             return None
@@ -139,6 +156,9 @@ def render_page_jpeg(path, page_no, scale=0.9, quality=65):
         img.save(buf, format="JPEG", quality=quality)
         bitmap.close()
         return buf.getvalue()
+    except Exception:
+        log.exception("render_page_jpeg: 渲染失败 path=%s page=%s", path, page_no)
+        return None
     finally:
         doc.close()
 

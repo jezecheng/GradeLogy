@@ -2556,7 +2556,8 @@ def submission_review_save(sid):
 @_routes.route("/question/<int:qid>/reviewed", methods=["POST"])
 @role_required("teacher")
 def question_reviewed(qid):
-    """单题的「已审核」标记，随点随存，供折起的题目显示审核进度。"""
+    """单题的「已复核」标记，随点随存；同时保存该题的判定/OCR/标准答案/评语，
+    避免老师改完判定点「已复核」却只存了审核状态、修改被丢弃。"""
     db = get_db()
     q = db.execute("""
         SELECT q.id, s.lecture_id FROM questions q
@@ -2566,10 +2567,22 @@ def question_reviewed(qid):
     hw = db.execute("SELECT course_id FROM lectures WHERE id=?",
                     (q["lecture_id"],)).fetchone()
     own_course(hw["course_id"])
-    reviewed = 1 if (request.get_json(silent=True) or {}).get("reviewed") else 0
-    db.execute("UPDATE questions SET reviewed=? WHERE id=?", (reviewed, qid))
+    payload = request.get_json(silent=True) or {}
+    reviewed = 1 if payload.get("reviewed") else 0
+    # 同时保存该题当前表单值（前端会把最新值一起带上来）
+    verdict = str(payload.get("verdict", "")).strip()
+    if verdict not in ("", "对", "半对", "错", "无法判定"):
+        verdict = ""
+    db.execute(
+        "UPDATE questions SET reviewed=?, verdict=?, ocr_text=?, standard_answer=?, note=? "
+        "WHERE id=?",
+        (reviewed, verdict,
+         str(payload.get("ocr_text", "")).strip(),
+         str(payload.get("standard_answer", "")).strip(),
+         str(payload.get("note", "")).strip(), qid))
     db.commit()
-    return {"ok": True, "reviewed": reviewed}
+    log.info("复核保存 question=%s reviewed=%s verdict=%s", qid, reviewed, verdict)
+    return {"ok": True, "reviewed": reviewed, "verdict": verdict}
 
 
 # ---------- 教案 ----------

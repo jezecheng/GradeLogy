@@ -171,6 +171,53 @@ class TagRouteTest(unittest.TestCase):
             self._post("student_tag_analysis", client=other, cid=10, sid=4).status_code,
             403)
 
+    def test_question_reviewed_saves_verdict_and_fields(self):
+        """点「已复核」应同时保存判定/OCR/标准答案/评语，而不只是 reviewed 标记。"""
+        resp = self.client.post(
+            self.url("question_reviewed", qid=40),
+            json={"reviewed": 1, "verdict": "半对",
+                  "ocr_text": "学生作答修正", "standard_answer": "标准答案修正",
+                  "note": "部分正确"},
+            headers={"X-CSRF-Token": "test-token"})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["reviewed"], 1)
+        self.assertEqual(data["verdict"], "半对")
+        con = self._db()
+        row = con.execute(
+            "SELECT verdict,reviewed,ocr_text,standard_answer,note "
+            "FROM questions WHERE id=40").fetchone()
+        con.close()
+        self.assertEqual(row["verdict"], "半对")
+        self.assertEqual(row["reviewed"], 1)
+        self.assertEqual(row["ocr_text"], "学生作答修正")
+        self.assertEqual(row["standard_answer"], "标准答案修正")
+        self.assertEqual(row["note"], "部分正确")
+
+    def test_question_reviewed_rejects_other_teacher(self):
+        other = self.login(3)
+        resp = other.post(
+            self.url("question_reviewed", qid=40),
+            json={"reviewed": 1, "verdict": "对"},
+            headers={"X-CSRF-Token": "test-token"})
+        self.assertEqual(resp.status_code, 403)
+        con = self._db()
+        row = con.execute("SELECT verdict FROM questions WHERE id=40").fetchone()
+        con.close()
+        self.assertEqual(row["verdict"], "错")  # 未被越权修改
+
+    def test_question_reviewed_rejects_invalid_verdict(self):
+        resp = self.client.post(
+            self.url("question_reviewed", qid=40),
+            json={"reviewed": 1, "verdict": "优良"},
+            headers={"X-CSRF-Token": "test-token"})
+        self.assertEqual(resp.status_code, 200)
+        con = self._db()
+        row = con.execute("SELECT verdict FROM questions WHERE id=40").fetchone()
+        con.close()
+        self.assertEqual(row["verdict"], "")  # 非法值被归一化为空
+
     def test_horizontal_analysis_saves_markdown(self):
         result = {"overall_summary": "整体判断",
                   "high_risk_topics": [{"topic_name": "氧化还原反应",
