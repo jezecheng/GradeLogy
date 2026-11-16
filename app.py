@@ -34,6 +34,7 @@ except ImportError:  # pragma: no cover
 from flask import (Flask, abort, flash, g, has_request_context, jsonify, redirect,
                    render_template, request, send_file, send_from_directory, session, url_for)
 from itsdangerous import BadSignature, URLSafeSerializer
+from markupsafe import Markup
 from werkzeug.routing import BaseConverter, ValidationError
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -317,10 +318,11 @@ def _accuracy_by_submission(db, sub_ids):
 
 
 def _md_safe(md):
-    """模板里直接用 {{ hw.summary_md|markdown_safe }} 渲染 Markdown 片段。"""
+    """模板里直接用 {{ hw.summary_md|markdown_safe }} 渲染 Markdown 片段。
+    返回 Markup 对象，防止 Jinja2 自动转义 HTML 标签。"""
     if not md:
         return ""
-    return render_markdown(md)
+    return Markup(render_markdown(md))
 
 
 def _is_valid_timezone(name):

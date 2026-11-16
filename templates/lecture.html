@@ -322,7 +322,7 @@
 
 <div class="card" id="lecture-stats">
   <div class="card-head">
-    <h2>作业统计</h2>
+    <h2>讲次汇总</h2>
     <form method="post" action="{{ url_for('lecture_summary_generate', hid=hw.id) }}"
           class="summary-form" data-has-result="{{ '1' if hw.summary_md else '0' }}">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
@@ -332,51 +332,11 @@
     </form>
   </div>
 
-  {% if qstats %}
-  <div class="stats-kpis">
-    <div class="kpi">
-      <div class="kpi-num">{{ n_subs }}</div>
-      <div class="kpi-lbl">已提交</div>
-    </div>
-    <div class="kpi">
-      <div class="kpi-num">{{ n_graded }}</div>
-      <div class="kpi-lbl">已批改</div>
-    </div>
-    <div class="kpi">
-      <div class="kpi-num">{{ n_reviewed }}</div>
-      <div class="kpi-lbl">已审核</div>
-    </div>
-    <div class="kpi">
-      <div class="kpi-num">{{ qstats|length }}</div>
-      <div class="kpi-lbl">题目总数</div>
-    </div>
-  </div>
-
-  <h3 style="margin:16px 0 8px">每题判定分布</h3>
-  <table class="bar-table">
-    <thead><tr><th style="width:80px">题号</th><th>判定分布</th></tr></thead>
-    <tbody>
-    {% for q in qstats %}
-    <tr>
-      <td><strong>{{ q.no }}</strong></td>
-      <td>
-        {{ render_bar(q.n_right, q.n_partial, q.n_wrong, q.n_unknown,
-                       q.n_right + q.n_partial + q.n_wrong + q.n_unknown) }}
-      </td>
-    </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p class="muted">还没有学生提交，或还没有完成 AI 批阅。批阅开始后这里会自动显示全班分布。</p>
-  {% endif %}
-
   {% if hw.summary_md %}
-  <div style="margin-top:20px; padding-top:12px; border-top:1px dashed #eef0f3">
-    <h3 style="margin-bottom:4px">讲次汇总</h3>
-    <p class="muted small">生成于 {{ hw.summary_at|legacytime }}（覆盖生成会弹确认）</p>
-    <div class="lecture-summary-body">{{ hw.summary_md|markdown_safe }}</div>
-  </div>
+  <div class="lecture-summary-body">{{ hw.summary_md|markdown_safe }}</div>
+  <p class="muted small" style="margin-top:8px">生成于 {{ hw.summary_at|legacytime }}（覆盖生成会弹确认）</p>
+  {% else %}
+  <p class="muted small">批阅完成后点击「生成讲次汇总」，AI 聚合全班逐题判定与评语，生成每题要点与整体总结。</p>
   {% endif %}
 </div>
 
@@ -409,6 +369,47 @@
     <p class="muted small">生成于 {{ tag_analysis.created_at|localtime }}（覆盖生成会弹确认）</p>
     <div class="lecture-summary-body">{{ tag_analysis.content_md|markdown_safe }}</div>
   </div>
+  {% endif %}
+</div>
+
+<div class="card" id="lecture-distribution">
+  <h2>每题判定分布</h2>
+  {% if qstats %}
+  <div class="stats-kpis">
+    <div class="kpi">
+      <div class="kpi-num">{{ n_subs }}</div>
+      <div class="kpi-lbl">已提交</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-num">{{ n_graded }}</div>
+      <div class="kpi-lbl">已批改</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-num">{{ n_reviewed }}</div>
+      <div class="kpi-lbl">已审核</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-num">{{ qstats|length }}</div>
+      <div class="kpi-lbl">题目总数</div>
+    </div>
+  </div>
+
+  <table class="bar-table" style="margin-top:12px">
+    <thead><tr><th style="width:80px">题号</th><th>判定分布</th></tr></thead>
+    <tbody>
+    {% for q in qstats %}
+    <tr>
+      <td><strong>{{ q.no }}</strong></td>
+      <td>
+        {{ render_bar(q.n_right, q.n_partial, q.n_wrong, q.n_unknown,
+                       q.n_right + q.n_partial + q.n_wrong + q.n_unknown) }}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">还没有学生提交，或还没有完成 AI 批阅。批阅开始后这里会自动显示全班分布。</p>
   {% endif %}
 </div>
 <script>
