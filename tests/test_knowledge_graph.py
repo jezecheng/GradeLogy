@@ -21,10 +21,11 @@ import app as app_module  # noqa: E402
 import db as database  # noqa: E402
 from utilities import kg_text, knowledge_graph as kg  # noqa: E402
 
-_TABLES = ("kg_chunks", "kg_edges", "kg_nodes", "kg_materials", "knowledge_graphs",
-           "tag_analyses", "question_tags", "questions", "submissions", "lectures",
-           "exams", "exam_scores", "enrollments", "course_teachers", "courses",
-           "users", "settings", "ai_usage_events", "ai_operations")
+_TABLES = ("kg_audits", "kg_chunks", "kg_edges", "kg_nodes", "kg_materials",
+           "knowledge_graphs", "tag_analyses", "question_tags", "questions",
+           "submissions", "lectures", "exams", "exam_scores", "enrollments",
+           "course_teachers", "courses", "users", "settings", "ai_usage_events",
+           "ai_operations")
 
 
 class KGLogicTest(unittest.TestCase):
@@ -453,6 +454,120 @@ class KGLogicTest(unittest.TestCase):
         self.assertEqual(chunks[0][0], 1)
         self.assertEqual(chunks[-1][0], 2)
         self.assertTrue(all(len(text) <= kg_text.CHUNK_CHARS for _p, text in chunks))
+
+    @staticmethod
+    def _concepts(*names):
+        return [{"name": name, "category": "", "definition": "",
+                 "aliases": [], "confidence": 0.8} for name in names]
+
+    def test_merge_extraction_skips_cycle_edges(self):
+        kg.merge_extraction(self.con, 1, 101, self._concepts("A", "B"), [
+            {"from": "A", "to": "B", "relation": "prerequisite",
+             "evidence": "", "confidence": 0.8}])
+        stats = {}
+        result = kg.merge_extraction(
+            self.con, 1, 102, self._concepts("A", "B"), [
+                {"from": "B", "to": "A", "relation": "prerequisite",
+                 "evidence": "", "confidence": 0.7}], stats=stats)
+        self.assertEqual(stats["skipped_cycles"], 1)
+        self.assertEqual(result[1], 1)
+        edges = self.con.execute("SELECT * FROM kg_edges").fetchall()
+        self.assertEqual([(edge["src_id"], edge["dst_id"]) for edge in edges],
+                         [(1, 2)])
+
+    def test_prerequisite_cycles_reports_weakest_edge(self):
+        kg.merge_extraction(self.con, 1, 101, self._concepts("A", "B", "C"), [])
+        ids = {row["name"]: row["id"] for row in self.con.execute(
+            "SELECT id,name FROM kg_nodes")}
+        for src, dst, confidence in (("A", "B", 0.9), ("B", "C", 0.8),
+                                     ("C", "A", 0.3)):
+            self.con.execute(
+                "INSERT INTO kg_edges(graph_id,src_id,dst_id,relation,confidence)"
+                " VALUES(1,?,?,'prerequisite',?)",
+                (ids[src], ids[dst], confidence))
+        self.con.commit()
+        reports = kg.prerequisite_cycles(self.con, 1)
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(len(reports[0]["edges"]), 3)
+        self.assertAlmostEqual(reports[0]["edges"][0]["confidence"], 0.3)
+        self.assertIn("C → A", reports[0]["suggested_label"])
+
+    def test_audit_validation_rejects_conflicts_and_cycles(self):
+        kg.merge_extraction(self.con, 1, 101, self._concepts("A", "B", "C", "孤立"), [
+            {"from": "A", "to": "C", "relation": "prerequisite",
+             "evidence": "", "confidence": 0.8},
+            {"from": "C", "to": "B", "relation": "prerequisite",
+             "evidence": "", "confidence": 0.8},
+            {"from": "A", "to": "B", "relation": "prerequisite",
+             "evidence": "", "confidence": 0.9}])
+        ids = {row["name"]: row["id"] for row in self.con.execute(
+            "SELECT id,name FROM kg_nodes")}
+        edge_id = self.con.execute(
+            "SELECT id FROM kg_edges WHERE src_id=? AND dst_id=?",
+            (ids["A"], ids["B"])).fetchone()["id"]
+        valid, rejected, error = kg.validate_audit_suggestions(self.con, 1, [
+            {"action": "reverse_edge", "edge_id": edge_id, "reason": "方向反了"},
+            {"action": "drop_node", "node_id": ids["A"], "reason": "想删"},
+            {"action": "merge_nodes", "node_ids": [ids["A"], 999], "keep_id": ids["A"],
+             "reason": "重复"},
+            {"action": "drop_node", "node_id": ids["孤立"], "reason": "孤立无用"},
+        ])
+        self.assertEqual(error, "")
+        self.assertEqual([item["action"] for item in valid], ["drop_node"])
+        self.assertEqual(valid[0]["node_id"], ids["孤立"])
+        reasons = [item["reason"] for item in rejected]
+        self.assertTrue(any("形成环" in reason for reason in reasons))
+        self.assertTrue(any("还有" in reason and "关系" in reason for reason in reasons))
+        self.assertTrue(any("不属于该图谱" in reason for reason in reasons))
+
+    def test_apply_audit_and_restore_snapshot(self):
+        kg.merge_extraction(self.con, 1, 101, self._concepts("A", "B"), [
+            {"from": "A", "to": "B", "relation": "prerequisite",
+             "evidence": "", "confidence": 0.8}])
+        edge_id = self.con.execute("SELECT id FROM kg_edges").fetchone()["id"]
+        snapshot = kg.apply_audit(self.con, 1, [
+            {"action": "delete_edge", "edge_id": edge_id, "reason": "测试"}])
+        self.assertEqual(self.con.execute(
+            "SELECT COUNT(*) FROM kg_edges").fetchone()[0], 0)
+        kg.restore_snapshot(self.con, 1, snapshot)
+        self.assertEqual(self.con.execute(
+            "SELECT COUNT(*) FROM kg_edges").fetchone()[0], 1)
+
+    def test_analyze_graph_parses_and_validates_model_output(self):
+        kg.merge_extraction(self.con, 1, 101, self._concepts("A", "B"), [
+            {"from": "A", "to": "B", "relation": "prerequisite",
+             "evidence": "", "confidence": 0.8}])
+        edge_id = self.con.execute("SELECT id FROM kg_edges").fetchone()["id"]
+        reply = json.dumps({"suggestions": [
+            {"action": "delete_edge", "edge_id": edge_id, "reason": "资料无依据"},
+            {"action": "delete_edge", "edge_id": 9999, "reason": "不存在"}]},
+            ensure_ascii=False)
+        with mock.patch.object(kg.llm, "chat", return_value=(reply, "stop", "")):
+            valid, rejected, error = kg.analyze_graph(self.con, 1, "u", "k", "m")
+        self.assertEqual(error, "")
+        self.assertEqual([item["action"] for item in valid], ["delete_edge"])
+        self.assertEqual(rejected[0]["reason"], "关系 9999 不属于该图谱")
+
+    def test_merge_nodes_moves_edges_and_dedupes(self):
+        kg.merge_extraction(self.con, 1, 101, self._concepts("A", "B", "C"), [
+            {"from": "A", "to": "C", "relation": "related",
+             "evidence": "", "confidence": 0.8},
+            {"from": "B", "to": "C", "relation": "related",
+             "evidence": "", "confidence": 0.7}])
+        ids = {row["name"]: row["id"] for row in self.con.execute(
+            "SELECT id,name FROM kg_nodes")}
+        kg.apply_audit(self.con, 1, [{
+            "action": "merge_nodes", "node_ids": [ids["A"], ids["B"]],
+            "keep_id": ids["A"], "reason": "同义"}])
+        self.assertEqual(self.con.execute(
+            "SELECT COUNT(*) FROM kg_nodes").fetchone()[0], 2)
+        edges = self.con.execute("SELECT * FROM kg_edges").fetchall()
+        self.assertEqual(len(edges), 1)
+        self.assertEqual((edges[0]["src_id"], edges[0]["dst_id"]),
+                         (ids["A"], ids["C"]))
+        keep = self.con.execute("SELECT * FROM kg_nodes WHERE id=?",
+                                (ids["A"],)).fetchone()
+        self.assertIn("B", json.loads(keep["aliases"]))
 
 
 class KGRouteTest(unittest.TestCase):
@@ -1224,6 +1339,120 @@ class KGRouteTest(unittest.TestCase):
         con.close()
         self.assertEqual(row["status"], kg.STATUS_FAILED)
         self.assertIn("未配置 AI", row["error"])
+
+    def _add_graph_nodes(self, graph_id, *names):
+        con = self._db()
+        ids = {}
+        for name in names:
+            ids[name] = con.execute(
+                "INSERT INTO kg_nodes(graph_id,name,normalized,confidence)"
+                " VALUES(?,?,?,0.8)", (graph_id, name, name)).lastrowid
+        con.commit()
+        con.close()
+        return ids
+
+    def _add_graph_edge(self, graph_id, src_id, dst_id,
+                        relation="prerequisite", confidence=0.6):
+        con = self._db()
+        edge_id = con.execute(
+            "INSERT INTO kg_edges(graph_id,src_id,dst_id,relation,evidence,"
+            "confidence) VALUES(?,?,?,?, '依据', ?)",
+            (graph_id, src_id, dst_id, relation, confidence)).lastrowid
+        con.commit()
+        con.close()
+        return edge_id
+
+    def test_edge_reverse_flips_prerequisite(self):
+        graph = self._create_graph()
+        ids = self._add_graph_nodes(graph["id"], "A", "B")
+        edge_id = self._add_graph_edge(graph["id"], ids["A"], ids["B"])
+        resp = self._post("knowledge_graph_edge_reverse", gid=graph["id"], eid=edge_id)
+        self.assertEqual(resp.status_code, 302)
+        con = self._db()
+        edge = con.execute("SELECT * FROM kg_edges WHERE id=?", (edge_id,)).fetchone()
+        con.close()
+        self.assertEqual((edge["src_id"], edge["dst_id"]), (ids["B"], ids["A"]))
+
+    def test_edge_reverse_refuses_to_create_cycle(self):
+        graph = self._create_graph()
+        ids = self._add_graph_nodes(graph["id"], "A", "B", "C")
+        self._add_graph_edge(graph["id"], ids["A"], ids["C"])
+        self._add_graph_edge(graph["id"], ids["C"], ids["B"])
+        edge_id = self._add_graph_edge(graph["id"], ids["A"], ids["B"])
+        resp = self.client.post(
+            self.url("knowledge_graph_edge_reverse", gid=graph["id"], eid=edge_id),
+            data={"_csrf": "test-token"}, follow_redirects=True)
+        self.assertIn("形成环", resp.get_data(as_text=True))
+        con = self._db()
+        edge = con.execute("SELECT * FROM kg_edges WHERE id=?", (edge_id,)).fetchone()
+        con.close()
+        self.assertEqual((edge["src_id"], edge["dst_id"]), (ids["A"], ids["B"]))
+
+    def test_edge_delete_removes_row(self):
+        graph = self._create_graph()
+        ids = self._add_graph_nodes(graph["id"], "A", "B")
+        edge_id = self._add_graph_edge(graph["id"], ids["A"], ids["B"], "related")
+        self._post("knowledge_graph_edge_delete", gid=graph["id"], eid=edge_id)
+        con = self._db()
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM kg_edges").fetchone()[0], 0)
+        con.close()
+
+    def test_detail_reports_prerequisite_cycles(self):
+        graph = self._create_graph()
+        ids = self._add_graph_nodes(graph["id"], "A", "B")
+        self._add_graph_edge(graph["id"], ids["A"], ids["B"], confidence=0.9)
+        self._add_graph_edge(graph["id"], ids["B"], ids["A"], confidence=0.2)
+        html = self.client.get(
+            self.url("knowledge_graph_detail", gid=graph["id"])).get_data(as_text=True)
+        self.assertIn("发现 1 处前置关系成环", html)
+        self.assertIn("B → A", html)
+
+    def test_audit_apply_and_rollback_restores_edges(self):
+        graph = self._create_graph()
+        ids = self._add_graph_nodes(graph["id"], "A", "B")
+        edge_id = self._add_graph_edge(graph["id"], ids["A"], ids["B"])
+        con = self._db()
+        audit_id = con.execute(
+            "INSERT INTO kg_audits(graph_id,status,suggestions,created_by)"
+            " VALUES(?, '待确认', ?, 2)",
+            (graph["id"], json.dumps([{
+                "action": "delete_edge", "edge_id": edge_id,
+                "reason": "资料无依据", "label": "删除关系"}],
+                ensure_ascii=False))).lastrowid
+        con.commit()
+        con.close()
+
+        self._post("knowledge_graph_audit_apply", gid=graph["id"], aid=audit_id)
+        con = self._db()
+        audit = con.execute("SELECT * FROM kg_audits WHERE id=?", (audit_id,)).fetchone()
+        edges = con.execute("SELECT COUNT(*) FROM kg_edges").fetchone()[0]
+        con.close()
+        self.assertEqual(audit["status"], kg.AUDIT_APPLIED)
+        self.assertTrue(audit["snapshot"])
+        self.assertEqual(edges, 0)
+
+        self._post("knowledge_graph_audit_rollback", gid=graph["id"], aid=audit_id)
+        con = self._db()
+        audit = con.execute("SELECT * FROM kg_audits WHERE id=?", (audit_id,)).fetchone()
+        edges = con.execute("SELECT COUNT(*) FROM kg_edges").fetchone()[0]
+        con.close()
+        self.assertEqual(audit["status"], kg.AUDIT_ROLLED_BACK)
+        self.assertEqual(edges, 1)
+
+    def test_audit_run_without_ai_config_records_failure(self):
+        graph = self._create_graph()
+        with mock.patch.object(app_module, "_ai_endpoint",
+                               return_value=("", "", "", "未配置 AI")):
+            resp = self.client.post(
+                self.url("knowledge_graph_audit_run", gid=graph["id"]),
+                data={"_csrf": "test-token"}, follow_redirects=True)
+        self.assertIn("未配置 AI", resp.get_data(as_text=True))
+        con = self._db()
+        audit = con.execute("SELECT * FROM kg_audits").fetchone()
+        con.close()
+        self.assertEqual(audit["status"], kg.AUDIT_FAILED)
+        self.assertIn("未配置 AI", audit["error"])
 
     def test_backup_includes_graph_tables_and_materials(self):
         graph = self._create_graph()

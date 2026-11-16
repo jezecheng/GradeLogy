@@ -294,6 +294,20 @@ CREATE TABLE IF NOT EXISTS kg_edges(
   UNIQUE(graph_id, src_id, dst_id, relation));
 CREATE INDEX IF NOT EXISTS idx_kg_edges_graph ON kg_edges(graph_id, src_id);
 CREATE INDEX IF NOT EXISTS idx_kg_edges_dst ON kg_edges(graph_id, dst_id);
+-- 图谱体检：LLM 只产出结构化建议，校验后待人工确认，应用前保存快照
+CREATE TABLE IF NOT EXISTS kg_audits(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  graph_id INTEGER NOT NULL REFERENCES knowledge_graphs(id),
+  status TEXT NOT NULL DEFAULT '待确认',
+  model TEXT DEFAULT '',
+  error TEXT DEFAULT '',
+  suggestions TEXT DEFAULT '',
+  rejected TEXT DEFAULT '',
+  snapshot TEXT DEFAULT '',
+  created_by INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  applied_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_kg_audits_graph ON kg_audits(graph_id, id);
 -- 价目表：静态清单之外的覆盖值（目前由价目截图识别后确认写入），按模型 ID 全局生效
 CREATE TABLE IF NOT EXISTS model_prices(
   model TEXT PRIMARY KEY,

@@ -24,6 +24,22 @@ CHUNK_FAILED = "failed"
 
 RELATIONS = ("prerequisite", "contains", "related")
 RELATION_LABEL = {"prerequisite": "前置", "contains": "包含", "related": "相关"}
+
+AUDIT_PENDING = "待确认"
+AUDIT_APPLIED = "已应用"
+AUDIT_DISCARDED = "已忽略"
+AUDIT_FAILED = "失败"
+AUDIT_CLEAN = "无需调整"
+AUDIT_ROLLED_BACK = "已回滚"
+AUDIT_ACTIONS = ("merge_nodes", "reverse_edge", "delete_edge", "drop_node")
+AUDIT_ACTION_LABEL = {
+    "merge_nodes": "合并同义概念",
+    "reverse_edge": "反向前置关系",
+    "delete_edge": "删除关系",
+    "drop_node": "删除孤立概念",
+}
+AUDIT_MAX_TOKENS = 8192
+AUDIT_MAX_ITEMS = 40
 # 推理模型会把大量 token 花在思考上，4096/8192 可能全部耗尽导致正文为空
 KG_MAX_TOKENS = 32768
 TRUNCATED_MARK = "模型输出被截断"
@@ -219,9 +235,128 @@ def _upsert_node(db, graph_id, concept, material_id, index):
     return row
 
 
-def merge_extraction(db, graph_id, material_id, concepts, relations):
-    """把一次抽取结果增量合并进图谱；返回 (节点总数, 关系总数, 新增节点, 新增关系)。"""
+def prerequisite_reachable(db, graph_id, start_id, target_id,
+                           exclude_edge_id=None):
+    """沿 prerequisite 边判断 start 能否到达 target，用于插入/反向前的防环校验。"""
+    if start_id == target_id:
+        return True
+    exclude = ""
+    params = [graph_id, start_id]
+    extra = []
+    if exclude_edge_id is not None:
+        exclude = " AND id<>?"
+        extra.append(exclude_edge_id)
+    recursive_exclude = ""
+    if exclude_edge_id is not None:
+        recursive_exclude = " AND e.id<>?"
+    sql = (
+        "WITH RECURSIVE reach(id) AS ("
+        " SELECT dst_id FROM kg_edges WHERE graph_id=? AND relation='prerequisite'"
+        " AND src_id=?" + exclude +
+        " UNION"
+        " SELECT e.dst_id FROM kg_edges e JOIN reach r ON e.src_id=r.id"
+        " WHERE e.graph_id=? AND e.relation='prerequisite'" + recursive_exclude +
+        ") SELECT 1 FROM reach WHERE id=? LIMIT 1")
+    params.extend(extra)
+    params.append(graph_id)
+    if exclude_edge_id is not None:
+        params.append(exclude_edge_id)
+    params.append(target_id)
+    return db.execute(sql, tuple(params)).fetchone() is not None
+
+
+def _strong_components(adjacency):
+    """Tarjan 强连通分量（迭代实现，避免大图触发递归深度限制）。"""
+    index, low, on_stack, stack, result = {}, {}, set(), [], []
+    counter = 0
+    nodes = set(adjacency)
+    for targets in adjacency.values():
+        nodes.update(targets)
+    for root in sorted(nodes):
+        if root in index:
+            continue
+        work = [(root, 0)]
+        while work:
+            node, position = work.pop()
+            if position == 0:
+                index[node] = low[node] = counter
+                counter += 1
+                stack.append(node)
+                on_stack.add(node)
+            targets = adjacency.get(node, ())
+            advanced = False
+            for offset in range(position, len(targets)):
+                target = targets[offset]
+                if target not in index:
+                    work.append((node, offset + 1))
+                    work.append((target, 0))
+                    advanced = True
+                    break
+                if target in on_stack:
+                    low[node] = min(low[node], index[target])
+            if advanced:
+                continue
+            if low[node] == index[node]:
+                component = []
+                while True:
+                    item = stack.pop()
+                    on_stack.discard(item)
+                    component.append(item)
+                    if item == node:
+                        break
+                result.append(component)
+            if work:
+                parent = work[-1][0]
+                low[parent] = min(low[parent], low[node])
+    return result
+
+
+def prerequisite_cycles(db, graph_id):
+    """找出现存前置子图中的环，并给出优先检查的低置信关系。"""
+    rows = db.execute(
+        "SELECT e.id,e.src_id,e.dst_id,e.confidence,e.evidence,"
+        " s.name AS src_name,d.name AS dst_name FROM kg_edges e"
+        " JOIN kg_nodes s ON s.id=e.src_id JOIN kg_nodes d ON d.id=e.dst_id"
+        " WHERE e.graph_id=? AND e.relation='prerequisite'"
+        " ORDER BY e.id", (graph_id,)).fetchall()
+    adjacency = {}
+    for row in rows:
+        adjacency.setdefault(row["src_id"], []).append(row["dst_id"])
+    reports = []
+    for component in _strong_components(adjacency):
+        members = set(component)
+        if len(members) < 2:
+            continue
+        inner = [row for row in rows
+                 if row["src_id"] in members and row["dst_id"] in members]
+        if not inner:
+            continue
+        inner.sort(key=lambda row: ((row["confidence"] or 0), -row["id"]))
+        weakest = inner[0]
+        reports.append({
+            "node_names": sorted({row["src_name"] for row in inner} |
+                                 {row["dst_name"] for row in inner}),
+            "edges": [{
+                "id": row["id"], "src_name": row["src_name"],
+                "dst_name": row["dst_name"], "confidence": row["confidence"] or 0,
+                "evidence": row["evidence"] or "",
+            } for row in inner],
+            "suggested_edge_id": weakest["id"],
+            "suggested_label": (
+                f"{weakest['src_name']} → {weakest['dst_name']}"
+                f"（置信度 {round((weakest['confidence'] or 0) * 100)}%）"),
+        })
+    return reports
+
+
+def merge_extraction(db, graph_id, material_id, concepts, relations, stats=None):
+    """把一次抽取结果增量合并进图谱；返回 (节点总数, 关系总数, 新增节点, 新增关系)。
+
+    prerequisite 边写入前先检查是否会与已有前置关系成环，成环则跳过；
+    stats 传入 dict 时可读取 skipped_cycles 统计。
+    """
     index = _alias_map(db, graph_id)
+    skipped_cycles = 0
     nodes_before = db.execute(
         "SELECT COUNT(*) FROM kg_nodes WHERE graph_id=?", (graph_id,)).fetchone()[0]
     edges_before = db.execute(
@@ -244,6 +379,11 @@ def merge_extraction(db, graph_id, material_id, concepts, relations):
                  _add_source(existed["source_materials"], material_id),
                  max(existed["confidence"] or 0, rel["confidence"]), existed["id"]))
         else:
+            if rel["relation"] == "prerequisite" and prerequisite_reachable(
+                    db, graph_id, dst["id"], src["id"]):
+                # 已有 dst -> ... -> src 的路径，再插入 src -> dst 会成环
+                skipped_cycles += 1
+                continue
             try:
                 db.execute(
                     "INSERT INTO kg_edges(graph_id,src_id,dst_id,relation,evidence,"
@@ -264,6 +404,8 @@ def merge_extraction(db, graph_id, material_id, concepts, relations):
     db.execute("UPDATE knowledge_graphs SET updated_at=CURRENT_TIMESTAMP WHERE id=?",
                (graph_id,))
     db.commit()
+    if stats is not None:
+        stats["skipped_cycles"] = stats.get("skipped_cycles", 0) + skipped_cycles
     nodes_after = db.execute(
         "SELECT COUNT(*) FROM kg_nodes WHERE graph_id=?", (graph_id,)).fetchone()[0]
     edges_after = db.execute(
@@ -388,15 +530,23 @@ def build_material(db, material_id, api_url, api_key, model, usage_hook=None):
                    (STATUS_FAILED, message[:500], material_id))
         db.commit()
         return None
+    stats = {}
     nodes, edges, new_nodes, new_edges = merge_extraction(
-        db, material["graph_id"], material_id, concepts, relations)
-    note = f"部分片段失败：{errors[0]}" if errors else ""
+        db, material["graph_id"], material_id, concepts, relations, stats=stats)
+    notes = []
+    if errors:
+        notes.append(f"部分片段失败：{errors[0]}")
+    skipped = stats.get("skipped_cycles", 0)
+    if skipped:
+        notes.append(f"已跳过 {skipped} 条会成环的前置关系")
+    note = "；".join(notes)
     db.execute("UPDATE kg_materials SET status=?, error=?,"
                "finished_at=CURRENT_TIMESTAMP WHERE id=?",
                (STATUS_DONE, note[:500], material_id))
     db.commit()
     return {"nodes": nodes, "edges": edges,
-            "new_nodes": new_nodes, "new_edges": new_edges, "errors": len(errors)}
+            "new_nodes": new_nodes, "new_edges": new_edges, "errors": len(errors),
+            "skipped_cycles": skipped}
 
 
 def delete_material(db, material):
@@ -597,4 +747,441 @@ def concept_neighbors(db, graph_id, node_id):
             others.append(item)
     return {"node": node, "prerequisites": prerequisites,
             "dependents": dependents, "others": others}
+
+
+AUDIT_PROMPT = """你是学科知识图谱的审校专家。请检查下面的概念与关系，指出确实需要修正的问题。
+
+### 可提出的建议（action 只能取这四种）
+1. merge_nodes：把明显同义或重复的概念合并。给出 node_ids（至少两个节点 ID）与 keep_id（保留哪个节点）。
+2. reverse_edge：前置关系方向反了。给出 edge_id。
+3. delete_edge：关系错误、重复或资料中没有依据。给出 edge_id。
+4. drop_node：删除没有任何关系、也没有独立价值的孤立概念。给出 node_id。
+
+### 约束
+- 只在证据充分时提建议，宁缺毋滥；相邻但不同的概念不要合并。
+- 不要提出会让前置关系成环的反向建议；系统会逐条校验，不合规的建议会被丢弃。
+- 每条建议都要给出简短的中文理由（reason），不超过 60 字。
+- 最多给出 20 条建议；没有明显问题时返回空数组。
+
+### 输出格式（严格输出合法 JSON）
+{"suggestions": [
+  {"action": "merge_nodes", "node_ids": [1, 2], "keep_id": 1, "reason": "两者是同一概念的不同写法"},
+  {"action": "reverse_edge", "edge_id": 12, "reason": "定义说明 A 是学习 B 之前的基础"},
+  {"action": "delete_edge", "edge_id": 15, "reason": "资料中没有该关系依据"},
+  {"action": "drop_node", "node_id": 9, "reason": "孤立节点且无定义"}
+]}
+"""
+
+
+def _audit_catalog(db, graph_id, node_limit=150, edge_limit=250):
+    """把图压缩成便于模型判断的编号清单，节点与关系都带 ID。"""
+    nodes = db.execute(
+        "SELECT id,name,category,definition,confidence FROM kg_nodes WHERE graph_id=? "
+        "ORDER BY confidence DESC, id LIMIT ?", (graph_id, node_limit)).fetchall()
+    edges = db.execute(
+        "SELECT id,src_id,dst_id,relation,evidence,confidence FROM kg_edges "
+        "WHERE graph_id=? ORDER BY confidence ASC, id LIMIT ?",
+        (graph_id, edge_limit)).fetchall()
+    lines = ["### 概念节点"]
+    for row in nodes:
+        parts = [f"#{row['id']} {row['name']}"]
+        if row["category"]:
+            parts.append(f"分类：{row['category']}")
+        parts.append(f"置信度 {round((row['confidence'] or 0) * 100)}%")
+        if row["definition"]:
+            parts.append(f"定义：{row['definition']}")
+        lines.append("｜".join(parts))
+    lines.append("")
+    lines.append("### 关系（E 开头是关系 ID，# 是节点 ID）")
+    for row in edges:
+        label = RELATION_LABEL.get(row["relation"], row["relation"])
+        line = (f"E{row['id']}: #{row['src_id']} --{label}--> #{row['dst_id']}"
+                f"｜置信度 {round((row['confidence'] or 0) * 100)}%")
+        if row["evidence"]:
+            line += f"｜依据：{row['evidence']}"
+        lines.append(line)
+    return "\n".join(lines), len(nodes)
+
+
+def analyze_graph(db, graph_id, api_url, api_key, model, usage_hook=None):
+    """让模型审校图谱，返回 (可用建议, 被校验拦截的建议, 错误)。"""
+    catalog, node_count = _audit_catalog(db, graph_id)
+    if not node_count:
+        return [], [], "图谱还没有概念，无需体检"
+    cycles = prerequisite_cycles(db, graph_id)
+    hint = ""
+    if cycles:
+        hint = "\n\n### 系统检测到的前置环\n" + "\n".join(
+            "- " + " / ".join(item["node_names"]) + "；建议优先检查："
+            + item["suggested_label"] for item in cycles)
+    try:
+        reply, finish, err = llm.chat(
+            api_url, api_key, model,
+            [{"type": "text", "text": AUDIT_PROMPT + "\n\n" + catalog + hint}],
+            max_tokens=AUDIT_MAX_TOKENS, usage_hook=usage_hook, report_running=True)
+    except Exception as e:  # noqa: BLE001 体检失败不影响图谱本身
+        return [], [], str(e)
+    if err:
+        return [], [], err
+    if finish == "length" or not (reply or "").strip():
+        return [], [], (f"{TRUNCATED_MARK}（max_tokens={AUDIT_MAX_TOKENS}），"
+                        "可改用非推理模型或调大输出上限")
+    data = llm.extract_json(reply)
+    if not isinstance(data, dict):
+        return [], [], "模型未返回合法 JSON"
+    return validate_audit_suggestions(db, graph_id, data.get("suggestions"))
+
+
+def _audit_state():
+    return {"deleted": set(), "reversed": set(), "merged": [], "dropped": set()}
+
+
+def _copy_state(state):
+    return {"deleted": set(state["deleted"]), "reversed": set(state["reversed"]),
+            "merged": list(state["merged"]), "dropped": set(state["dropped"])}
+
+
+def _prereq_components(edges, state):
+    """返回 (find, 成环节点映射)：节点按合并组折叠后，落在非平凡强连通分量的节点。"""
+    parent = {}
+
+    def find(node):
+        while parent.get(node, node) != node:
+            parent[node] = parent.get(parent[node], parent[node])
+            node = parent[node]
+        return node
+
+    for ids, keep_id in state["merged"]:
+        for node in ids:
+            root, keep_root = find(node), find(keep_id)
+            if root != keep_root:
+                parent[root] = keep_root
+    adjacency = {}
+    for edge_id, edge in edges.items():
+        if edge_id in state["deleted"] or edge["relation"] != "prerequisite":
+            continue
+        src, dst = edge["src_id"], edge["dst_id"]
+        if edge_id in state["reversed"]:
+            src, dst = dst, src
+        if src in state["dropped"] or dst in state["dropped"]:
+            continue
+        src, dst = find(src), find(dst)
+        if src == dst:
+            continue
+        adjacency.setdefault(src, []).append(dst)
+    cyclic = {}
+    for index, component in enumerate(_strong_components(adjacency)):
+        if len(component) < 2:
+            continue
+        for node in component:
+            cyclic[node] = index
+    return find, cyclic
+
+
+def _introduces_cycle(edges, state, candidate, endpoints):
+    """候选改动是否在前置子图中制造了新的环。"""
+    base_find, base_cyclic = _prereq_components(edges, state)
+    new_find, new_cyclic = _prereq_components(edges, candidate)
+    base = base_cyclic.get(base_find(endpoints[0]))
+    if base is not None and base == base_cyclic.get(base_find(endpoints[1])):
+        return False  # 改动前这两个节点已在同一个环上，不新增
+    new = new_cyclic.get(new_find(endpoints[0]))
+    return new is not None and new == new_cyclic.get(new_find(endpoints[1]))
+
+
+def _edge_label(edge, nodes):
+    label = RELATION_LABEL.get(edge["relation"], edge["relation"])
+    src = nodes.get(edge["src_id"])
+    dst = nodes.get(edge["dst_id"])
+    return f"{src['name'] if src else edge['src_id']} —{label}→ " \
+           f"{dst['name'] if dst else edge['dst_id']}"
+
+
+def _as_ids(value):
+    if not isinstance(value, (list, tuple)):
+        return []
+    result = []
+    for item in value:
+        try:
+            number = int(item)
+        except (TypeError, ValueError):
+            return []
+        if number not in result:
+            result.append(number)
+    return result
+
+
+def validate_audit_suggestions(db, graph_id, items):
+    """逐条校验模型建议：ID 必须属于本图、合并组不冲突、改动后前置关系不成环。
+
+    返回 (可用建议, 被拦截建议, 错误)；错误恒为空串，保持与调用方一致的返回形态。
+    """
+    nodes = {row["id"]: row for row in db.execute(
+        "SELECT id,name,category,definition,confidence FROM kg_nodes WHERE graph_id=?",
+        (graph_id,))}
+    edges = {row["id"]: row for row in db.execute(
+        "SELECT * FROM kg_edges WHERE graph_id=?", (graph_id,))}
+    valid, rejected = [], []
+    state = _audit_state()
+    for raw in (items or [])[:AUDIT_MAX_ITEMS]:
+        if not isinstance(raw, dict):
+            continue
+        action = str(raw.get("action") or "").strip()
+        reason = str(raw.get("reason") or "").strip()[:120]
+        if action not in AUDIT_ACTIONS:
+            rejected.append({"action": action or "未知", "text": "无法识别的建议",
+                             "reason": "action 不在允许范围内"})
+            continue
+
+        if action == "merge_nodes":
+            ids = _as_ids(raw.get("node_ids"))
+            try:
+                keep_id = int(raw.get("keep_id") or (ids[0] if ids else 0))
+            except (TypeError, ValueError):
+                keep_id = 0
+            if len(ids) < 2:
+                rejected.append({"action": action, "text": "合并概念",
+                                 "reason": "node_ids 至少需要两个有效节点"})
+                continue
+            missing = [node for node in ids if node not in nodes]
+            if missing:
+                rejected.append({"action": action, "text": "合并概念",
+                                 "reason": f"节点 {missing} 不属于该图谱"})
+                continue
+            if keep_id not in ids:
+                rejected.append({"action": action, "text": "合并概念",
+                                 "reason": "keep_id 必须包含在 node_ids 中"})
+                continue
+            used = {node for group, _keep in state["merged"] for node in group}
+            if used & set(ids) or state["dropped"] & set(ids):
+                rejected.append({"action": action, "text": "合并概念",
+                                 "reason": "同一概念出现在多条合并或删除建议中"})
+                continue
+            candidate = _copy_state(state)
+            candidate["merged"].append((ids, keep_id))
+            base_find, base_cyclic = _prereq_components(edges, state)
+            find, cyclic = _prereq_components(edges, candidate)
+            if find(keep_id) in cyclic and base_find(keep_id) not in base_cyclic:
+                rejected.append({"action": action, "text": "合并概念",
+                                 "reason": "合并后前置关系会成环"})
+                continue
+            state = candidate
+            names = [nodes[node]["name"] for node in ids]
+            valid.append({
+                "action": action, "node_ids": ids, "keep_id": keep_id,
+                "reason": reason,
+                "label": "合并「" + "」「".join(names) + f"」→「{nodes[keep_id]['name']}」",
+            })
+            continue
+
+        if action in ("reverse_edge", "delete_edge"):
+            try:
+                edge_id = int(raw.get("edge_id"))
+            except (TypeError, ValueError):
+                edge_id = 0
+            edge = edges.get(edge_id)
+            if not edge:
+                rejected.append({"action": action, "text": "关系调整",
+                                 "reason": f"关系 {edge_id or '?'} 不属于该图谱"})
+                continue
+            if action == "reverse_edge" and edge["relation"] != "prerequisite":
+                rejected.append({"action": action, "text": _edge_label(edge, nodes),
+                                 "reason": "只有前置关系可以反向"})
+                continue
+            if edge_id in state["deleted"] or edge_id in state["reversed"]:
+                rejected.append({"action": action, "text": _edge_label(edge, nodes),
+                                 "reason": "同一关系出现在多条建议中"})
+                continue
+            candidate = _copy_state(state)
+            if action == "delete_edge":
+                candidate["deleted"].add(edge_id)
+                state = candidate
+                valid.append({"action": action, "edge_id": edge_id, "reason": reason,
+                              "label": "删除「" + _edge_label(edge, nodes) + "」"})
+                continue
+            candidate["reversed"].add(edge_id)
+            if _introduces_cycle(edges, state, candidate,
+                                 (edge["src_id"], edge["dst_id"])):
+                rejected.append({"action": action, "text": _edge_label(edge, nodes),
+                                 "reason": "反向会与现有前置关系形成环"})
+                continue
+            state = candidate
+            src, dst = nodes.get(edge["src_id"]), nodes.get(edge["dst_id"])
+            src_name = src["name"] if src else edge["src_id"]
+            dst_name = dst["name"] if dst else edge["dst_id"]
+            valid.append({
+                "action": action, "edge_id": edge_id, "reason": reason,
+                "label": f"把「{_edge_label(edge, nodes)}」反转为「{dst_name} → {src_name}」",
+            })
+            continue
+
+        # drop_node：只允许清理与其他节点完全无关的孤立概念
+        try:
+            node_id = int(raw.get("node_id"))
+        except (TypeError, ValueError):
+            node_id = 0
+        node = nodes.get(node_id)
+        if not node:
+            rejected.append({"action": action, "text": "删除孤立概念",
+                             "reason": f"节点 {node_id or '?'} 不属于该图谱"})
+            continue
+        if state["dropped"] & {node_id} or any(
+                node_id in group for group, _keep in state["merged"]):
+            rejected.append({"action": action, "text": f"删除「{node['name']}」",
+                             "reason": "同一概念出现在多条建议中"})
+            continue
+        related = [edge_id for edge_id, edge in edges.items()
+                   if edge_id not in state["deleted"]
+                   and node_id in (edge["src_id"], edge["dst_id"])]
+        if related:
+            rejected.append({"action": action, "text": f"删除「{node['name']}」",
+                             "reason": f"该概念还有 {len(related)} 条关系，请先删除关系"})
+            continue
+        state["dropped"].add(node_id)
+        valid.append({"action": action, "node_id": node_id, "reason": reason,
+                      "label": f"删除孤立概念「{node['name']}」"})
+    return valid, rejected, ""
+
+
+def snapshot_graph(db, graph_id):
+    """保存当前节点与关系，供体检应用后回滚。"""
+    nodes = [dict(row) for row in db.execute(
+        "SELECT id,name,normalized,category,definition,aliases,source_materials,"
+        "confidence,created_at,updated_at FROM kg_nodes WHERE graph_id=? ORDER BY id",
+        (graph_id,))]
+    edges = [dict(row) for row in db.execute(
+        "SELECT id,src_id,dst_id,relation,evidence,source_materials,confidence,"
+        "created_at FROM kg_edges WHERE graph_id=? ORDER BY id", (graph_id,))]
+    return {"nodes": nodes, "edges": edges}
+
+
+def _merge_nodes(db, graph_id, node_ids, keep_id):
+    """把一批节点合并到 keep 节点，关系重挂并去重。"""
+    placeholders = ",".join("?" * len(node_ids))
+    rows = db.execute(
+        f"SELECT * FROM kg_nodes WHERE graph_id=? AND id IN ({placeholders})",
+        (graph_id, *node_ids)).fetchall()
+    keep = next((row for row in rows if row["id"] == keep_id), None)
+    others = [row for row in rows if row["id"] != keep_id]
+    if not keep or not others:
+        return
+    aliases = _json_list(keep["aliases"])
+    sources = _sources(keep["source_materials"])
+    definition = keep["definition"] or ""
+    category = keep["category"] or ""
+    confidence = keep["confidence"] or 0
+    for other in others:
+        for name in [other["name"]] + _json_list(other["aliases"]):
+            if name and name != keep["name"] and name not in aliases:
+                aliases.append(name)
+        sources.extend(_sources(other["source_materials"]))
+        definition = definition or other["definition"] or ""
+        category = category or other["category"] or ""
+        confidence = max(confidence, other["confidence"] or 0)
+        for edge in db.execute(
+                "SELECT * FROM kg_edges WHERE graph_id=? AND (src_id=? OR dst_id=?)",
+                (graph_id, other["id"], other["id"])).fetchall():
+            src = keep_id if edge["src_id"] == other["id"] else edge["src_id"]
+            dst = keep_id if edge["dst_id"] == other["id"] else edge["dst_id"]
+            if src == dst:
+                db.execute("DELETE FROM kg_edges WHERE id=?", (edge["id"],))
+                continue
+            duplicate = db.execute(
+                "SELECT * FROM kg_edges WHERE graph_id=? AND src_id=? AND dst_id=? "
+                "AND relation=? AND id<>?",
+                (graph_id, src, dst, edge["relation"], edge["id"])).fetchone()
+            if duplicate:
+                merged_sources = sorted(set(
+                    _sources(duplicate["source_materials"])
+                    + _sources(edge["source_materials"])))
+                db.execute(
+                    "UPDATE kg_edges SET source_materials=?, evidence=?, confidence=? "
+                    "WHERE id=?",
+                    (_sources_text(merged_sources),
+                     duplicate["evidence"] or edge["evidence"],
+                     max(duplicate["confidence"] or 0, edge["confidence"] or 0),
+                     duplicate["id"]))
+                db.execute("DELETE FROM kg_edges WHERE id=?", (edge["id"],))
+            else:
+                db.execute("UPDATE kg_edges SET src_id=?, dst_id=? WHERE id=?",
+                           (src, dst, edge["id"]))
+        db.execute("DELETE FROM kg_nodes WHERE id=?", (other["id"],))
+    db.execute(
+        "UPDATE kg_nodes SET aliases=?, definition=?, category=?, source_materials=?,"
+        " confidence=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        (json.dumps(aliases, ensure_ascii=False), definition, category,
+         _sources_text(sources), confidence, keep_id))
+
+
+def reverse_edge(db, graph_id, edge_id):
+    """反向前置关系；若反向边已存在则合并去重。返回是否存在可反向的边。"""
+    edge = db.execute("SELECT * FROM kg_edges WHERE id=? AND graph_id=?",
+                      (edge_id, graph_id)).fetchone()
+    if not edge:
+        return False
+    mirror = db.execute(
+        "SELECT * FROM kg_edges WHERE graph_id=? AND src_id=? AND dst_id=? "
+        "AND relation=? AND id<>?",
+        (graph_id, edge["dst_id"], edge["src_id"], edge["relation"],
+         edge["id"])).fetchone()
+    if mirror:
+        merged_sources = sorted(set(_sources(mirror["source_materials"])
+                                    + _sources(edge["source_materials"])))
+        db.execute(
+            "UPDATE kg_edges SET source_materials=?, evidence=?, confidence=? WHERE id=?",
+            (_sources_text(merged_sources), mirror["evidence"] or edge["evidence"],
+             max(mirror["confidence"] or 0, edge["confidence"] or 0), mirror["id"]))
+        db.execute("DELETE FROM kg_edges WHERE id=?", (edge["id"],))
+    else:
+        db.execute("UPDATE kg_edges SET src_id=?, dst_id=? WHERE id=?",
+                   (edge["dst_id"], edge["src_id"], edge["id"]))
+    return True
+
+
+def apply_audit(db, graph_id, suggestions):
+    """按顺序应用已校验的建议，返回应用前快照。"""
+    snapshot = snapshot_graph(db, graph_id)
+    for item in suggestions or []:
+        action = item.get("action")
+        if action == "merge_nodes":
+            _merge_nodes(db, graph_id, item.get("node_ids") or [],
+                         item.get("keep_id"))
+        elif action == "reverse_edge":
+            reverse_edge(db, graph_id, item.get("edge_id"))
+        elif action == "delete_edge":
+            db.execute("DELETE FROM kg_edges WHERE id=? AND graph_id=?",
+                       (item.get("edge_id"), graph_id))
+        elif action == "drop_node":
+            db.execute("DELETE FROM kg_nodes WHERE id=? AND graph_id=?",
+                       (item.get("node_id"), graph_id))
+    db.execute("UPDATE knowledge_graphs SET updated_at=CURRENT_TIMESTAMP WHERE id=?",
+               (graph_id,))
+    db.commit()
+    return snapshot
+
+
+def restore_snapshot(db, graph_id, snapshot):
+    """回滚到快照：重建该图的节点与关系（保留原 ID）。"""
+    db.execute("DELETE FROM kg_edges WHERE graph_id=?", (graph_id,))
+    db.execute("DELETE FROM kg_nodes WHERE graph_id=?", (graph_id,))
+    for node in snapshot.get("nodes") or []:
+        db.execute(
+            "INSERT INTO kg_nodes(id,graph_id,name,normalized,category,definition,"
+            "aliases,source_materials,confidence,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (node["id"], graph_id, node["name"], node["normalized"],
+             node.get("category") or "", node.get("definition") or "",
+             node.get("aliases") or "", node.get("source_materials") or "",
+             node.get("confidence") or 0, node.get("created_at"),
+             node.get("updated_at")))
+    for edge in snapshot.get("edges") or []:
+        db.execute(
+            "INSERT INTO kg_edges(id,graph_id,src_id,dst_id,relation,evidence,"
+            "source_materials,confidence,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            (edge["id"], graph_id, edge["src_id"], edge["dst_id"], edge["relation"],
+             edge.get("evidence") or "", edge.get("source_materials") or "",
+             edge.get("confidence") or 0, edge.get("created_at")))
+    db.execute("UPDATE knowledge_graphs SET updated_at=CURRENT_TIMESTAMP WHERE id=?",
+               (graph_id,))
+    db.commit()
 

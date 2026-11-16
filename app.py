@@ -2983,6 +2983,29 @@ def _kg_material_requests(db, material_id):
     return result
 
 
+def _kg_audit_view(row):
+    """把一条体检记录转成模板可直接渲染的结构。"""
+    try:
+        items = json.loads(row["suggestions"] or "[]")
+    except (TypeError, ValueError):
+        items = []
+    try:
+        rejected = json.loads(row["rejected"] or "[]")
+    except (TypeError, ValueError):
+        rejected = []
+    for item in items:
+        item["action_label"] = kg_utils.AUDIT_ACTION_LABEL.get(
+            item.get("action"), item.get("action") or "")
+    return {
+        "id": row["id"], "status": row["status"],
+        "model": row["model"] or "", "error": row["error"] or "",
+        "created_at": _localtime(row["created_at"]),
+        "applied_at": _localtime(row["applied_at"]) if row["applied_at"] else "",
+        "items": items, "rejected": rejected,
+        "has_snapshot": bool(row["snapshot"]),
+    }
+
+
 @_routes.route("/knowledge-graphs/<oid:gid>")
 @role_required("teacher", "admin")
 def knowledge_graph_detail(gid):
@@ -2993,6 +3016,9 @@ def knowledge_graph_detail(gid):
     materials = [_kg_material_view(db, row) for row in rows]
     building = any(m["status"] in (kg_utils.STATUS_PENDING, kg_utils.STATUS_BUILDING)
                    for m in materials)
+    audits = [_kg_audit_view(row) for row in db.execute(
+        "SELECT * FROM kg_audits WHERE graph_id=? ORDER BY id DESC LIMIT 3",
+        (gid,)).fetchall()]
     return render_template(
         "knowledge_graph.html", graph=graph, materials=materials,
         counts=kg_utils.graph_counts(db, gid),
@@ -3000,6 +3026,8 @@ def knowledge_graph_detail(gid):
         nodes=kg_utils.list_nodes(db, gid), edges=kg_utils.list_edges(db, gid),
         building=building, relation_label=kg_utils.RELATION_LABEL,
         layered=kg_utils.layered_graph(db, gid),
+        cycles=kg_utils.prerequisite_cycles(db, gid),
+        audits=audits,
         max_upload_mb=cfg.KG_MAX_UPLOAD_MB,
         can_edit=g.user["role"] == "admin" or graph["created_by"] == g.user["id"])
 
@@ -3161,11 +3189,201 @@ def knowledge_graph_edit(gid):
     return redirect(url_for("knowledge_graph_detail", gid=gid))
 
 
+@_routes.route("/knowledge-graphs/<oid:gid>/edges/<oid:eid>/delete", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_edge_delete(gid, eid):
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    edge = db.execute(
+        "SELECT e.*, s.name AS src_name, d.name AS dst_name FROM kg_edges e "
+        "JOIN kg_nodes s ON s.id=e.src_id JOIN kg_nodes d ON d.id=e.dst_id "
+        "WHERE e.id=? AND e.graph_id=?", (eid, gid)).fetchone()
+    if not edge:
+        abort(404)
+    db.execute("DELETE FROM kg_edges WHERE id=?", (eid,))
+    db.execute("UPDATE knowledge_graphs SET updated_at=CURRENT_TIMESTAMP WHERE id=?",
+               (gid,))
+    db.commit()
+    log.info("删除知识图谱关系 user=%s#%s graph=%s edge=%s",
+             g.user["username"], g.user["id"], gid, eid)
+    flash(f"已删除关系「{edge['src_name']} → {edge['dst_name']}」")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/edges/<oid:eid>/reverse", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_edge_reverse(gid, eid):
+    """反向前置关系；先排除原边判断是否会制造新环，有重复边时直接去重。"""
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    edge = db.execute(
+        "SELECT e.*, s.name AS src_name, d.name AS dst_name FROM kg_edges e "
+        "JOIN kg_nodes s ON s.id=e.src_id JOIN kg_nodes d ON d.id=e.dst_id "
+        "WHERE e.id=? AND e.graph_id=?", (eid, gid)).fetchone()
+    if not edge:
+        abort(404)
+    if edge["relation"] != "prerequisite":
+        flash("只有前置关系可以反向")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    mirror = db.execute(
+        "SELECT id FROM kg_edges WHERE graph_id=? AND src_id=? AND dst_id=? "
+        "AND relation='prerequisite' AND id<>?",
+        (gid, edge["dst_id"], edge["src_id"], eid)).fetchone()
+    if not mirror and kg_utils.prerequisite_reachable(
+            db, gid, edge["src_id"], edge["dst_id"], exclude_edge_id=eid):
+        flash("反向会与现有前置关系形成环，已取消")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    kg_utils.reverse_edge(db, gid, eid)
+    db.execute("UPDATE knowledge_graphs SET updated_at=CURRENT_TIMESTAMP WHERE id=?",
+               (gid,))
+    db.commit()
+    log.info("反向知识图谱关系 user=%s#%s graph=%s edge=%s mirror=%s",
+             g.user["username"], g.user["id"], gid, eid, bool(mirror))
+    if mirror:
+        flash(f"反向边已存在，已合并去重为「{edge['dst_name']} → {edge['src_name']}」")
+    else:
+        flash(f"已反转为「{edge['dst_name']} → {edge['src_name']}」")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/audit", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_audit_run(gid):
+    """让模型给出结构化治理建议；服务端校验后只保存待确认的 diff。"""
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    api_url, api_key, model, err = _ai_endpoint(g.user["id"])
+    if err:
+        db.execute(
+            "INSERT INTO kg_audits(graph_id,status,model,error,created_by)"
+            " VALUES(?,?,?,?,?)",
+            (gid, kg_utils.AUDIT_FAILED, "", err, g.user["id"]))
+        db.commit()
+        flash(f"图谱体检未执行：{err}")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    operation = _start_ai_operation(g.user["id"], "kg_audit", model)
+    suggestions, rejected = [], []
+    try:
+        suggestions, rejected, err = kg_utils.analyze_graph(
+            db, gid, api_url, api_key, model, usage_hook=operation["usage_hook"])
+    except Exception as e:  # noqa: BLE001 体检失败要落状态，便于老师重试
+        err = str(e)
+        log.exception("知识图谱体检失败 graph=%s", gid)
+    finally:
+        _finish_ai_operation(operation, "failed" if err else "success", err)
+    if err:
+        status = kg_utils.AUDIT_FAILED
+        flash(f"图谱体检失败：{err}")
+    elif suggestions:
+        status = kg_utils.AUDIT_PENDING
+        note = f"体检完成：{len(suggestions)} 条建议待确认"
+        if rejected:
+            note += f"，{len(rejected)} 条未通过校验"
+        flash(note)
+    else:
+        status = kg_utils.AUDIT_CLEAN
+        flash("体检完成：未发现需要调整的关系" if not rejected
+              else f"体检完成：{len(rejected)} 条建议未通过校验")
+    db.execute(
+        "INSERT INTO kg_audits(graph_id,status,model,error,suggestions,rejected,"
+        "created_by) VALUES(?,?,?,?,?,?,?)",
+        (gid, status, model, err[:500],
+         json.dumps(suggestions, ensure_ascii=False),
+         json.dumps(rejected, ensure_ascii=False), g.user["id"]))
+    db.commit()
+    log.info("知识图谱体检 user=%s#%s graph=%s status=%s 建议=%s 拦截=%s",
+             g.user["username"], g.user["id"], gid, status,
+             len(suggestions), len(rejected))
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+def _kg_audit(gid, aid):
+    row = get_db().execute("SELECT * FROM kg_audits WHERE id=? AND graph_id=?",
+                           (aid, gid)).fetchone()
+    if not row:
+        abort(404)
+    return row
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/audit/<oid:aid>/apply", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_audit_apply(gid, aid):
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    audit = _kg_audit(gid, aid)
+    if audit["status"] != kg_utils.AUDIT_PENDING:
+        flash("该体检结果已处理，不能重复应用")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    try:
+        items = json.loads(audit["suggestions"] or "[]")
+    except (TypeError, ValueError):
+        items = []
+    if not items:
+        flash("没有可应用的建议")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    snapshot = kg_utils.apply_audit(db, gid, items)
+    db.execute("UPDATE kg_audits SET status=?, snapshot=?, applied_at=CURRENT_TIMESTAMP"
+               " WHERE id=?",
+               (kg_utils.AUDIT_APPLIED,
+                json.dumps(snapshot, ensure_ascii=False), aid))
+    db.commit()
+    log.info("应用知识图谱体检 user=%s#%s graph=%s audit=%s 建议=%s",
+             g.user["username"], g.user["id"], gid, aid, len(items))
+    flash(f"已应用 {len(items)} 条体检建议，可随时回滚")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/audit/<oid:aid>/rollback", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_audit_rollback(gid, aid):
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    audit = _kg_audit(gid, aid)
+    if audit["status"] != kg_utils.AUDIT_APPLIED or not audit["snapshot"]:
+        flash("这条体检结果没有可回滚的快照")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    later = db.execute(
+        "SELECT id FROM kg_audits WHERE graph_id=? AND id>? AND status=? LIMIT 1",
+        (gid, aid, kg_utils.AUDIT_APPLIED)).fetchone()
+    if later:
+        flash("之后已有新的体检结果被应用，请先回滚最新的那条")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    try:
+        snapshot = json.loads(audit["snapshot"])
+    except (TypeError, ValueError):
+        snapshot = {}
+    kg_utils.restore_snapshot(db, gid, snapshot)
+    db.execute("UPDATE kg_audits SET status=? WHERE id=?",
+               (kg_utils.AUDIT_ROLLED_BACK, aid))
+    db.commit()
+    log.info("回滚知识图谱体检 user=%s#%s graph=%s audit=%s",
+             g.user["username"], g.user["id"], gid, aid)
+    flash("已回滚到体检应用前的图谱状态")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/audit/<oid:aid>/discard", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_audit_discard(gid, aid):
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    audit = _kg_audit(gid, aid)
+    if audit["status"] != kg_utils.AUDIT_PENDING:
+        flash("该体检结果已处理")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    db.execute("UPDATE kg_audits SET status=? WHERE id=?",
+               (kg_utils.AUDIT_DISCARDED, aid))
+    db.commit()
+    flash("已忽略这次体检建议")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
 @_routes.route("/knowledge-graphs/<oid:gid>/delete", methods=["POST"])
 @role_required("teacher", "admin")
 def knowledge_graph_delete(gid):
     graph = _kg_graph(gid, edit=True)
     db = get_db()
+    db.execute("DELETE FROM kg_audits WHERE graph_id=?", (gid,))
     db.execute("DELETE FROM kg_chunks WHERE graph_id=?", (gid,))
     db.execute("DELETE FROM kg_edges WHERE graph_id=?", (gid,))
     db.execute("DELETE FROM kg_nodes WHERE graph_id=?", (gid,))

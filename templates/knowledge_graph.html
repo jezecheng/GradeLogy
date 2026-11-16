@@ -79,6 +79,21 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
 .kg-request-error { color: #b91c1c; white-space: normal; }
 .kg-note { color: #8a8f99; font-size: 12px; }
 .kg-arrow { color: #8a8f99; margin: 0 4px; }
+.kg-edge-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.kg-edge-actions form, .kg-audit-actions form, .kg-audit > form { margin: 0; }
+.kg-warn { background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px;
+  padding: 10px 12px; margin: 6px 0 10px; }
+.kg-cycle-list { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
+.kg-cycle-list li { margin: 3px 0; }
+.kg-audit { border-top: 1px solid #eef0f3; padding: 10px 0; }
+.kg-audit:first-of-type { border-top: 0; }
+.kg-audit-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px;
+  flex-wrap: wrap; }
+.kg-audit-run { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 4px 0 8px; }
+.kg-audit-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.kg-audit-status { border-radius: 999px; padding: 2px 10px; font-size: 12px;
+  background: #f1f2f4; color: #4b5563; }
 </style>
 
 <p class="muted small"><a href="{{ url_for('knowledge_graphs') }}">← 返回知识图谱列表</a></p>
@@ -233,6 +248,19 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
   {% if layered.has_cycle %}
   <p class="muted small">检测到前置关系成环，环上概念统一放在最后一层，建议检查这些关系的方向。</p>
   {% endif %}
+  {% if cycles %}
+  <div class="kg-warn">
+    <p><b>发现 {{ cycles | length }} 处前置关系成环</b>，成环会让分层失去先后顺序。可到下方「关系边」删除或反向可疑关系，也可以先跑一次「图谱体检」。</p>
+    <ul class="kg-cycle-list">
+      {% for c in cycles %}
+      <li>
+        <div class="kg-name">{{ c.node_names | join('、') }}</div>
+        <div class="kg-note">优先检查：{{ c.suggested_label }}{% if c.edges | length > 1 %}；环上关系：{% for e in c.edges %}{{ e.src_name }} → {{ e.dst_name }}（{{ ((e.confidence or 0) * 100) | round(0) | int }}%）{% if not loop.last %}；{% endif %}{% endfor %}{% endif %}</div>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
   <div class="kg-graph">
     <svg viewBox="0 0 {{ layered.width }} {{ layered.height }}"
          width="{{ layered.width }}" height="{{ layered.height }}" role="img"
@@ -313,7 +341,7 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
   <summary class="card-head"><h2>关系边 <span class="muted small">（{{ counts.edges }} 条，最多展示 200 条）</span></h2></summary>
   {% if edges %}
   <table class="kg">
-    <thead><tr><th>关系</th><th>依据</th><th>置信度</th></tr></thead>
+    <thead><tr><th>关系</th><th>依据</th><th>置信度</th>{% if can_edit %}<th>操作</th>{% endif %}</tr></thead>
     <tbody>
       {% for e in edges %}
       <tr>
@@ -324,6 +352,24 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
         </td>
         <td class="kg-note">{{ e.evidence or '—' }}</td>
         <td>{{ ((e.confidence or 0) * 100) | round(0) | int }}%</td>
+        {% if can_edit %}
+        <td class="kg-edge-actions">
+          {% if e.relation == 'prerequisite' %}
+          <form method="post"
+                action="{{ url_for('knowledge_graph_edge_reverse', gid=graph.id, eid=e.id) }}"
+                onsubmit="return confirm('把这条前置关系反向？系统会先检查是否会成环。')">
+            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+            <button class="ghost small">反向</button>
+          </form>
+          {% endif %}
+          <form method="post"
+                action="{{ url_for('knowledge_graph_edge_delete', gid=graph.id, eid=e.id) }}"
+                onsubmit="return confirm('删除这条关系？')">
+            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+            <button class="ghost small">删除</button>
+          </form>
+        </td>
+        {% endif %}
       </tr>
       {% endfor %}
     </tbody>
@@ -332,6 +378,82 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
   <p class="muted small">暂无关系。可再上传覆盖更完整的教材或考纲。</p>
   {% endif %}
 </details>
+
+{% if materials %}
+<details class="card kg-fold" id="kg-audit"
+         {% if audits and audits[0].status == '待确认' %}open{% endif %}>
+  <summary class="card-head"><h2>图谱体检 <span class="muted small">（AI 只给建议，确认后才改图）</span></h2></summary>
+  {% if can_edit %}
+  <form class="kg-audit-run" method="post"
+        action="{{ url_for('knowledge_graph_audit_run', gid=graph.id) }}"
+        onsubmit="this.querySelector('button').disabled = true; this.querySelector('button').textContent = '体检中…';">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <button class="ghost small">开始体检</button>
+    <span class="muted small">检查同义重复、方向错误与孤立概念；结果先预览，应用后可回滚。</span>
+  </form>
+  {% endif %}
+  {% if not audits %}
+  <p class="muted small">还没有体检记录。</p>
+  {% endif %}
+  {% for a in audits %}
+  <div class="kg-audit">
+    <div class="kg-audit-head">
+      <span class="kg-audit-status">{{ a.status }}</span>
+      <span class="muted small">{{ a.created_at }}{% if a.applied_at %} · 应用 {{ a.applied_at }}{% endif %}{% if a.model %} · {{ a.model }}{% endif %}</span>
+    </div>
+    {% if a.error %}
+    <p class="kg-request-error">{{ a.error }}</p>
+    {% endif %}
+    {% if a.items %}
+    <table class="kg">
+      <thead><tr><th>建议</th><th>类型</th><th>理由</th></tr></thead>
+      <tbody>
+        {% for item in a.items %}
+        <tr>
+          <td class="kg-name">{{ item.label }}</td>
+          <td>{{ item.action_label }}</td>
+          <td class="kg-note">{{ item.reason or '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% if a.rejected %}
+    <details>
+      <summary class="muted small">{{ a.rejected | length }} 条建议未通过校验</summary>
+      <ul class="kg-cycle-list">
+        {% for r in a.rejected %}
+        <li>{{ r.text }}：{{ r.reason }}</li>
+        {% endfor %}
+      </ul>
+    </details>
+    {% endif %}
+    {% if can_edit and a.status == '待确认' and a.items %}
+    <div class="kg-audit-actions">
+      <form method="post"
+            action="{{ url_for('knowledge_graph_audit_apply', gid=graph.id, aid=a.id) }}"
+            onsubmit="return confirm('应用这些建议会修改图谱，应用后仍可回滚。继续？')">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <button class="ghost small">应用建议</button>
+      </form>
+      <form method="post"
+            action="{{ url_for('knowledge_graph_audit_discard', gid=graph.id, aid=a.id) }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <button class="ghost small">忽略</button>
+      </form>
+    </div>
+    {% elif can_edit and a.status == '已应用' and a.has_snapshot %}
+    <form method="post"
+          action="{{ url_for('knowledge_graph_audit_rollback', gid=graph.id, aid=a.id) }}"
+          onsubmit="return confirm('回滚会用快照覆盖图谱当前状态。继续？')">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <button class="ghost small">回滚</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endfor %}
+</details>
+{% endif %}
 
 {% if materials %}
 <script>
