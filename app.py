@@ -3886,12 +3886,15 @@ def generate_report(db, sub_id, teacher_id, reuse=False):
                     teacher_id, "report_generate", model, course_id=sub["course_id"],
                     lecture_id=sub["lecture_id"], submission_id=sub_id)
                 try:
+                    kg_diag = _kg_diagnosis(db, sub)
+                    kg_context = _kg_diagnosis_text(kg_diag) if kg_diag else ""
                     detail = ai_report_comment(
                         questions, summary.get("weak_points") or [],
                         summary.get("evaluation", ""), api_url, api_key, model,
                         prompt=_prompt_content("report", course["report_prompt_id"] if course else 0),
                         usage_hook=operation["usage_hook"],
-                        max_tokens=_get_max_tokens(teacher_id, "max_tokens_report"))
+                        max_tokens=_get_max_tokens(teacher_id, "max_tokens_report"),
+                        kg_context=kg_context)
                 except Exception as e:
                     _finish_ai_operation(operation, "failed", str(e))
                     raise
@@ -3908,6 +3911,111 @@ def generate_report(db, sub_id, teacher_id, reuse=False):
                (md, json.dumps(detail, ensure_ascii=False) if detail else "", sub_id))
     db.commit()
     return md
+
+
+def _kg_diagnosis(db, sub):
+    """基于课程挂载的知识图谱，为批阅报告生成知识点诊断。
+
+    对每道错题/半对题关联的知识点：
+    1. 通过 knowledge_tags 匹配 KG 节点（按名称）
+    2. 查询该节点的前置知识（prerequisite 边）
+    3. 交叉比对学生在前置知识所属题目上的判定，找出「知识断层」
+    返回结构化列表，供报告页展示；无 KG 或无错题时返回 None。
+    """
+    graph_rows = db.execute(
+        "SELECT graph_id FROM course_knowledge_graphs WHERE course_id=?",
+        (sub["course_id"],)).fetchall()
+    if not graph_rows:
+        return None
+    graph_ids = [g["graph_id"] for g in graph_rows]
+
+    questions = db.execute(
+        "SELECT id,no,verdict FROM questions WHERE submission_id=? ORDER BY id",
+        (sub["id"],)).fetchall()
+    if not questions:
+        return None
+
+    # 本讲次所有 AI 知识标签，建立 qkey→tags 与 tag→qkeys 双向索引
+    tag_rows = db.execute(
+        "SELECT qkey,tag FROM knowledge_tags WHERE homework_id=?",
+        (sub["lecture_id"],)).fetchall()
+    if not tag_rows:
+        return None
+    qkey_to_tags, tag_to_qkeys = {}, {}
+    for t in tag_rows:
+        qkey_to_tags.setdefault(t["qkey"], []).append(t["tag"])
+        tag_to_qkeys.setdefault(t["tag"], set()).add(t["qkey"])
+
+    # 学生在每个知识点上的判定分布
+    tag_perf = {}
+    for q in questions:
+        for tag in qkey_to_tags.get(q["no"], []):
+            p = tag_perf.setdefault(tag, {"right": 0, "partial": 0, "wrong": 0, "total": 0})
+            p["total"] += 1
+            if q["verdict"] == "对":
+                p["right"] += 1
+            elif q["verdict"] == "半对":
+                p["partial"] += 1
+            else:
+                p["wrong"] += 1
+
+    # 薄弱知识点（有错题或半对题）
+    weak_tags = {t for t, p in tag_perf.items() if p["wrong"] + p["partial"] > 0}
+    if not weak_tags:
+        return None
+
+    # 按名称匹配 KG 节点
+    ph = ",".join("?" * len(graph_ids))
+    nodes = db.execute(
+        f"SELECT id,graph_id,name,definition FROM kg_nodes WHERE graph_id IN ({ph})",
+        graph_ids).fetchall()
+    name_to_node = {n["name"]: n for n in nodes}
+
+    diagnoses = []
+    for tag in sorted(weak_tags):
+        node = name_to_node.get(tag)
+        if not node:
+            continue
+        neighbors = kg_utils.concept_neighbors(db, node["graph_id"], node["id"])
+        prereqs = (neighbors or {}).get("prerequisites", [])
+        weak_pre, untested_pre = [], []
+        for p in prereqs:
+            p_perf = tag_perf.get(p["name"])
+            item = {"name": p["name"], "evidence": p.get("evidence", "")}
+            if p_perf and (p_perf["wrong"] + p_perf["partial"]) > 0:
+                item["perf"] = p_perf
+                weak_pre.append(item)
+            elif not p_perf:
+                untested_pre.append(item)
+        diagnoses.append({
+            "tag": tag,
+            "definition": node["definition"] or "",
+            "perf": tag_perf[tag],
+            "weak_prereqs": weak_pre,
+            "untested_prereqs": untested_pre,
+        })
+    return diagnoses or None
+
+
+def _kg_diagnosis_text(diagnoses):
+    """把 KG 诊断结果转成简洁文本，注入 AI 报告 prompt。"""
+    if not diagnoses:
+        return ""
+    lines = []
+    for d in diagnoses:
+        p = d["perf"]
+        line = f"- {d['tag']}（对{p['right']}/半对{p['partial']}/错{p['wrong']}）"
+        if d["definition"]:
+            line += f"：{d['definition']}"
+        if d["weak_prereqs"]:
+            pre_names = "、".join(
+                f"{x['name']}（对{x['perf']['right']}/半对{x['perf']['partial']}/错{x['perf']['wrong']}）"
+                for x in d["weak_prereqs"])
+            line += f"\n  前置知识断层：{pre_names}"
+        if d["untested_prereqs"]:
+            line += f"\n  本次未考的前置知识：{'、'.join(x['name'] for x in d['untested_prereqs'])}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def own_submission(sid):
@@ -3927,9 +4035,10 @@ def submission_report(sid):
     db = get_db()
     md = sub["report_md"]
     stu = db.execute("SELECT display_name FROM users WHERE id=?", (sub["student_id"],)).fetchone()
+    kg_diag = _kg_diagnosis(db, sub)
     return render_template("report.html", sub=sub, hw=hw, course=course, md=md,
                            body=render_markdown(md), student_name=stu["display_name"],
-                           is_teacher=True,
+                           is_teacher=True, kg_diagnosis=kg_diag,
                            ai_operations=_ai_operation_history(submission_id=sid, limit=5))
 
 
@@ -4036,9 +4145,11 @@ def student_report(sid):
         abort(404)
     hw = db.execute("SELECT * FROM lectures WHERE id=?", (sub["lecture_id"],)).fetchone()
     course = db.execute("SELECT * FROM courses WHERE id=?", (hw["course_id"],)).fetchone()
+    kg_diag = _kg_diagnosis(db, sub)
     return render_template("report.html", sub=sub, hw=hw, course=course, md=sub["report_md"],
                            body=render_markdown(sub["report_md"]),
-                           student_name=g.user["display_name"], is_teacher=False)
+                           student_name=g.user["display_name"], is_teacher=False,
+                           kg_diagnosis=kg_diag)
 
 
 def _consistency_issues():

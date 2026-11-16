@@ -477,8 +477,11 @@ REPORT_PROMPT = DEFAULT_REPORT_PROMPT + "\n" + REPORT_OUTPUT_CONTRACT
 
 
 def ai_report_comment(questions, weak_points, evaluation, api_url, api_key, model,
-                      max_tokens=2048, prompt="", usage_hook=None):
-    """根据逐题结果生成报告里的「评价」部分；失败返回 {}，不影响报告其余内容。"""
+                      max_tokens=2048, prompt="", usage_hook=None, kg_context=""):
+    """根据逐题结果生成报告里的「评价」部分；失败返回 {}，不影响报告其余内容。
+
+    kg_context: 知识图谱诊断摘要文本，注入 prompt 让 AI 引用前置知识断层做归因。
+    """
     def _field(q, *names):
         for name in names:
             if hasattr(q, "get"):
@@ -495,6 +498,11 @@ def ai_report_comment(questions, weak_points, evaluation, api_url, api_key, mode
     payload = json.dumps({"questions": brief, "weak_points": weak_points or [],
                           "evaluation": evaluation or ""}, ensure_ascii=False)
     base = (prompt.strip() + "\n" + REPORT_OUTPUT_CONTRACT) if prompt.strip() else REPORT_PROMPT
+    if kg_context:
+        base += ("\n\n以下是该课程知识图谱中与本次错题相关的诊断信息（前置知识断层）：\n"
+                 + kg_context
+                 + "\n请在评语中自然地引用这些前置知识关系，帮助学生理解错误的根因，"
+                   "并在下一步建议中优先推荐补强断层的前置概念。")
     content = [{"type": "text", "text": base + "\n\n数据：\n" + payload}]
     reply, finish, err = llm.chat(api_url, api_key, model, content,
                                   max_tokens=max_tokens, timeout=120, retries=1,

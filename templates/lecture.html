@@ -153,9 +153,10 @@
   <form method="post" action="{{ url_for('lecture_scope_save', hid=hw.id) }}" id="scope-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <table>
-      <tr><th style="width:60px">选中</th><th>题号</th><th>满分</th><th>说明</th><th>知识点标签</th></tr>
+      <tr><th style="width:40px">#</th><th style="width:60px">选中</th><th>题号</th><th>满分</th><th>说明</th><th>知识点标签</th></tr>
       {% for q in cands %}
       <tr>
+        <td class="muted">{{ loop.index }}</td>
         <td><input type="checkbox" name="no" value="{{ q.key or q.no }}" style="width:auto"
                    {% if not chosen or (q.key or q.no) in chosen %}checked{% endif %}></td>
         <td>{{ q.no }}</td>
