@@ -3922,10 +3922,16 @@ def _kg_diagnosis(db, sub):
     2. 查询该节点的前置知识（prerequisite 边）
     3. 交叉比对学生在前置知识所属题目上的判定，找出「知识断层」
     返回结构化列表，供报告页展示；无 KG 或无错题时返回 None。
+
+    注意：submissions 表没有 course_id 列，需通过 lecture_id 关联 lectures 表获取。
     """
+    lecture = db.execute("SELECT course_id FROM lectures WHERE id=?",
+                         (sub["lecture_id"],)).fetchone()
+    if not lecture:
+        return None
     graph_rows = db.execute(
         "SELECT graph_id FROM course_knowledge_graphs WHERE course_id=?",
-        (sub["course_id"],)).fetchall()
+        (lecture["course_id"],)).fetchall()
     if not graph_rows:
         return None
     graph_ids = [g["graph_id"] for g in graph_rows]
