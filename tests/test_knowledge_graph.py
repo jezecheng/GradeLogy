@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """学科知识图谱：增量合并、出处回收、AI 抽取与路由的测试。"""
+import contextlib
+import hashlib
 import io
 import json
 import os
@@ -19,7 +21,7 @@ except ImportError:
 
 import app as app_module  # noqa: E402
 import db as database  # noqa: E402
-from utilities import kg_text, knowledge_graph as kg  # noqa: E402
+from utilities import kg_cli, kg_text, kg_transfer, knowledge_graph as kg  # noqa: E402
 
 _TABLES = ("kg_members", "kg_audits", "kg_chunks", "kg_edges", "kg_nodes",
            "kg_materials", "knowledge_graphs", "tag_analyses", "question_tags",
@@ -1597,6 +1599,93 @@ class KGRouteTest(unittest.TestCase):
         con.close()
         self.assertEqual(count, 0)
 
+    def test_export_route_requires_manage_and_downloads_package(self):
+        graph = self._create_graph()
+        self.assertEqual(self.login(3).get(
+            self.url("knowledge_graph_export", gid=graph["id"])).status_code, 403)
+
+        def write_package(db, gid, upload_dir, output_path):
+            self.assertEqual(gid, graph["id"])
+            with zipfile.ZipFile(output_path, "w") as archive:
+                archive.writestr("manifest.json", "{}")
+            return {"graph_id": gid}
+
+        with mock.patch.object(app_module.kg_transfer, "export_graph",
+                               side_effect=write_package) as export:
+            response = self.client.get(self.url("knowledge_graph_export", gid=graph["id"]))
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.data.startswith(b"PK"))
+            self.assertIn("attachment", response.headers["Content-Disposition"])
+            response.close()
+        export.assert_called_once()
+
+    def test_import_route_uploads_package_as_current_user(self):
+        created = {}
+
+        def import_package(db, package_path, upload_dir, owner_id):
+            self.assertTrue(zipfile.is_zipfile(package_path))
+            cur = db.execute("INSERT INTO knowledge_graphs(subject,name,created_by) "
+                             "VALUES('化学','导入图谱',?)", (owner_id,))
+            db.commit()
+            created.update(id=cur.lastrowid, owner=owner_id)
+            return {"graph_id": cur.lastrowid}
+
+        payload = io.BytesIO()
+        with zipfile.ZipFile(payload, "w") as archive:
+            archive.writestr("manifest.json", "{}")
+        payload.seek(0)
+        with mock.patch.object(app_module.kg_transfer, "import_graph",
+                               side_effect=import_package) as importer:
+            response = self.client.post(
+                self.url("knowledge_graph_import"),
+                data={"_csrf": "test-token", "package": (payload, "graph.zip")},
+                content_type="multipart/form-data")
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(created["owner"], 2)
+        self.assertTrue(response.headers["Location"].endswith(
+            self.url("knowledge_graph_detail", gid=created["id"])))
+        importer.assert_called_once()
+        html = self.client.get(self.url("knowledge_graphs")).get_data(as_text=True)
+        self.assertIn("导入迁移包", html)
+        self.assertIn('data-dialog-open="kg-import"', html)
+
+    def test_failed_material_retry_reuses_successful_chunks(self):
+        graph = self._create_graph()
+        con = self._db()
+        con.execute("INSERT INTO kg_materials(id,graph_id,filename,stored_name,sha256,"
+                    "status,error,uploaded_by) VALUES(80,?,'x.txt','kg/x.txt',?,'失败',"
+                    "'模型超时',2)", (graph["id"], "e" * 64))
+        con.execute("INSERT INTO kg_chunks(id,graph_id,material_id,content,status,"
+                    "extraction_json,started_at,finished_at) VALUES(81,?,80,'A','success',"
+                    "'{\"concepts\":[]}','2026-01-01','2026-01-01')", (graph["id"],))
+        con.execute("INSERT INTO kg_chunks(id,graph_id,material_id,content,status,error) "
+                    "VALUES(82,?,80,'B','failed','模型超时')", (graph["id"],))
+        con.execute("INSERT INTO kg_chunks(id,graph_id,material_id,content,status) "
+                    "VALUES(83,?,80,'C','running')", (graph["id"],))
+        con.commit()
+        con.close()
+        html = self.client.get(
+            self.url("knowledge_graph_detail", gid=graph["id"])).get_data(as_text=True)
+        self.assertIn("重试建图", html)
+        with mock.patch.object(app_module, "_kg_start_build", return_value=True) as start:
+            response = self._post("knowledge_graph_material_retry", mid=80)
+            self.assertEqual(response.status_code, 302)
+            start.assert_called_once_with(graph["id"], 80, 2)
+            self._post("knowledge_graph_material_retry", mid=80)
+            start.assert_called_once()
+        con = self._db()
+        material = con.execute("SELECT * FROM kg_materials WHERE id=80").fetchone()
+        self.assertEqual(material["status"], kg.STATUS_PENDING)
+        self.assertEqual(material["error"], "")
+        chunks = {row["id"]: row for row in con.execute(
+            "SELECT * FROM kg_chunks WHERE material_id=80")}
+        self.assertEqual(chunks[81]["status"], "success")
+        self.assertEqual(chunks[81]["started_at"], "2026-01-01")
+        self.assertEqual(chunks[82]["status"], "pending")
+        self.assertEqual(chunks[82]["error"], "")
+        self.assertEqual(chunks[83]["status"], "pending")
+        con.close()
+
     def test_backup_includes_graph_tables_and_materials(self):
         graph = self._create_graph()
         abs_dir = os.path.join(app_module.UPLOAD_DIR, "kg", str(graph["id"]))
@@ -1631,6 +1720,288 @@ class KGRouteTest(unittest.TestCase):
             self.assertIn(f"uploads/kg/{graph['id']}/source.txt", names)
         finally:
             os.remove(handle.name)
+
+
+class KGTransferTest(unittest.TestCase):
+    """完整迁移包在两个独立 SQLite 实例之间往返，不依赖 Flask。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.source_upload = os.path.join(self.temp.name, "source-uploads")
+        self.target_upload = os.path.join(self.temp.name, "target-uploads")
+        self.package = os.path.join(self.temp.name, "graph.zip")
+        self.source = self._database()
+        self.target = self._database()
+        self.content = "氧化还原反应与电子守恒\n".encode("utf-8")
+        self._seed_source()
+        self._seed_target()
+        self.manifest = kg_transfer.export_graph(
+            self.source, 7, self.source_upload, self.package)
+
+    @staticmethod
+    def _database():
+        con = sqlite3.connect(":memory:")
+        con.row_factory = sqlite3.Row
+        con.executescript(database.SCHEMA)
+        return con
+
+    def tearDown(self):
+        self.source.close()
+        self.target.close()
+        self.temp.cleanup()
+
+    def _seed_source(self):
+        con = self.source
+        con.executemany(
+            "INSERT INTO users(id,username,password_hash,display_name,role) "
+            "VALUES(?,?,?,?,'teacher')",
+            [(2, "teacher", "teacher-secret", "源老师"),
+             (3, "other", "other-secret", "协作老师"),
+             (4, "missing", "missing-secret", "目标不存在")])
+        con.execute("INSERT INTO knowledge_graphs(id,subject,name,description,"
+                    "grade_level,created_by) VALUES(7,'化学','必修一','完整迁移','高一',2)")
+        path = os.path.join(self.source_upload, "kg", "7")
+        os.makedirs(path)
+        with open(os.path.join(path, "book.txt"), "wb") as fh:
+            fh.write(self.content)
+        con.execute(
+            "INSERT INTO kg_materials(id,graph_id,filename,stored_name,mime,size,sha256,"
+            "page_count,char_count,status,error,uploaded_by) "
+            "VALUES(11,7,'教材.txt','kg/7/book.txt','text/plain',?,?,1,?,"
+            "'完成','部分片段失败：模型超时',2)",
+            (len(self.content), hashlib.sha256(self.content).hexdigest(),
+             len(self.content.decode("utf-8"))))
+        con.execute(
+            "INSERT INTO kg_chunks(id,graph_id,material_id,page_no,chunk_no,content,"
+            "status,extraction_json) VALUES(21,7,11,1,0,?,'success',?)",
+            (self.content.decode("utf-8"),
+             json.dumps({"concepts": [{"name": "氧化还原"}], "relations": []},
+                        ensure_ascii=False)))
+        con.execute(
+            "INSERT INTO kg_chunks(id,graph_id,material_id,page_no,chunk_no,content,"
+            "status,error,extraction_json) VALUES(22,7,11,1,1,'第二块','failed',"
+            "'模型超时','{\"concepts\":[],\"relations\":[]}')")
+        con.executemany(
+            "INSERT INTO kg_nodes(id,graph_id,name,normalized,definition,source_materials) "
+            "VALUES(?,7,?,?,?,',11,')",
+            [(31, "氧化还原", "氧化还原", "电子转移"),
+             (32, "电子守恒", "电子守恒", "得失电子相等")])
+        con.execute("INSERT INTO kg_edges(id,graph_id,src_id,dst_id,relation,evidence,"
+                    "source_materials) VALUES(41,7,31,32,'prerequisite','教材原文',',11,')")
+        snapshot_nodes = [dict(row) for row in con.execute(
+            "SELECT * FROM kg_nodes WHERE graph_id=7 ORDER BY id")]
+        snapshot_nodes.append({
+            "id": 99, "name": "历史概念", "normalized": "历史概念", "category": "",
+            "definition": "已从当前图删除", "aliases": "", "source_materials": ",11,",
+            "confidence": 0.5, "created_at": None, "updated_at": None})
+        snapshot_edges = [dict(row) for row in con.execute(
+            "SELECT * FROM kg_edges WHERE graph_id=7")]
+        snapshot_edges.append({
+            "id": 999, "src_id": 99, "dst_id": 31, "relation": "related",
+            "evidence": "历史关系", "source_materials": ",11,", "confidence": 0.5,
+            "created_at": None})
+        con.execute(
+            "INSERT INTO kg_audits(id,graph_id,status,model,suggestions,rejected,snapshot,"
+            "operation_id,created_by) VALUES(51,7,'已应用','model-x',?,?,?,777,2)",
+            (json.dumps([{"action": "merge_nodes", "node_ids": [31, 32],
+                          "keep_id": 31, "reason": "同义"}], ensure_ascii=False),
+             json.dumps([{"action": "delete_edge", "edge_id": 999,
+                          "reason": "历史拒绝项"}], ensure_ascii=False),
+             json.dumps({"nodes": snapshot_nodes, "edges": snapshot_edges},
+                        ensure_ascii=False)))
+        con.executemany("INSERT INTO kg_members(graph_id,user_id,role) VALUES(7,?,?)",
+                        [(3, "edit"), (4, "manage")])
+        con.commit()
+
+    def _seed_target(self):
+        con = self.target
+        con.executemany(
+            "INSERT INTO users(id,username,password_hash,display_name,role) "
+            "VALUES(?,?,?,?,'teacher')",
+            [(20, "owner", "owner-secret", "新所有者"),
+             (30, "other", "target-secret", "同名协作老师")])
+        con.execute("INSERT INTO knowledge_graphs(id,subject,name,created_by) "
+                    "VALUES(100,'数学','既有图谱',20)")
+        con.execute("INSERT INTO kg_materials(id,graph_id,filename,stored_name,size,"
+                    "sha256,uploaded_by) VALUES(500,100,'old.txt','kg/100/old.txt',0,?,20)",
+                    ("0" * 64,))
+        con.execute("INSERT INTO kg_chunks(id,graph_id,material_id,content) "
+                    "VALUES(550,100,500,'旧文本')")
+        con.executemany("INSERT INTO kg_nodes(id,graph_id,name,normalized) VALUES(?,100,?,?)",
+                        [(600, "既有A", "既有A"), (601, "既有B", "既有B")])
+        con.execute("INSERT INTO kg_edges(id,graph_id,src_id,dst_id,relation) "
+                    "VALUES(650,100,600,601,'related')")
+        con.execute("INSERT INTO kg_audits(id,graph_id,status,created_by) "
+                    "VALUES(700,100,'无需调整',20)")
+        con.execute("INSERT INTO courses(id,name,teacher_id) VALUES(900,'目标课程',20)")
+        con.commit()
+
+    def test_roundtrip_remaps_all_ids_users_and_course(self):
+        with zipfile.ZipFile(self.package) as archive:
+            self.assertEqual(set(archive.namelist()),
+                             {"manifest.json", "data.json", "files/11/教材.txt"})
+            raw = archive.read("data.json")
+            self.assertNotIn(b"teacher-secret", raw)
+            data = json.loads(raw)
+            self.assertEqual(data["users"]["2"], "teacher")
+        self.assertEqual(self.manifest["counts"]["kg_nodes"], 2)
+        inspected = kg_transfer.inspect_graph(self.source, 7)
+        self.assertEqual(inspected["counts"]["chunks"], 2)
+        self.assertEqual(len(inspected["recent_errors"]), 2)
+
+        result = kg_transfer.import_graph(
+            self.target, self.package, self.target_upload, 20, course_id=900)
+        gid = result["graph_id"]
+        self.assertNotEqual(gid, 7)
+        graph = self.target.execute("SELECT * FROM knowledge_graphs WHERE id=?", (gid,)).fetchone()
+        self.assertEqual(graph["created_by"], 20)
+        self.assertEqual(graph["name"], "必修一")
+        self.assertIsNotNone(self.target.execute(
+            "SELECT 1 FROM course_knowledge_graphs WHERE course_id=900 AND graph_id=?",
+            (gid,)).fetchone())
+        material = self.target.execute(
+            "SELECT * FROM kg_materials WHERE graph_id=?", (gid,)).fetchone()
+        self.assertNotEqual(material["id"], 11)
+        self.assertEqual(material["uploaded_by"], 20)
+        self.assertTrue(material["stored_name"].startswith(f"kg/{gid}/"))
+        with open(os.path.join(self.target_upload, material["stored_name"]), "rb") as fh:
+            self.assertEqual(fh.read(), self.content)
+        nodes = {row["name"]: row for row in self.target.execute(
+            "SELECT * FROM kg_nodes WHERE graph_id=?", (gid,))}
+        self.assertEqual(set(nodes), {"氧化还原", "电子守恒"})
+        for node in nodes.values():
+            self.assertEqual(node["source_materials"], f",{material['id']},")
+        edge = self.target.execute("SELECT * FROM kg_edges WHERE graph_id=?", (gid,)).fetchone()
+        self.assertNotEqual(edge["id"], 41)
+        self.assertEqual(edge["src_id"], nodes["氧化还原"]["id"])
+        self.assertEqual(edge["dst_id"], nodes["电子守恒"]["id"])
+        self.assertEqual(edge["source_materials"], f",{material['id']},")
+        audit = self.target.execute("SELECT * FROM kg_audits WHERE graph_id=?", (gid,)).fetchone()
+        self.assertIsNone(audit["operation_id"])
+        self.assertEqual(audit["created_by"], 20)
+        suggestion = json.loads(audit["suggestions"])[0]
+        self.assertEqual(suggestion["keep_id"], nodes["氧化还原"]["id"])
+        self.assertEqual(suggestion["node_ids"],
+                         [nodes["氧化还原"]["id"], nodes["电子守恒"]["id"]])
+        rejected = json.loads(audit["rejected"])[0]
+        self.assertNotEqual(rejected["edge_id"], 999)
+        snapshot = json.loads(audit["snapshot"])
+        snapshot_nodes = {row["name"]: row for row in snapshot["nodes"]}
+        self.assertEqual(snapshot_nodes["氧化还原"]["id"], nodes["氧化还原"]["id"])
+        self.assertNotIn(snapshot_nodes["历史概念"]["id"],
+                         {row["id"] for row in nodes.values()})
+        snapshot_edges = {row["evidence"]: row for row in snapshot["edges"]}
+        self.assertEqual(snapshot_edges["教材原文"]["id"], edge["id"])
+        self.assertNotEqual(snapshot_edges["历史关系"]["id"], edge["id"])
+        members = self.target.execute(
+            "SELECT user_id,role FROM kg_members WHERE graph_id=?", (gid,)).fetchall()
+        self.assertEqual([(row["user_id"], row["role"]) for row in members], [(30, "edit")])
+        self.assertEqual(self.target.execute(
+            "SELECT COUNT(*) FROM ai_operations").fetchone()[0], 0)
+        self.assertFalse(self.target.in_transaction)
+
+        duplicate = kg_transfer.import_graph(
+            self.target, self.package, self.target_upload, 20)
+        self.assertNotEqual(duplicate["graph_id"], gid)
+        self.assertEqual(self.target.execute(
+            "SELECT COUNT(*) FROM knowledge_graphs").fetchone()[0], 3)
+
+    def test_cli_status_export_and_import(self):
+        source_db = os.path.join(self.temp.name, "source.db")
+        target_db = os.path.join(self.temp.name, "target.db")
+        for connection, path in ((self.source, source_db), (self.target, target_db)):
+            with contextlib.closing(sqlite3.connect(path)) as disk:
+                connection.backup(disk)
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = kg_cli.main([
+                "--db", source_db, "--storage", self.source_upload, "status", "7"])
+        self.assertEqual(code, 0)
+        self.assertIn("图谱 #7：必修一", stdout.getvalue())
+        self.assertIn("节点 2；关系 1；材料 1；文本块 2", stdout.getvalue())
+        self.assertIn("模型超时", stdout.getvalue())
+
+        cli_package = os.path.join(self.temp.name, "cli-graph.zip")
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = kg_cli.main([
+                "--db", source_db, "--storage", self.source_upload,
+                "export", "7", "--output", cli_package])
+        self.assertEqual(code, 0)
+        self.assertIn("导出成功", stdout.getvalue())
+        self.assertIn("材料 1 份；节点 2 个；关系 1 条", stdout.getvalue())
+        self.assertTrue(zipfile.is_zipfile(cli_package))
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = kg_cli.main([
+                "--db", target_db, "--storage", self.target_upload,
+                "import", cli_package, "--owner", "owner", "--course-id", "900"])
+        self.assertEqual(code, 0)
+        self.assertIn("导入成功：新图谱 #", stdout.getvalue())
+        self.assertIn("已绑定课程 #900", stdout.getvalue())
+
+        with contextlib.closing(sqlite3.connect(target_db)) as imported:
+            imported.row_factory = sqlite3.Row
+            graph = imported.execute(
+                "SELECT * FROM knowledge_graphs WHERE name='必修一'").fetchone()
+            self.assertIsNotNone(graph)
+            self.assertEqual(graph["created_by"], 20)
+            self.assertIsNotNone(imported.execute(
+                "SELECT 1 FROM course_knowledge_graphs WHERE course_id=900 AND graph_id=?",
+                (graph["id"],)).fetchone())
+            material = imported.execute(
+                "SELECT stored_name FROM kg_materials WHERE graph_id=?",
+                (graph["id"],)).fetchone()
+        with open(os.path.join(self.target_upload, material["stored_name"]), "rb") as fh:
+            self.assertEqual(fh.read(), self.content)
+
+    def test_malicious_archives_are_rejected_before_writing(self):
+        with zipfile.ZipFile(self.package) as source:
+            manifest = source.read("manifest.json")
+            data = source.read("data.json")
+        for case in ("traversal", "duplicate", "symlink"):
+            with self.subTest(case=case):
+                path = os.path.join(self.temp.name, f"{case}.zip")
+                with zipfile.ZipFile(path, "w") as archive:
+                    archive.writestr("manifest.json", manifest)
+                    if case == "duplicate":
+                        with self.assertWarns(UserWarning):
+                            archive.writestr("manifest.json", manifest)
+                    archive.writestr("data.json", data)
+                    if case == "traversal":
+                        archive.writestr("../escape.txt", "bad")
+                    elif case == "symlink":
+                        info = zipfile.ZipInfo("files/11/link")
+                        info.external_attr = 0o120777 << 16
+                        archive.writestr(info, "target")
+                with self.assertRaises(kg_transfer.KGTransferError):
+                    kg_transfer.import_graph(self.target, path, self.target_upload, 20)
+                self.assertEqual(self.target.execute(
+                    "SELECT COUNT(*) FROM knowledge_graphs").fetchone()[0], 1)
+        self.assertFalse(os.path.exists(os.path.join(self.temp.name, "escape.txt")))
+
+    def test_checksum_failure_rolls_back_rows_and_files(self):
+        with zipfile.ZipFile(self.package) as source:
+            manifest_text = source.read("manifest.json")
+            data_text = source.read("data.json")
+            manifest = json.loads(manifest_text)
+            material_path = manifest["materials"][0]["archive_path"]
+        bad_package = os.path.join(self.temp.name, "bad-checksum.zip")
+        with zipfile.ZipFile(bad_package, "w") as archive:
+            archive.writestr("manifest.json", manifest_text)
+            archive.writestr("data.json", data_text)
+            archive.writestr(material_path, b"X" * len(self.content))
+        with self.assertRaisesRegex(kg_transfer.KGTransferError, "SHA256"):
+            kg_transfer.import_graph(self.target, bad_package, self.target_upload, 20)
+        self.assertEqual(self.target.execute(
+            "SELECT COUNT(*) FROM knowledge_graphs").fetchone()[0], 1)
+        self.assertEqual(self.target.execute(
+            "SELECT COUNT(*) FROM kg_nodes WHERE graph_id<>100").fetchone()[0], 0)
+        kg_dir = os.path.join(self.target_upload, "kg")
+        self.assertEqual(os.listdir(kg_dir) if os.path.isdir(kg_dir) else [], [])
+        self.assertFalse(self.target.in_transaction)
 
 
 if __name__ == "__main__":

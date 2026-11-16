@@ -3,7 +3,16 @@
 import os
 import re
 
-LOG_NAME_RE = re.compile(r"app\.log(?:\.[1-5])?")
+LOG_CATEGORIES = (
+    ("all", "全部日志", "app.log"),
+    ("system", "系统日志", "system.log"),
+    ("user", "用户日志", "user.log"),
+    ("ai", "AI 使用日志", "ai.log"),
+    ("kg", "知识图谱日志", "kg.log"),
+    ("grading", "批阅日志", "grading.log"),
+    ("security", "安全日志", "security.log"),
+)
+LOG_NAME_RE = re.compile(r"(?:app|system|user|ai|kg|grading|security)\.log(?:\.[1-5])?")
 INITIAL_BYTES = 64 * 1024
 INITIAL_LINES = 200
 MAX_BYTES = 256 * 1024
@@ -25,13 +34,15 @@ def resolve_log(log_dir, name):
 
 def list_logs(log_dir):
     items = []
-    for name in ["app.log"] + [f"app.log.{n}" for n in range(1, 6)]:
-        try:
-            path = resolve_log(log_dir, name)
-            stat = os.stat(path)
-        except (FileNotFoundError, OSError):
-            continue
-        items.append({"name": name, "size": stat.st_size, "mtime": stat.st_mtime})
+    for category, label, base_name in LOG_CATEGORIES:
+        for name in [base_name] + [f"{base_name}.{n}" for n in range(1, 6)]:
+            try:
+                path = resolve_log(log_dir, name)
+                stat = os.stat(path)
+            except (FileNotFoundError, OSError):
+                continue
+            items.append({"name": name, "category": category, "category_label": label,
+                          "size": stat.st_size, "mtime": stat.st_mtime})
     return items
 
 

@@ -84,8 +84,18 @@ def ensure_dirs():
         os.makedirs(path, exist_ok=True)
 
 
+LOG_CATEGORIES = {
+    "gradelogy.system": "system.log",
+    "gradelogy.user": "user.log",
+    "gradelogy.ai": "ai.log",
+    "gradelogy.kg": "kg.log",
+    "gradelogy.grading": "grading.log",
+    "gradelogy.security": "security.log",
+}
+
+
 def setup_logging():
-    """控制台 + 轮转文件双输出。重复调用只生效一次。"""
+    """控制台 + 聚合/分类轮转文件输出。重复调用只生效一次。"""
     root = logging.getLogger()
     if getattr(root, "_gradelogy_ready", False):
         return
@@ -100,9 +110,19 @@ def setup_logging():
         os.makedirs(LOG_DIR, exist_ok=True)
         file_handler = RotatingFileHandler(os.path.join(LOG_DIR, "app.log"),
                                            maxBytes=5 * 1024 * 1024,
-                                           backupCount=5, encoding="utf-8")
+                                           backupCount=5, encoding="utf-8",
+                                           delay=True)
         file_handler.setFormatter(fmt)
         root.addHandler(file_handler)
+        for logger_name, filename in LOG_CATEGORIES.items():
+            category = logging.getLogger(logger_name)
+            handler = RotatingFileHandler(os.path.join(LOG_DIR, filename),
+                                          maxBytes=5 * 1024 * 1024,
+                                          backupCount=5, encoding="utf-8",
+                                          delay=True)
+            handler.setFormatter(fmt)
+            category.addHandler(handler)
+            category.propagate = True
     except OSError:
         # 日志目录不可写不应阻断启动，控制台输出仍然可用
         root.warning("日志目录不可写，已降级为仅控制台输出：%s", LOG_DIR)

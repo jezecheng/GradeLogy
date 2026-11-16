@@ -3,6 +3,7 @@
 import atexit
 import io
 import json
+import logging
 import os
 import shutil
 import sqlite3
@@ -32,12 +33,19 @@ class AdminInsightsTest(unittest.TestCase):
         app_module.app.config.update(TESTING=True)
         app_module.cfg.DISPLAY_TIMEZONE = "Asia/Shanghai"
         app_module.cfg.LEGACY_TIMEZONE = "Asia/Shanghai"
-        for n in range(6):
-            name = "app.log" if n == 0 else f"app.log.{n}"
-            try:
-                os.remove(os.path.join(app_module.cfg.LOG_DIR, name))
-            except OSError:
-                pass
+        loggers = [logging.getLogger()] + [
+            logging.getLogger(name) for name in app_module.cfg.LOG_CATEGORIES]
+        for logger in loggers:
+            for handler in logger.handlers:
+                if isinstance(handler, logging.FileHandler):
+                    handler.close()
+        for _category, _label, base in logview.LOG_CATEGORIES:
+            for n in range(6):
+                name = base if n == 0 else f"{base}.{n}"
+                try:
+                    os.remove(os.path.join(app_module.cfg.LOG_DIR, name))
+                except OSError:
+                    pass
         con = sqlite3.connect(app_module.DB_PATH)
         for table in ("ai_usage_events", "ai_operations", "settings",
                       "course_teachers", "courses", "users"):
@@ -414,6 +422,27 @@ class AdminInsightsTest(unittest.TestCase):
         truncated = logview.read_chunk(app_module.cfg.LOG_DIR, "app.log", rest["cursor"])
         self.assertTrue(truncated["reset"])
         self.assertEqual(truncated["lines"], ["x"])
+
+    def test_log_categories_files_and_admin_groups(self):
+        logger = logging.getLogger("gradelogy.kg")
+        logger.info("分类落盘测试 graph=42")
+        for handler in list(logger.handlers) + list(logging.getLogger().handlers):
+            handler.flush()
+        for name in ("kg.log", "app.log"):
+            with open(os.path.join(app_module.cfg.LOG_DIR, name), encoding="utf-8") as f:
+                self.assertIn("分类落盘测试 graph=42", f.read())
+
+        self.write_log("system.log", b"system line\n")
+        self.write_log("ai.log.1", b"old ai line\n")
+        files = logview.list_logs(app_module.cfg.LOG_DIR)
+        by_name = {item["name"]: item for item in files}
+        self.assertEqual(by_name["system.log"]["category_label"], "系统日志")
+        self.assertEqual(by_name["ai.log.1"]["category"], "ai")
+        html = self.login().get("/admin/logs?name=ai.log.1").get_data(as_text=True)
+        self.assertIn("日志监控", html)
+        self.assertIn('label="AI 使用日志"', html)
+        self.assertIn('label="知识图谱日志"', html)
+        self.assertIn("ai.log.1", html)
 
     def test_log_whitelist_routes_and_download(self):
         path = self.write_log("app.log", b"2026-01-01 00:00:00,000 INFO test: hello\n")

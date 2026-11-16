@@ -55,6 +55,7 @@ from model_catalog import sync_models_for_teacher as _sync_models_for_teacher
 from utilities import assistant, course_export, llm, logview, roster, storage
 from utilities import knowledge_graph as kg_utils
 from utilities import kg_text
+from utilities import kg_transfer
 from utilities import tags as tag_utils
 from utilities.report import _overall_text, build_report_md, render_markdown
 from utilities.uploads import (_student_files, _validate_upload, allowed_file, file_list,
@@ -215,7 +216,11 @@ class SignedIdConverter(BaseConverter):
 
 _id_signer = None   # 由 create_app() 按应用密钥初始化
 
-log = logging.getLogger("gradelogy")
+log = logging.getLogger("gradelogy.system")
+user_log = logging.getLogger("gradelogy.user")
+kg_log = logging.getLogger("gradelogy.kg")
+grading_log = logging.getLogger("gradelogy.grading")
+security_log = logging.getLogger("gradelogy.security")
 
 APP_STARTED_AT = datetime.now()
 
@@ -602,6 +607,10 @@ def _mark_request_start():
 @_routes.after_request
 def _access_log(resp):
     """每个请求写入一条访问日志；静态资源与健康检查跳过，避免轮询刷屏。"""
+    if request.endpoint == "knowledge_graph_status":
+        kg_log.debug("KG 状态轮询 path=%s status=%s ip=%s",
+                     request.path, resp.status_code, request.remote_addr or "-")
+        return resp
     if request.endpoint in ("static", "healthz", "admin_logs_tail"):
         return resp
     started = getattr(g, "request_started", None)
@@ -610,6 +619,16 @@ def _access_log(resp):
     who = f"{user['username']}#{user['id']}" if user else "-"
     log.info("HTTP %s %s %s %.0fms user=%s ip=%s", request.method,
              request.path, resp.status_code, cost_ms, who, request.remote_addr or "-")
+    if (request.method in ("POST", "PUT", "PATCH", "DELETE") and user
+            and 200 <= resp.status_code < 400):
+        objects = ",".join(f"{key}={value}" for key, value in
+                           sorted((request.view_args or {}).items())) or "-"
+        user_log.info(
+            "用户写操作 user=%s#%s role=%s method=%s endpoint=%s path=%s "
+            "objects=%s status=%s ip=%s",
+            user["username"], user["id"], user["role"], request.method,
+            request.endpoint, request.path, objects, resp.status_code,
+            request.remote_addr or "-")
     # 批改是长任务，单独看；其余接口超过 3 秒视为慢请求
     if cost_ms >= 3000 and request.endpoint != "submission_grade":
         log.warning("慢请求 %s %s %.0fms", request.method, request.path, cost_ms)
@@ -652,7 +671,7 @@ def limit_body_size():
 
     必须排在 CSRF 校验之前：CSRF 会解析表单，超大请求应在解析前就拒绝。
     """
-    if request.endpoint == "admin_restore":
+    if request.endpoint in ("admin_restore", "knowledge_graph_import"):
         cap = cfg.MAX_RESTORE_MB
     elif request.endpoint == "knowledge_graph_upload":
         cap = cfg.KG_MAX_UPLOAD_MB
@@ -672,8 +691,8 @@ def csrf_protect():
     expect = session.get("_csrf") or ""
     got = request.headers.get("X-CSRF-Token") or request.form.get("_csrf") or ""
     if not expect or not got or not secrets.compare_digest(expect, got):
-        log.warning("CSRF 校验失败 method=%s path=%s ip=%s",
-                    request.method, request.path, request.remote_addr)
+        security_log.warning("CSRF 校验失败 method=%s path=%s ip=%s",
+                             request.method, request.path, request.remote_addr)
         abort(400, description="页面已过期或请求来源不可信，请刷新页面后重试。")
     return None
 
@@ -719,12 +738,19 @@ def bad_request(e):
 
 @_routes.errorhandler(413)
 def too_large(e):
+    security_log.warning("上传内容过大 method=%s path=%s size=%s ip=%s",
+                         request.method, request.path, request.content_length or 0,
+                         request.remote_addr or "-")
     msg = getattr(e, "description", "") or "上传内容过大。"
     return render_template("error.html", code=413, msg=msg), 413
 
 
 @_routes.errorhandler(403)
 def forbidden(_):
+    user = g.get("user")
+    security_log.warning("访问拒绝 user=%s method=%s path=%s ip=%s",
+                         f"{user['username']}#{user['id']}" if user else "-",
+                         request.method, request.path, request.remote_addr or "-")
     return render_template("error.html", code=403, msg="你没有访问该页面的权限。"), 403
 
 
@@ -755,17 +781,20 @@ def login():
             db = get_db()
             db.execute("UPDATE users SET last_login_at=CURRENT_TIMESTAMP WHERE id=?", (user["id"],))
             db.commit()
-            log.info("登录成功 user=%s role=%s ip=%s",
-                     username, user["role"], request.remote_addr or "-")
+            user_log.info("登录成功 user=%s#%s role=%s ip=%s",
+                          username, user["id"], user["role"], request.remote_addr or "-")
             nxt = _safe_next(request.args.get("next"))
             return redirect(nxt or url_for("index"))
-        log.warning("登录失败 user=%s ip=%s", username or "-", request.remote_addr or "-")
+        security_log.warning("登录失败 user=%s ip=%s", username or "-", request.remote_addr or "-")
         flash("用户名或密码错误")
     return render_template("login.html")
 
 
 @_routes.route("/logout")
 def logout():
+    if g.user:
+        user_log.info("退出登录 user=%s#%s ip=%s",
+                      g.user["username"], g.user["id"], request.remote_addr or "-")
     session.clear()
     return redirect(url_for("login"))
 
@@ -785,8 +814,8 @@ def change_password():
             db.execute("UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?",
                        (generate_password_hash(new), g.user["id"]))
             db.commit()
-            log.info("修改密码 user=%s#%s ip=%s", g.user["username"], g.user["id"],
-                     request.remote_addr or "-")
+            user_log.info("修改密码 user=%s#%s ip=%s", g.user["username"], g.user["id"],
+                          request.remote_addr or "-")
             flash("密码已更新")
             return redirect(url_for("index"))
     return render_template("password.html")
@@ -942,6 +971,9 @@ def admin_logs_download(name):
     try:
         path = logview.resolve_log(cfg.LOG_DIR, name)
     except FileNotFoundError:
+        security_log.warning("非法日志下载 user=%s#%s name=%s ip=%s",
+                             g.user["username"], g.user["id"], name,
+                             request.remote_addr or "-")
         abort(404)
     resp = send_file(path, as_attachment=True, download_name=name,
                      mimetype="text/plain; charset=utf-8")
@@ -2346,7 +2378,7 @@ def _run_grading_job(teacher_id, sid, operation):
                 usage_hook=operation["usage_hook"])
             if gen["error"]:
                 _finish_ai_operation(operation, "failed", gen["error"])
-                log.warning("后台批阅失败 submission=%s 原因=%s", sid, gen["error"])
+                grading_log.warning("后台批阅失败 submission=%s 原因=%s", sid, gen["error"])
                 return
             _save_grading_result(db, sid, gen)
             _finish_ai_operation(operation, "success")
@@ -2354,9 +2386,9 @@ def _run_grading_job(teacher_id, sid, operation):
                 generate_report(db, sid, teacher_id)
             except Exception:  # 报告生成失败不影响批阅结果本身
                 log.exception("生成批改报告失败 submission=%s", sid)
-            log.info("后台批阅完成 submission=%s 题数=%s", sid, len(gen["questions"]))
+            grading_log.info("后台批阅完成 submission=%s 题数=%s", sid, len(gen["questions"]))
         except Exception as e:
-            log.exception("后台批阅异常 submission=%s", sid)
+            grading_log.exception("后台批阅异常 submission=%s", sid)
             _finish_ai_operation(operation, "failed", str(e))
 
 
@@ -2443,7 +2475,7 @@ def submission_grade(sid):
         flash(err)
         return _back_to_page()
 
-    log.info("已加入批阅队列 submission=%s lecture=%s file=%s answer=%s pages=%s",
+    grading_log.info("已加入批阅队列 submission=%s lecture=%s file=%s answer=%s pages=%s",
              sid, hw["id"], sub["file_path"], hw["answer_pdf"], hw["answer_pages"])
     flash("已加入批阅队列，可以离开本页；完成后回到讲次页或核对页查看结果。")
     return _back_to_page()
@@ -2818,6 +2850,8 @@ def course_knowledge_graphs_save(cid):
     db.executemany("INSERT INTO course_knowledge_graphs(course_id, graph_id) VALUES(?,?)",
                    [(cid, gid) for gid in sorted(chosen)])
     db.commit()
+    kg_log.info("课程绑定知识图谱 user=%s#%s course=%s graphs=%s",
+                g.user["username"], g.user["id"], cid, sorted(chosen))
     flash(f"已关联 {len(chosen)} 张知识图谱" if chosen else "已解除全部知识图谱关联")
     return redirect(url_for("course_detail", cid=cid))
 
@@ -3009,7 +3043,7 @@ def _kg_build_worker(graph_id, material_id, teacher_id):
                                    "finished_at=CURRENT_TIMESTAMP WHERE id=?",
                                    (kg_utils.STATUS_FAILED, str(e)[:500], material_id))
                         db.commit()
-                        log.exception("知识图谱构建失败 material=%s", material_id)
+                        kg_log.exception("知识图谱构建失败 material=%s", material_id)
                         return
                     if result:
                         _finish_ai_operation(operation, "success", "")
@@ -3037,7 +3071,7 @@ def start_kg_recovery():
     for row in rows:
         _kg_start_build(row["graph_id"], row["id"], row["uploaded_by"])
     if rows:
-        log.info("已恢复 %s 份知识图谱资料的建图队列", len(rows))
+        kg_log.info("已恢复 %s 份知识图谱资料的建图队列", len(rows))
     return len(rows)
 
 
@@ -3050,7 +3084,8 @@ def knowledge_graphs():
           (SELECT COUNT(*) FROM kg_nodes n WHERE n.graph_id=g.id) AS n_nodes,
           (SELECT COUNT(*) FROM kg_edges e WHERE e.graph_id=g.id) AS n_edges
         FROM knowledge_graphs g ORDER BY g.subject, g.name""").fetchall()
-    return render_template("knowledge_graphs.html", graphs=rows)
+    return render_template("knowledge_graphs.html", graphs=rows,
+                           max_import_mb=cfg.MAX_RESTORE_MB)
 
 
 @_routes.route("/knowledge-graphs/create", methods=["POST"])
@@ -3068,10 +3103,87 @@ def knowledge_graph_create():
         (subject, name, request.form.get("description", "").strip()[:300],
          request.form.get("grade_level", "").strip()[:40], g.user["id"]))
     db.commit()
-    log.info("新建知识图谱 user=%s#%s subject=%s name=%s",
+    kg_log.info("新建知识图谱 user=%s#%s subject=%s name=%s",
              g.user["username"], g.user["id"], subject, name)
     flash(f"已创建知识图谱「{name}」，接下来上传教材、考纲或讲义来构建它")
     return redirect(url_for("knowledge_graph_detail", gid=cur.lastrowid))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/export")
+@role_required("teacher", "admin")
+def knowledge_graph_export(gid):
+    """导出图结构、原始资料、文本块、抽取结果与体检历史。"""
+    graph = _kg_graph(gid, manage=True)
+    os.makedirs(cfg.EXPORT_DIR, exist_ok=True)
+    fd, path = tempfile.mkstemp(prefix=f"kg_{gid}_", suffix=".zip", dir=cfg.EXPORT_DIR)
+    os.close(fd)
+    try:
+        kg_transfer.export_graph(get_db(), gid, UPLOAD_DIR, path)
+    except Exception:  # noqa: BLE001 半截导出文件不能留在服务器
+        kg_log.exception("知识图谱迁移包导出失败 user=%s#%s graph=%s",
+                         g.user["username"], g.user["id"], gid)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        flash("知识图谱导出失败，请查看知识图谱日志")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    kg_log.info("导出知识图谱迁移包 user=%s#%s graph=%s package=%s",
+                g.user["username"], g.user["id"], gid, os.path.basename(path))
+    download = (f"{course_export.safe_component(graph['name'], '知识图谱')}"
+                "_完整迁移包.zip")
+    response = send_file(path, as_attachment=True, download_name=download)
+    response.call_on_close(lambda: os.remove(path) if os.path.exists(path) else None)
+    return response
+
+
+@_routes.route("/knowledge-graphs/import", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_import():
+    """导入完整迁移包；始终新建图谱，不覆盖同名的既有图谱。"""
+    package = request.files.get("package")
+    if not package or not package.filename:
+        flash("请选择知识图谱迁移包")
+        return redirect(url_for("knowledge_graphs"))
+    if not package.filename.lower().endswith(".zip"):
+        flash("迁移包必须是 ZIP 文件")
+        return redirect(url_for("knowledge_graphs"))
+    tmp = tempfile.NamedTemporaryFile(
+        prefix=".kg_import_", suffix=".zip", dir=cfg.DATA_DIR, delete=False)
+    package_path = tmp.name
+    try:
+        size = 0
+        with tmp:
+            while True:
+                chunk = package.stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > cfg.MAX_RESTORE_MB * 1024 * 1024:
+                    raise ValueError(f"迁移包超过 {cfg.MAX_RESTORE_MB}MB 限制")
+                tmp.write(chunk)
+        result = kg_transfer.import_graph(
+            get_db(), package_path, UPLOAD_DIR, g.user["id"])
+    except (ValueError, zipfile.BadZipFile) as e:
+        kg_log.warning("知识图谱迁移包导入被拒绝 user=%s#%s file=%s error=%s",
+                       g.user["username"], g.user["id"], package.filename, e)
+        flash(f"知识图谱导入失败：{e}")
+        return redirect(url_for("knowledge_graphs"))
+    except Exception:  # noqa: BLE001 页面不暴露内部路径，详细信息留在 KG 日志
+        kg_log.exception("知识图谱迁移包导入异常 user=%s#%s file=%s",
+                         g.user["username"], g.user["id"], package.filename)
+        flash("知识图谱导入失败，请检查迁移包或查看知识图谱日志")
+        return redirect(url_for("knowledge_graphs"))
+    finally:
+        try:
+            os.remove(package_path)
+        except OSError:
+            pass
+    graph = _kg_graph(result["graph_id"])
+    kg_log.info("导入知识图谱迁移包 user=%s#%s new_graph=%s file=%s",
+                g.user["username"], g.user["id"], graph["id"], package.filename)
+    flash(f"已导入知识图谱「{graph['name']}」，未自动调用 AI")
+    return redirect(url_for("knowledge_graph_detail", gid=graph["id"]))
 
 
 def _kg_status_view(status):
@@ -3353,6 +3465,8 @@ def knowledge_graph_upload(gid):
             continue
         _kg_start_build(gid, material["id"], g.user["id"])
         queued += 1
+        kg_log.info("上传知识图谱资料 user=%s#%s graph=%s material=%s file=%s size=%s chunks=%s",
+                    g.user["username"], g.user["id"], gid, material["id"], filename, size, chunks)
         flash(f"「{filename}」已解析 {chunks} 个文本块，已加入建图队列")
     if queued > 1:
         flash(f"共 {queued} 份资料已排队，将逐个建图，可在下方查看每份状态")
@@ -3361,6 +3475,31 @@ def knowledge_graph_upload(gid):
                    (gid,))
         db.commit()
     return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+@_routes.route("/knowledge-graphs/materials/<oid:mid>/retry", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_material_retry(mid):
+    """复用成功文本块的抽取结果，只把未完成块重新加入建图队列。"""
+    db = get_db()
+    material = db.execute("SELECT * FROM kg_materials WHERE id=?", (mid,)).fetchone()
+    if not material:
+        abort(404)
+    _kg_graph(material["graph_id"], edit=True)
+    if material["status"] != kg_utils.STATUS_FAILED:
+        flash("只有处理失败的资料可以重试")
+        return redirect(url_for("knowledge_graph_detail", gid=material["graph_id"]))
+    db.execute("UPDATE kg_materials SET status=?,error='',finished_at=NULL WHERE id=?",
+               (kg_utils.STATUS_PENDING, mid))
+    db.execute("UPDATE kg_chunks SET status=?,error='',started_at=NULL,finished_at=NULL "
+               "WHERE material_id=? AND status IN (?,?)",
+               (kg_utils.CHUNK_PENDING, mid, kg_utils.CHUNK_RUNNING, kg_utils.CHUNK_FAILED))
+    db.commit()
+    queued = _kg_start_build(material["graph_id"], mid, g.user["id"])
+    kg_log.info("重试知识图谱资料建图 user=%s#%s graph=%s material=%s queued=%s",
+                g.user["username"], g.user["id"], material["graph_id"], mid, queued)
+    flash("已加入重试队列，将复用已成功的文本块" if queued else "该资料已在建图队列中")
+    return redirect(url_for("knowledge_graph_detail", gid=material["graph_id"]))
 
 
 @_routes.route("/knowledge-graphs/materials/<oid:mid>/delete", methods=["POST"])
@@ -3376,6 +3515,9 @@ def knowledge_graph_material_delete(mid):
     except OSError:
         pass
     kg_utils.delete_material(db, material)
+    kg_log.info("删除知识图谱资料 user=%s#%s graph=%s material=%s file=%s",
+                g.user["username"], g.user["id"], material["graph_id"], mid,
+                material["filename"])
     flash(f"已删除资料「{material['filename']}」及其独有节点")
     return redirect(url_for("knowledge_graph_detail", gid=material["graph_id"]))
 
@@ -3395,7 +3537,7 @@ def knowledge_graph_edit(gid):
                " updated_at=CURRENT_TIMESTAMP WHERE id=?",
                (name, description, gid))
     db.commit()
-    log.info("编辑知识图谱 user=%s#%s id=%s name=%s",
+    kg_log.info("编辑知识图谱 user=%s#%s id=%s name=%s",
              g.user["username"], g.user["id"], gid, name)
     flash("已更新图谱信息")
     return redirect(url_for("knowledge_graph_detail", gid=gid))
@@ -3416,7 +3558,7 @@ def knowledge_graph_edge_delete(gid, eid):
     db.execute("UPDATE knowledge_graphs SET updated_at=CURRENT_TIMESTAMP WHERE id=?",
                (gid,))
     db.commit()
-    log.info("删除知识图谱关系 user=%s#%s graph=%s edge=%s",
+    kg_log.info("删除知识图谱关系 user=%s#%s graph=%s edge=%s",
              g.user["username"], g.user["id"], gid, eid)
     flash(f"已删除关系「{edge['src_name']} → {edge['dst_name']}」")
     return redirect(url_for("knowledge_graph_detail", gid=gid))
@@ -3449,7 +3591,7 @@ def knowledge_graph_edge_reverse(gid, eid):
     db.execute("UPDATE knowledge_graphs SET updated_at=CURRENT_TIMESTAMP WHERE id=?",
                (gid,))
     db.commit()
-    log.info("反向知识图谱关系 user=%s#%s graph=%s edge=%s mirror=%s",
+    kg_log.info("反向知识图谱关系 user=%s#%s graph=%s edge=%s mirror=%s",
              g.user["username"], g.user["id"], gid, eid, bool(mirror))
     if mirror:
         flash(f"反向边已存在，已合并去重为「{edge['dst_name']} → {edge['src_name']}」")
@@ -3481,7 +3623,7 @@ def knowledge_graph_audit_run(gid):
             max_tokens=_get_max_tokens(g.user["id"], "max_tokens_kg_audit"))
     except Exception as e:  # noqa: BLE001 体检失败要落状态，便于老师重试
         err = str(e)
-        log.exception("知识图谱体检失败 graph=%s", gid)
+        kg_log.exception("知识图谱体检失败 graph=%s", gid)
     finally:
         _finish_ai_operation(operation, "failed" if err else "success", err)
     if err:
@@ -3505,7 +3647,7 @@ def knowledge_graph_audit_run(gid):
          json.dumps(rejected, ensure_ascii=False), operation["id"],
          g.user["id"]))
     db.commit()
-    log.info("知识图谱体检 user=%s#%s graph=%s status=%s 建议=%s 拦截=%s",
+    kg_log.info("知识图谱体检 user=%s#%s graph=%s status=%s 建议=%s 拦截=%s",
              g.user["username"], g.user["id"], gid, status,
              len(suggestions), len(rejected))
     return redirect(url_for("knowledge_graph_detail", gid=gid))
@@ -3541,7 +3683,7 @@ def knowledge_graph_audit_apply(gid, aid):
                (kg_utils.AUDIT_APPLIED,
                 json.dumps(snapshot, ensure_ascii=False), aid))
     db.commit()
-    log.info("应用知识图谱体检 user=%s#%s graph=%s audit=%s 建议=%s",
+    kg_log.info("应用知识图谱体检 user=%s#%s graph=%s audit=%s 建议=%s",
              g.user["username"], g.user["id"], gid, aid, len(items))
     flash(f"已应用 {len(items)} 条体检建议，可随时回滚")
     return redirect(url_for("knowledge_graph_detail", gid=gid))
@@ -3570,7 +3712,7 @@ def knowledge_graph_audit_rollback(gid, aid):
     db.execute("UPDATE kg_audits SET status=? WHERE id=?",
                (kg_utils.AUDIT_ROLLED_BACK, aid))
     db.commit()
-    log.info("回滚知识图谱体检 user=%s#%s graph=%s audit=%s",
+    kg_log.info("回滚知识图谱体检 user=%s#%s graph=%s audit=%s",
              g.user["username"], g.user["id"], gid, aid)
     flash("已回滚到体检应用前的图谱状态")
     return redirect(url_for("knowledge_graph_detail", gid=gid))
@@ -3588,6 +3730,8 @@ def knowledge_graph_audit_discard(gid, aid):
     db.execute("UPDATE kg_audits SET status=? WHERE id=?",
                (kg_utils.AUDIT_DISCARDED, aid))
     db.commit()
+    kg_log.info("忽略知识图谱体检 user=%s#%s graph=%s audit=%s",
+                g.user["username"], g.user["id"], gid, aid)
     flash("已忽略这次体检建议")
     return redirect(url_for("knowledge_graph_detail", gid=gid))
 
@@ -3607,7 +3751,7 @@ def knowledge_graph_delete(gid):
     db.execute("DELETE FROM knowledge_graphs WHERE id=?", (gid,))
     db.commit()
     shutil.rmtree(os.path.join(UPLOAD_DIR, "kg", str(gid)), ignore_errors=True)
-    log.info("删除知识图谱 user=%s#%s id=%s name=%s",
+    kg_log.info("删除知识图谱 user=%s#%s id=%s name=%s",
              g.user["username"], g.user["id"], gid, graph["name"])
     flash(f"已删除知识图谱「{graph['name']}」")
     return redirect(url_for("knowledge_graphs"))
@@ -3639,7 +3783,7 @@ def knowledge_graph_member_save(gid):
             " ON CONFLICT(graph_id,user_id) DO UPDATE SET role=excluded.role",
             (gid, user_id, role))
         db.commit()
-        log.info("设置知识图谱协作 user=%s#%s graph=%s member=%s role=%s",
+        kg_log.info("设置知识图谱协作 user=%s#%s graph=%s member=%s role=%s",
                  g.user["username"], g.user["id"], gid, user_id, role)
         flash(f"已把「{user['display_name']}」设为{KG_ROLE_LABEL[role]}")
     return redirect(url_for("knowledge_graph_detail", gid=gid))
@@ -3653,7 +3797,7 @@ def knowledge_graph_member_remove(gid, uid):
     db.execute("DELETE FROM kg_members WHERE graph_id=? AND user_id=?",
                (gid, uid))
     db.commit()
-    log.info("移除知识图谱协作 user=%s#%s graph=%s member=%s",
+    kg_log.info("移除知识图谱协作 user=%s#%s graph=%s member=%s",
              g.user["username"], g.user["id"], gid, uid)
     flash("已移除该老师的协作权限")
     return redirect(url_for("knowledge_graph_detail", gid=gid))
@@ -4112,7 +4256,7 @@ def _kg_diagnosis(db, sub):
             "weak_prereqs": weak_pre,
             "untested_prereqs": untested_pre,
         })
-    log.info("KG 诊断匹配结果 submission=%s: 薄弱知识点=%d, 匹配成功=%d [%s], 未匹配=%d [%s]",
+    kg_log.info("KG 诊断匹配结果 submission=%s: 薄弱知识点=%d, 匹配成功=%d [%s], 未匹配=%d [%s]",
              sub["id"], len(weak_tags), len(matched_tags), "; ".join(matched_tags),
              len(unmatched_tags), ", ".join(unmatched_tags))
     return diagnoses or None
@@ -4491,7 +4635,7 @@ def _extract_backup_zip(zpath, extract_root):
         for info in members:
             target = os.path.abspath(os.path.join(extract_root, info.filename))
             if target != extract_root and not target.startswith(extract_root + os.sep):
-                log.warning("备份包含越界路径：%s", info.filename)
+                security_log.warning("备份包含越界路径：%s", info.filename)
                 return None, "备份包包含非法路径，已拒绝导入"
             total += info.file_size
             if total > limit:
@@ -4758,7 +4902,7 @@ def uploaded_file(filename):
     if g.user["role"] == "student":
         wanted = os.path.normpath(filename).replace("\\", "/")
         if wanted not in _student_files(g.user["id"]):
-            log.warning("越权访问文件 student=%s path=%s", g.user["id"], wanted)
+            security_log.warning("越权访问文件 student=%s path=%s", g.user["id"], wanted)
             abort(403)
     full = os.path.abspath(os.path.join(UPLOAD_DIR, filename))
     if not full.startswith(os.path.abspath(UPLOAD_DIR) + os.sep):

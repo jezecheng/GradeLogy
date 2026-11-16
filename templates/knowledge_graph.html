@@ -65,6 +65,8 @@ table.kg th, table.kg td { text-align: left; padding: 8px 6px; border-bottom: 1p
 table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
 .kg-head-actions { display: flex; align-items: center; gap: 8px; }
 .kg-head-actions form { margin: 0; }
+.kg-material-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.kg-material-actions form { margin: 0; }
 .kg-name { font-weight: 600; }
 .kg-request-toggle { border: 0; background: none; padding: 0; cursor: pointer;
   text-align: left; color: inherit; font: inherit; font-weight: 600; }
@@ -110,6 +112,7 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
     <span class="kg-role-badge">{{ role_label }}</span></h1>
   {% if can_manage %}
   <div class="kg-head-actions">
+    <a class="ghost small" href="{{ url_for('knowledge_graph_export', gid=graph.id) }}">导出完整迁移包</a>
     <button class="ghost small" type="button" data-dialog-open="kg-edit">编辑信息</button>
     <form method="post" action="{{ url_for('knowledge_graph_delete', gid=graph.id) }}"
           onsubmit="return confirm('删除该知识图谱及全部资料？此操作不可恢复。')">
@@ -297,12 +300,20 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
         </td>
         {% if can_edit %}
         <td>
-          <form method="post"
-                action="{{ url_for('knowledge_graph_material_delete', mid=m.id) }}"
-                onsubmit="return confirm('删除这份资料？仅由它支撑的概念与关系会一并移除。')">
-            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-            <button class="ghost small">删除</button>
-          </form>
+          <div class="kg-material-actions">
+            {% if m.status == '失败' %}
+            <form method="post" action="{{ url_for('knowledge_graph_material_retry', mid=m.id) }}">
+              <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+              <button class="ghost small">重试建图</button>
+            </form>
+            {% endif %}
+            <form method="post"
+                  action="{{ url_for('knowledge_graph_material_delete', mid=m.id) }}"
+                  onsubmit="return confirm('删除这份资料？仅由它支撑的概念与关系会一并移除。')">
+              <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+              <button class="ghost small">删除</button>
+            </form>
+          </div>
         </td>
         {% endif %}
       </tr>

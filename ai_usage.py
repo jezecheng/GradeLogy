@@ -7,10 +7,13 @@ ai_usage_events 一行；费用按操作开始时的价格与高峰倍率快照�
 依赖方向：只依赖 db / model_catalog，不反向导入 app。
 """
 import json
+import logging
 from datetime import datetime, timedelta
 
 from db import get_db
 from model_catalog import MODEL_PRESETS
+
+_log = logging.getLogger("gradelogy.ai")
 
 # ---------- 闲时批阅：TokenHub 高峰时段价格翻倍 ----------
 # 高峰定义（参考腾讯云公开价目说明）：工作日 9:00-12:00, 14:00-18:00
@@ -84,7 +87,17 @@ def _start_ai_operation(teacher_id, operation_type, model, course_id=None,
         (teacher_id, operation_type, course_id, lecture_id, submission_id, material_id,
          model, status, started_at))
     db.commit()
-    operation = {"id": cur.lastrowid, "pricing": pricing, "finished": False}
+    operation = {
+        "id": cur.lastrowid, "pricing": pricing, "finished": False,
+        "teacher": f"#{teacher_id}", "operation_type": operation_type, "model": model,
+        "course_id": course_id, "lecture_id": lecture_id,
+        "submission_id": submission_id, "material_id": material_id,
+    }
+    _log.info(
+        "AI 操作发起 operation=%s teacher=%s scene=%s model=%s course=%s "
+        "lecture=%s submission=%s material=%s status=%s",
+        operation["id"], operation["teacher"], operation_type, model,
+        course_id or "-", lecture_id or "-", submission_id or "-", material_id or "-", status)
     operation["usage_hook"] = lambda event: _record_ai_usage(operation, event)
     return operation
 
@@ -116,16 +129,26 @@ def _record_ai_usage(operation, event):
             "reasoning_tokens=?,latency_ms=?,finish_reason=?,estimated_cost=?,"
             "pricing_json=?,usage_json=?,status=?,error=? WHERE id=? AND operation_id=?",
             values + (event_id, operation["id"]))
-        db.commit()
-        return event_id
-    cur = db.execute(
-        "INSERT INTO ai_usage_events(operation_id,chunk_id,attempt,provider_request_id,model,"
-        "prompt_tokens,completion_tokens,total_tokens,cached_tokens,reasoning_tokens,"
-        "latency_ms,finish_reason,estimated_cost,pricing_json,usage_json,status,error) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (operation["id"],) + values)
+    else:
+        cur = db.execute(
+            "INSERT INTO ai_usage_events(operation_id,chunk_id,attempt,provider_request_id,model,"
+            "prompt_tokens,completion_tokens,total_tokens,cached_tokens,reasoning_tokens,"
+            "latency_ms,finish_reason,estimated_cost,pricing_json,usage_json,status,error) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (operation["id"],) + values)
+        event_id = cur.lastrowid
     db.commit()
-    return cur.lastrowid
+    _log.info(
+        "AI 请求 operation=%s event=%s teacher=%s scene=%s model=%s status=%s "
+        "attempt=%s prompt=%s completion=%s total=%s latency_ms=%s finish=%s error=%s",
+        operation["id"], event_id, operation.get("teacher", "-"),
+        operation.get("operation_type", "-"), event.get("model") or operation.get("model") or "-",
+        event.get("status") or "error", event.get("attempt") or "-",
+        prompt if prompt is not None else "-", completion if completion is not None else "-",
+        event.get("total_tokens") if event.get("total_tokens") is not None else "-",
+        event.get("latency_ms") if event.get("latency_ms") is not None else "-",
+        event.get("finish_reason") or "-", str(event.get("error") or "-")[:300])
+    return event_id
 
 
 def _finish_ai_operation(operation, status, error=""):
@@ -136,6 +159,10 @@ def _finish_ai_operation(operation, status, error=""):
         (status, datetime.now().isoformat(sep=" ", timespec="milliseconds"),
          str(error or "")[:1000], operation["id"]))
     get_db().commit()
+    _log.info("AI 操作结束 operation=%s teacher=%s scene=%s model=%s status=%s error=%s",
+              operation["id"], operation.get("teacher", "-"),
+              operation.get("operation_type", "-"), operation.get("model") or "-",
+              status, str(error or "-")[:300])
     operation["finished"] = True
 
 

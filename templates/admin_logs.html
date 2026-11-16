@@ -1,9 +1,9 @@
 {% extends "base.html" %}
-{% block title %}系统日志{% endblock %}
+{% block title %}日志监控{% endblock %}
 {% block content %}
 {% include "_admin_tabs.html" %}
-<h1>系统日志</h1>
-<p class="muted">实时查看访问、审计、AI 调用和异常堆栈。日志可能包含账号、来源 IP 与异常信息，仅限管理员访问。</p>
+<h1>日志监控</h1>
+<p class="muted">分类查看系统、用户、AI 使用、知识图谱、批阅与安全日志；“全部日志”保留完整时间线。日志可能包含账号、来源 IP 与异常信息，仅限管理员访问。</p>
 
 <div class="card" id="log-browser"
      data-tail-url="{{ url_for('admin_logs_tail') }}"
@@ -12,8 +12,12 @@
   <div class="log-toolbar">
     <label>日志文件
       <select id="log-file" {% if not files %}disabled{% endif %}>
-        {% for file in files %}
-        <option value="{{ file.name }}" {% if file.name == selected %}selected{% endif %}>{{ file.name }} · {{ file.size_text }} · {{ file.mtime_text|legacytime }}</option>
+        {% for category, items in files|groupby('category') %}
+        <optgroup label="{{ items[0].category_label }}">
+          {% for file in items %}
+          <option value="{{ file.name }}" {% if file.name == selected %}selected{% endif %}>{{ file.name }} · {{ file.size_text }} · {{ file.mtime_text|legacytime }}</option>
+          {% endfor %}
+        </optgroup>
         {% endfor %}
       </select>
     </label>

@@ -11,7 +11,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("gradelogy.grading")
 
 ACTIVE_STATUSES = ("queued", "running")
 
