@@ -325,6 +325,8 @@ def _ai_dashboard_data(filters):
         "models": ("COALESCE(NULLIF(model,''),'未指定模型')", "COALESCE(NULLIF(model,''),'未指定模型')"),
         "teachers": ("COALESCE(NULLIF(teacher_name,''),teacher_username,'已删除教师')",
                      "COALESCE(NULLIF(teacher_name,''),teacher_username,'已删除教师')"),
+        "courses": ("COALESCE(NULLIF(course_name,''),'未关联课程')",
+                    "COALESCE(NULLIF(course_name,''),'未关联课程')"),
     }
     for key, (label, grouping) in dimensions.items():
         groups[key] = with_bars(db.execute(sql + f"""

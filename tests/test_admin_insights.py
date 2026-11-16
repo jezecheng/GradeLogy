@@ -217,6 +217,44 @@ class AdminInsightsTest(unittest.TestCase):
         self.assertIn("重新生成总评".encode(), resp.data)
         self.assertEqual(client.get("/admin/ai-usage?period=invalid").status_code, 200)
 
+    def test_dashboard_dimension_aggregation_switching(self):
+        self.seed_operations()
+        data = self.dashboard(period="all")
+
+        def grouped(key):
+            return {row["label"]: row for row in data["groups"][key]}
+
+        courses = grouped("courses")
+        self.assertEqual((courses["数学"]["operation_count"],
+                          courses["数学"]["request_count"]), (3, 3))
+        self.assertEqual((courses["物理"]["operation_count"],
+                          courses["物理"]["request_count"]), (1, 1))
+        teachers = grouped("teachers")
+        self.assertEqual((teachers["老师一"]["operation_count"],
+                          teachers["老师一"]["request_count"]), (3, 3))
+        self.assertEqual(teachers["老师二"]["operation_count"], 1)
+        models = grouped("models")
+        self.assertEqual((models["model-a"]["operation_count"],
+                          models["model-a"]["request_count"]), (3, 3))
+        self.assertEqual(models["model-b"]["request_count"], 1)
+        self.assertEqual(grouped("operations")["grade"]["request_count"], 2)
+
+        client = self.login()
+        html = client.get("/admin/ai-usage?period=all").get_data(as_text=True)
+        self.assertIn('data-dimension="operation_type"', html)
+        self.assertIn("按使用场景", html)
+        for value, heading in (("teacher", "按用户"), ("course", "按课程"),
+                               ("model", "按模型")):
+            page = client.get(
+                f"/admin/ai-usage?period=all&dimension={value}").get_data(as_text=True)
+            self.assertIn(f'data-dimension="{value}"', page)
+            self.assertIn(heading, page)
+            self.assertIn(f'name="dimension" value="{value}"', page)
+            self.assertIn(f"dimension={value}", page)
+        fallback = client.get(
+            "/admin/ai-usage?period=all&dimension=unknown").get_data(as_text=True)
+        self.assertIn('data-dimension="operation_type"', fallback)
+
     def test_admin_routes_reject_other_roles_and_anonymous(self):
         paths = ("/admin/ai-usage", "/admin/logs", "/admin/logs/tail",
                  "/admin/logs/download/app.log")

@@ -34,6 +34,13 @@
 {% endmacro %}
 {% block content %}
 {% include "_admin_tabs.html" %}
+{% set dimension_views = {
+  'operation_type': ('按使用场景', groups.operations, true),
+  'teacher': ('按用户', groups.teachers, false),
+  'course': ('按课程', groups.courses, false),
+  'model': ('按模型', groups.models, false),
+} %}
+{% set current_view = dimension_views[filters.dimension] %}
 <header class="monitor-heading">
   <div>
     <h1>AI 用量监控</h1>
@@ -54,6 +61,7 @@
   </div>
   <form method="get" action="{{ url_for('admin_ai_usage') }}" class="filter-form ai-filter-form">
     <input type="hidden" name="period" value="{{ filters.period }}">
+    <input type="hidden" name="dimension" value="{{ filters.dimension }}">
     <label>教师
       <select name="teacher_id">
         <option value="">全部教师</option>
@@ -295,12 +303,21 @@
   <p class="muted small request-log-note">Token 与费用来自单次请求快照；「—」表示服务商未返回或缺少价格，不代表 0。实际费用以服务商账单为准。</p>
 </section>
 
-<details class="card ai-business-details">
-  <summary class="card-head"><h2>业务视角与最近操作</h2><span class="muted small">按操作类型、教师查看，重试不重复计操作</span></summary>
-  <div class="dashboard-grid">
-    <section><h3>按操作类型</h3>{{ distribution_table(groups.operations, true) }}</section>
-    <section><h3>按教师</h3>{{ distribution_table(groups.teachers) }}</section>
+<details class="card ai-business-details" open>
+  <summary class="card-head"><h2>业务视角与最近操作</h2><span class="muted small">按用户、课程、模型或使用场景聚合，重试不重复计操作</span></summary>
+  <div class="monitor-period-row">
+    <span class="monitor-filter-title">聚合维度</span>
+    <nav class="period-presets" aria-label="聚合维度">
+      {% for value, label in dimension_labels.items() %}
+      <a href="{{ dimension_links[value] }}" {% if filters.dimension == value %}class="active" aria-current="page"{% endif %}>{{ label }}</a>
+      {% endfor %}
+    </nav>
+    <span class="monitor-period-note">{{ period_labels[filters.period] }} · 按操作开始时间统计</span>
   </div>
+  <section class="dimension-panel" data-dimension="{{ filters.dimension }}">
+    <h3>{{ current_view[0] }}</h3>
+    {{ distribution_table(current_view[1], current_view[2]) }}
+  </section>
   <h3>最近操作</h3>
   {% if recent %}
   <div class="table-scroll">

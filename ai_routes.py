@@ -105,6 +105,11 @@ def register(registry, deps):
         status = request.args.get("status", "")
         if status not in ai_status_label:
             status = ""
+        dimension_labels = {"operation_type": "使用场景", "teacher": "用户",
+                            "course": "课程", "model": "模型"}
+        dimension = request.args.get("dimension", "operation_type")
+        if dimension not in dimension_labels:
+            dimension = "operation_type"
         filters = {
             "period": period,
             "teacher_id": optional_id("teacher_id"),
@@ -113,11 +118,16 @@ def register(registry, deps):
             "model": request.args.get("model", "").strip()[:200],
             "status": status,
             "q": request.args.get("q", "").strip()[:200],
+            "dimension": dimension,
         }
         period_links = {value: url_for("admin_ai_usage", **{**filters, "period": value})
                         for value in period_labels}
+        dimension_links = {value: url_for("admin_ai_usage", **{**filters, "dimension": value})
+                           for value in dimension_labels}
         return render_template("admin_ai_usage.html", filters=filters,
                                period_labels=period_labels, period_links=period_links,
+                               dimension_labels=dimension_labels,
+                               dimension_links=dimension_links,
                                **ai_dashboard_data(filters))
 
     # ---------- 老师：AI 设置 ----------
