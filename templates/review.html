@@ -371,7 +371,15 @@
             genBtn.dataset.hasResult = '1';
             genHint.textContent = '已生成新的总评，可继续修改后保存' + (data.usage ? '；' + data.usage : '');
           }).catch(function (e) {
-            alert(e.message || '生成总评失败，请稍后重试');
+            var msg = e.message || '生成总评失败，请稍后重试';
+            if (msg === 'Failed to fetch') {
+              msg = '网络请求失败：可能是 AI 接口响应超时或网络中断。\n\n'
+                  + '建议：\n'
+                  + '1. 检查网络连接是否正常\n'
+                  + '2. 到 AI 设置确认 API 地址和密钥正确\n'
+                  + '3. 稍后重试（AI 生成可能需要 1-2 分钟）';
+            }
+            alert(msg);
           }).then(function () {
             busyOff(genBtn);
             syncProgress();

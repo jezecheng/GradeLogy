@@ -506,7 +506,7 @@ def ai_report_comment(questions, weak_points, evaluation, api_url, api_key, mode
                    "并在下一步建议中优先推荐补强断层的前置概念。")
     content = [{"type": "text", "text": base + "\n\n数据：\n" + payload}]
     reply, finish, err = llm.chat(api_url, api_key, model, content,
-                                  max_tokens=max_tokens, timeout=120, retries=1,
+                                  max_tokens=max_tokens, timeout=60, retries=1,
                                   usage_hook=usage_hook)
     if err:
         return {}
