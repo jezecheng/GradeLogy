@@ -297,7 +297,7 @@ def _no_token(value):
 
 
 def analyze_question_tags(answer_path, questions, api_url, api_key, model,
-                          max_tokens=4096, pages=None, usage_hook=None,
+                          max_tokens=16384, pages=None, usage_hook=None,
                           batch_size=12):
     """给作业范围内每道题生成知识点标签，返回 (rows, error)。
 

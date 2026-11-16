@@ -274,7 +274,7 @@
           </td>
           <td class="request-model">{{ row.model }}</td>
           <td>{{ ai_operation_label(row.operation_type) or row.operation_type }} <span class="muted">#{{ row.operation_id }}</span><div class="muted small">{{ row.teacher_name or row.teacher_username or '已删除教师' }}</div></td>
-          <td>{% if row.event_status == 'success' %}<span class="request-status is-success">成功</span>{% elif row.event_status == 'error' %}<span class="request-status is-error">失败</span>{% else %}<span class="request-status">{{ row.event_status }}</span>{% endif %}</td>
+          <td>{% if row.operation_status == 'failed' %}<span class="request-status is-error" title="操作失败，展开查看原因">失败</span>{% elif row.event_status == 'success' %}<span class="request-status is-success">成功</span>{% elif row.event_status == 'error' %}<span class="request-status is-error">失败</span>{% else %}<span class="request-status">{{ row.event_status }}</span>{% endif %}</td>
           <td class="right nowrap">{{ token_text(row.total_tokens) }}</td>
           <td class="right nowrap">{{ token_text(row.prompt_tokens) }}</td>
           <td class="right nowrap">{{ token_text(row.completion_tokens) }}</td>

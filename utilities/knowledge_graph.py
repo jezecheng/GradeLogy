@@ -38,7 +38,7 @@ AUDIT_ACTION_LABEL = {
     "delete_edge": "删除关系",
     "drop_node": "删除孤立概念",
 }
-AUDIT_MAX_TOKENS = 8192
+AUDIT_MAX_TOKENS = 32768
 AUDIT_MAX_ITEMS = 40
 # 推理模型会把大量 token 花在思考上，4096/8192 可能全部耗尽导致正文为空
 KG_MAX_TOKENS = 32768
