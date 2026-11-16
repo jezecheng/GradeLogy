@@ -357,7 +357,13 @@
         busyOn(genBtn, '生成中…');
         fetch('{{ url_for("submission_report_comment", sid=sub.id) }}', {
           method: 'POST', headers: { 'X-CSRF-Token': csrf }
-        }).then(function (r) { return r.json().then(function (d) { return [r.ok, d]; }); })
+        }).then(function (r) {
+          var ct = r.headers.get('content-type') || '';
+          if (!ct.includes('json')) {
+            throw new Error('服务器内部错误（HTTP ' + r.status + '），请稍后重试');
+          }
+          return r.json().then(function (d) { return [r.ok, d]; });
+        })
           .then(function (res) {
             var ok = res[0], data = res[1];
             if (!ok || !data.ok) throw new Error((data.error || '生成失败') + (data.usage ? '\n' + data.usage : ''));

@@ -3970,7 +3970,7 @@ def _kg_diagnosis(db, sub):
 
     # 本讲次所有 AI 知识标签，建立 qkey→tags 与 tag→qkeys 双向索引
     tag_rows = db.execute(
-        "SELECT qkey,tag FROM knowledge_tags WHERE homework_id=?",
+        "SELECT question_no AS qkey,tag FROM question_tags WHERE lecture_id=?",
         (sub["lecture_id"],)).fetchall()
     if not tag_rows:
         return None
@@ -4133,7 +4133,8 @@ def submission_report_comment(sid):
                                    kg_context=kg_context)
     except Exception as e:
         _finish_ai_operation(operation, "failed", str(e))
-        raise
+        log.exception("生成总评异常 submission=%s by=%s", sid, g.user["username"])
+        return {"ok": False, "error": f"生成总评异常：{e}"}, 500
     error = "" if detail else "AI 生成总评失败，请稍后重试"
     _finish_ai_operation(operation, "success" if detail else "failed", error)
     usage_text = _ai_usage_text(_ai_operation_history(operation_id=operation["id"], limit=1)[0])
