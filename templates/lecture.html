@@ -166,7 +166,7 @@
       <button type="button" class="small ghost" data-scope-all="1">全选</button>
       <button type="button" class="small ghost" data-scope-all="0">全不选</button>
       <span class="muted small">至少勾选一道题；当前已选 <b id="scope-count">{{ cands|length if not chosen else chosen|length }}</b> 题 ·
-        保存时会调用一次 AI 为勾选题目生成知识点标签</span>
+        保存时会分批调用 AI 为勾选题目生成知识点标签（题目越多耗时越长）</span>
     </div>
   </form>
   <div class="save-bar" style="margin-top:6px">

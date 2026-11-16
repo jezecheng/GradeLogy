@@ -311,6 +311,56 @@ class TagAITest(unittest.TestCase):
         self.assertEqual(rows[0]["tags"], ["重复", "概念辨析", "一", "二"])
         self.assertEqual(rows[0]["category"], "概念")
 
+    def test_analyze_question_tags_batches_large_question_sets(self):
+        questions = [{"no": str(i)} for i in range(1, 16)]  # 15 题 → 2 批
+        replies = [
+            json.dumps({"questions": [
+                {"no": str(i), "tags": [f"知识点{i}"]} for i in range(1, 13)
+            ]}, ensure_ascii=False),
+            json.dumps({"questions": [
+                {"no": str(i), "tags": [f"知识点{i}"]} for i in range(13, 16)
+            ]}, ensure_ascii=False),
+        ]
+        with mock.patch.object(pdfgrade, "_file_parts", return_value=([], "")), \
+                mock.patch.object(pdfgrade.llm, "chat", side_effect=[
+                    (replies[0], "stop", ""), (replies[1], "stop", "")]) as chat_mock:
+            rows, err = pdfgrade.analyze_question_tags(
+                "/tmp/a.pdf", questions, "u", "k", "m")
+        self.assertEqual(err, "")
+        self.assertEqual(chat_mock.call_count, 2)
+        self.assertEqual(len(rows), 15)
+        self.assertEqual(rows[0]["tags"], ["知识点1"])
+        self.assertEqual(rows[11]["tags"], ["知识点12"])
+        self.assertEqual(rows[12]["tags"], ["知识点13"])
+        self.assertEqual(rows[14]["tags"], ["知识点15"])
+
+    def test_analyze_question_tags_skips_truncated_batch(self):
+        questions = [{"no": str(i)} for i in range(1, 14)]  # 13 题 → 2 批
+        replies = [
+            ("{", "length", ""),  # 第 1 批被截断
+            (json.dumps({"questions": [{"no": "13", "tags": ["知识点13"]}]},
+                        ensure_ascii=False), "stop", ""),
+        ]
+        with mock.patch.object(pdfgrade, "_file_parts", return_value=([], "")), \
+                mock.patch.object(pdfgrade.llm, "chat", side_effect=replies):
+            rows, err = pdfgrade.analyze_question_tags(
+                "/tmp/a.pdf", questions, "u", "k", "m")
+        self.assertEqual(err, "")
+        self.assertEqual(len(rows), 13)
+        for i in range(12):
+            self.assertEqual(rows[i]["tags"], [])
+        self.assertEqual(rows[12]["tags"], ["知识点13"])
+
+    def test_analyze_question_tags_all_truncated_reports_error(self):
+        questions = [{"no": str(i)} for i in range(1, 14)]
+        with mock.patch.object(pdfgrade, "_file_parts", return_value=([], "")), \
+                mock.patch.object(pdfgrade.llm, "chat",
+                                  return_value=("{", "length", "")):
+            rows, err = pdfgrade.analyze_question_tags(
+                "/tmp/a.pdf", questions, "u", "k", "m")
+        self.assertIsNone(rows)
+        self.assertIn("截断", err)
+
     def test_horizontal_analysis_uses_custom_prompt_and_injects_data(self):
         captured = {}
 

@@ -8,12 +8,15 @@ PDF 的 file content part（实测返回 400），这里把 PDF 整页渲染成�
 import base64
 import io
 import json
+import logging
 import os
 import re
 
 import pypdfium2 as pdfium
 
 from . import llm
+
+log = logging.getLogger("gradelogy.pdfgrade")
 
 # 提示词分成「正文规则」与「固定输出格式」两段：
 # 老师可自定义正文，但输出格式由系统追加，保证程序一定能解析出结构化结果。
@@ -294,11 +297,13 @@ def _no_token(value):
 
 
 def analyze_question_tags(answer_path, questions, api_url, api_key, model,
-                          max_tokens=4096, pages=None, usage_hook=None):
+                          max_tokens=4096, pages=None, usage_hook=None,
+                          batch_size=12):
     """给作业范围内每道题生成知识点标签，返回 (rows, error)。
 
-    rows 与传入 questions 顺序一致，每项为 {key,no,category,tags}；
-    没有生成标签的题也会保留（tags 为空），由调用方决定是否落库。
+    为避免一次请求题目过多导致输出被截断（finish_reason=length），按
+    batch_size 分批调用模型，每批独立请求并把结果合并；没有生成标签的题
+    也会保留（tags 为空），由调用方决定是否落库。
     """
     listing = []
     for i, q in enumerate(questions or []):
@@ -317,43 +322,54 @@ def analyze_question_tags(answer_path, questions, api_url, api_key, model,
     if err:
         return None, err
 
-    content = [{"type": "text",
-                "text": TAG_PROMPT + json.dumps(listing, ensure_ascii=False) + TAG_RULES},
-               {"type": "text", "text": f"教师版标准答案，共 {len(parts)} 页："}]
-    content += parts
-    reply, finish, err = llm.chat(api_url, api_key, model, content,
-                                  max_tokens=max_tokens, timeout=180, retries=1,
-                                  usage_hook=usage_hook)
-    if err:
-        return None, f"AI 标注失败：{err}"
-
-    data = llm.extract_json(reply)
-    raw = data.get("questions") if isinstance(data, dict) else None
-    if not isinstance(raw, list):
-        if finish == "length":
-            return None, "AI 输出被截断，未能得到知识点标签，请重试。"
-        return None, "AI 未返回可用的知识点标签，请重试。"
-
+    if batch_size <= 0:
+        batch_size = 12
     by_no = {}
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        no = str(item.get("no", "")).strip()
-        if not no:
-            continue
-        tags = _clean_tags(item.get("tags"))
-        if not tags:
-            continue
-        by_no[_no_token(no)] = (tags, str(item.get("category", "")).strip())
+    truncated = False
+    total_batches = (len(listing) + batch_size - 1) // batch_size
+    for start in range(0, len(listing), batch_size):
+        batch = listing[start:start + batch_size]
+        idx = start // batch_size + 1
+        content = [{"type": "text",
+                    "text": TAG_PROMPT + json.dumps(batch, ensure_ascii=False) + TAG_RULES},
+                   {"type": "text",
+                    "text": f"教师版标准答案，共 {len(parts)} 页（第 {idx}/{total_batches} 批）："}]
+        content += parts
+        reply, finish, err = llm.chat(api_url, api_key, model, content,
+                                      max_tokens=max_tokens, timeout=180, retries=1,
+                                      usage_hook=usage_hook)
+        if err:
+            return None, f"AI 标注失败（第 {idx} 批）：{err}"
+
+        data = llm.extract_json(reply)
+        raw = data.get("questions") if isinstance(data, dict) else None
+        if not isinstance(raw, list):
+            if finish == "length":
+                # 该批输出被截断，跳过这一批（题目标签留空），继续处理后续批次。
+                truncated = True
+                continue
+            return None, "AI 未返回可用的知识点标签，请重试。"
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            no = str(item.get("no", "")).strip()
+            if not no:
+                continue
+            tags = _clean_tags(item.get("tags"))
+            if not tags:
+                continue
+            by_no[_no_token(no)] = (tags, str(item.get("category", "")).strip())
 
     rows = []
     for q in listing:
         tags, category = by_no.get(_no_token(q["no"]), ([], ""))
         rows.append({"key": q["key"], "no": q["no"], "category": category, "tags": tags})
     if not any(r["tags"] for r in rows):
-        if finish == "length":
-            return None, "AI 输出被截断，未能得到知识点标签，请重试。"
+        if truncated:
+            return None, "AI 输出被截断，未能得到知识点标签，请减少勾选题目后重试。"
         return None, "AI 未能为这些题目生成知识点标签，请重试。"
+    if truncated:
+        log.warning("知识点标注有批次被截断，仅部分题目拿到标签")
     return rows, ""
 
 
