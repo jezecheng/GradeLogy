@@ -251,7 +251,7 @@ def analyze_answer_pdf(answer_path, api_url, api_key, model, max_tokens=16384,
                {"type": "text", "text": f"教师版标准答案，共 {len(parts)} 页："}]
     content += parts
     reply, finish, err = llm.chat(api_url, api_key, model, content,
-                                  max_tokens=max_tokens, timeout=180, retries=1,
+                                  max_tokens=max_tokens, timeout=90, retries=1,
                                   usage_hook=usage_hook)
     if err:
         return None, f"AI 分析失败：{err}"
@@ -356,7 +356,7 @@ def analyze_question_tags(answer_path, questions, api_url, api_key, model,
                     "text": f"教师版标准答案，共 {len(parts)} 页（第 {idx}/{total_batches} 批）："}]
         content += parts
         reply, finish, err = llm.chat(api_url, api_key, model, content,
-                                      max_tokens=max_tokens, timeout=180, retries=1,
+                                      max_tokens=max_tokens, timeout=90, retries=1,
                                       usage_hook=usage_hook)
         if err:
             return None, f"AI 标注失败（第 {idx} 批）：{err}"
@@ -558,7 +558,7 @@ def ai_lecture_summary(qstats, api_url, api_key, model, max_tokens=4096, usage_h
     content = [{"type": "text", "text": LECTURE_SUMMARY_PROMPT + "\n\n数据：\n" +
                 json.dumps(payload, ensure_ascii=False)}]
     reply, finish, err = llm.chat(api_url, api_key, model, content,
-                                  max_tokens=max_tokens, timeout=180, retries=1,
+                                  max_tokens=max_tokens, timeout=60, retries=1,
                                   usage_hook=usage_hook)
     if err:
         return {"error": f"AI 接口调用失败：{err}", "error_type": "network"}
@@ -703,7 +703,7 @@ def ai_horizontal_analysis(context, api_url, api_key, model,
                                TAG_HORIZONTAL_OUTPUT_CONTRACT, values)
     reply, finish, err = llm.chat(api_url, api_key, model,
                                   [{"type": "text", "text": text}],
-                                  max_tokens=max_tokens, timeout=180, retries=1,
+                                  max_tokens=max_tokens, timeout=60, retries=1,
                                   usage_hook=usage_hook)
     if err:
         return {}
@@ -739,7 +739,7 @@ def ai_vertical_analysis(context, api_url, api_key, model,
                                TAG_VERTICAL_OUTPUT_CONTRACT, values)
     reply, finish, err = llm.chat(api_url, api_key, model,
                                   [{"type": "text", "text": text}],
-                                  max_tokens=max_tokens, timeout=180, retries=1,
+                                  max_tokens=max_tokens, timeout=60, retries=1,
                                   usage_hook=usage_hook)
     if err:
         return {}
