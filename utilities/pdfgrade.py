@@ -538,7 +538,10 @@ LECTURE_SUMMARY_PROMPT = (
 
 
 def ai_lecture_summary(qstats, api_url, api_key, model, max_tokens=4096, usage_hook=None):
-    """根据全班逐题判定与评语，生成讲次汇总。失败返回 {}。"""
+    """根据全班逐题判定与评语，生成讲次汇总。
+    成功返回 {"per_question": ..., "overall": ...}；
+    失败返回 {"error": "具体原因", "error_type": "truncated|network|json"}。
+    """
     payload = []
     for row in qstats or []:
         comments = (row["all_comments"] or "").split("||SPLIT||")
@@ -558,10 +561,13 @@ def ai_lecture_summary(qstats, api_url, api_key, model, max_tokens=4096, usage_h
                                   max_tokens=max_tokens, timeout=180, retries=1,
                                   usage_hook=usage_hook)
     if err:
-        return {}
+        return {"error": f"AI 接口调用失败：{err}", "error_type": "network"}
+    if finish == 'length':
+        return {"error": f"AI 输出被截断（max_tokens={max_tokens} 不足），未能生成完整汇总",
+                "error_type": "truncated"}
     data = llm.extract_json(reply)
     if not isinstance(data, dict):
-        return {}
+        return {"error": "AI 返回内容不是有效的 JSON 格式，请重试", "error_type": "json"}
     return {"per_question": data.get("per_question", {}),
             "overall": str(data.get("overall", "")).strip()}
 

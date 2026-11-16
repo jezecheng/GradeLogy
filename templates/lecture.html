@@ -568,23 +568,53 @@
     busyOn(form.querySelector('button'), '分析中…');
   });
 })();
-// 讲次汇总：生成会耗时几十秒，按钮进入处理中状态；已有汇总时覆盖先确认
+// 讲次汇总：AJAX 生成，失败弹窗显示具体原因和参数建议
 (function () {
   var form = document.querySelector('.summary-form');
   if (!form) return;
   form.addEventListener('submit', function (e) {
-    if (form.dataset.hasResult === '1' && form.dataset.confirmed !== '1') {
-      e.preventDefault();
-      confirmDialog('重新生成会覆盖当前讲次汇总（每题要点 + 整体总结），确定继续吗？',
-                    '重新生成').then(function (ok) {
-        if (!ok) return;
-        form.dataset.confirmed = '1';
-        busyOn(form.querySelector('button'), '生成中…');
-        form.submit();
+    e.preventDefault();
+    var btn = form.querySelector('button');
+    var run = function () {
+      busyOn(btn, '生成中…');
+      fetch(form.action, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json'
+        },
+        body: '_csrf=' + encodeURIComponent(form.querySelector('[name="_csrf"]').value)
+      }).then(function (r) {
+        // 先检查响应是否为 JSON（500 错误会返回 HTML）
+        var ct = r.headers.get('content-type') || '';
+        if (!ct.includes('json')) {
+          throw new Error('服务器内部错误（HTTP ' + r.status + '），请稍后重试或联系管理员');
+        }
+        return r.json();
+      }).then(function (data) {
+        busyOff(btn);
+        if (data.ok) {
+          showFlash('讲次汇总已更新。' + (data.usage || ''));
+          setTimeout(function () { location.reload(); }, 800);
+        } else {
+          // 弹窗显示具体错误原因和参数建议
+          var msg = data.error || '生成失败';
+          if (data.error_type === 'truncated') {
+            msg += '\n\n💡 解决方法：到「AI 设置」页面，将「讲次汇总」的 max_tokens 调大（如 8192 或 16384），然后重新生成。';
+          }
+          alert(msg);
+        }
+      }).catch(function (err) {
+        busyOff(btn);
+        alert('讲次汇总生成失败：' + (err.message || '网络错误，请重试'));
       });
+    };
+    if (form.dataset.hasResult === '1') {
+      confirmDialog('重新生成会覆盖当前讲次汇总（每题要点 + 整体总结），确定继续吗？',
+                    '重新生成').then(function (ok) { if (ok) run(); });
       return;
     }
-    busyOn(form.querySelector('button'), '生成中…');
+    run();
   });
 })();
 </script>

@@ -36,49 +36,6 @@
   {% if md %}
   <div class="report-body">{{ body|safe }}</div>
 
-  {% if kg_diagnosis %}
-  <div class="card" style="margin-top:16px; border-left:3px solid #4a6fa5">
-    <h3 style="margin-bottom:4px">知识图谱诊断</h3>
-    <p class="muted small" style="margin-bottom:12px">基于本课程挂载的知识图谱，分析薄弱知识点的关联概念与前置知识断层。</p>
-    {% for d in kg_diagnosis %}
-    <div style="margin-bottom:14px; padding:10px 12px; background:#f8f9fb; border-radius:6px">
-      <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap">
-        <span class="tag tag-knowledge" style="font-size:14px">{{ d.tag }}</span>
-        <span class="small">
-          <span style="color:#2e7d32">对 {{ d.perf.right }}</span> /
-          <span style="color:#e65100">半对 {{ d.perf.partial }}</span> /
-          <span style="color:#c62828">错 {{ d.perf.wrong }}</span>
-        </span>
-      </div>
-      {% if d.definition %}
-      <p class="muted small" style="margin:6px 0 0">{{ d.definition }}</p>
-      {% endif %}
-      {% if d.weak_prereqs %}
-      <div style="margin-top:8px">
-        <span class="small" style="color:#c62828; font-weight:600">⚠ 前置知识断层：</span>
-        <span class="small">你在「{{ d.tag }}」上失分，而它的前置概念也掌握不牢，建议优先补强：</span>
-        <ul style="margin:4px 0 0 18px; padding:0">
-          {% for p in d.weak_prereqs %}
-          <li class="small">
-            <b>{{ p.name }}</b>
-            {% if p.perf %}（对{{ p.perf.right }}/半对{{ p.perf.partial }}/错{{ p.perf.wrong }}）{% endif %}
-            {% if p.evidence %}<span class="muted">— {{ p.evidence }}</span>{% endif %}
-          </li>
-          {% endfor %}
-        </ul>
-      </div>
-      {% endif %}
-      {% if d.untested_prereqs %}
-      <div style="margin-top:6px">
-        <span class="small muted">本次作业未涉及的前置知识（如也不熟悉可一并复习）：</span>
-        {% for p in d.untested_prereqs %}<span class="tag" style="font-size:12px">{{ p.name }}</span>{% endfor %}
-      </div>
-      {% endif %}
-    </div>
-    {% endfor %}
-  </div>
-  {% endif %}
-
   {% if is_teacher %}
   <details class="report-editor">
     <summary>编辑报告内容（Markdown）</summary>

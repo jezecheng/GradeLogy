@@ -2033,13 +2033,35 @@ def lecture_summary_generate(hid):
                                     usage_hook=operation["usage_hook"])
     except Exception as e:
         _finish_ai_operation(operation, "failed", str(e))
-        raise
-    error = "" if result else "讲次汇总生成失败，请稍后重试或检查 AI 设置"
-    _finish_ai_operation(operation, "success" if result else "failed", error)
-    usage_text = _ai_usage_text(_ai_operation_history(operation_id=operation["id"], limit=1)[0])
-    if not result:
-        flash(f"{error}；{usage_text}")
+        if request.headers.get("Accept") == "application/json":
+            return jsonify(ok=False, error=f"生成异常：{e}")
+        flash(f"讲次汇总生成异常：{e}")
         return redirect(url_for("lecture_detail", hid=hid))
+    # 检查 AI 返回的具体错误
+    ai_error = result.get("error", "") if result else ""
+    if ai_error:
+        error_type = result.get("error_type", "")
+        hint = ""
+        if error_type == "truncated":
+            hint = "请到 AI 设置 → 「讲次汇总」max_tokens 调大（如 8192 或 16384）后重试"
+        elif error_type == "network":
+            hint = "请检查 AI 设置中的 API 地址和密钥是否正确，网络是否通畅"
+        else:
+            hint = "请重试，或检查 AI 设置"
+        full_error = f"{ai_error}。{hint}"
+        _finish_ai_operation(operation, "failed", full_error)
+        if request.headers.get("Accept") == "application/json":
+            return jsonify(ok=False, error=full_error, error_type=error_type)
+        flash(full_error)
+        return redirect(url_for("lecture_detail", hid=hid))
+    if not result or not result.get("overall"):
+        _finish_ai_operation(operation, "failed", "AI 返回内容为空")
+        if request.headers.get("Accept") == "application/json":
+            return jsonify(ok=False, error="AI 返回内容为空，请重试")
+        flash("讲次汇总生成失败，AI 返回内容为空，请重试")
+        return redirect(url_for("lecture_detail", hid=hid))
+    _finish_ai_operation(operation, "success")
+    usage_text = _ai_usage_text(_ai_operation_history(operation_id=operation["id"], limit=1)[0])
     # 渲染成 Markdown 存库（per_question 字典按题号展开 + overall）
     per_q = result.get("per_question") or {}
     lines = ["## 每题要点\n"]
@@ -2052,6 +2074,8 @@ def lecture_summary_generate(hid):
     db.execute("UPDATE lectures SET summary_md=?, summary_at=? WHERE id=?", (md, now, hid))
     db.commit()
     log.info("讲次 summary 生成成功 lecture=%s by=%s", hid, g.user["username"])
+    if request.headers.get("Accept") == "application/json":
+        return jsonify(ok=True, usage=usage_text)
     flash(f"讲次汇总已更新。{usage_text}")
     return redirect(url_for("lecture_detail", hid=hid))
 
