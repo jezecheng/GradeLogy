@@ -288,7 +288,14 @@
     <p class="muted small danger-text">上次后台批阅失败：{{ job.error }}</p>
     {% endif %}
     {% if s.grader %}<p class="muted small">批改来源：{{ s.grader }} · 更新于 {{ s.updated_at|localtime }}</p>{% endif %}
-    {% if s.feedback %}<pre class="feedback">{{ s.feedback }}</pre>{% endif %}
+    {% if s.feedback %}
+    <details class="sub-feedback-toggle">
+      <summary class="small" style="cursor:pointer; color:#4a6fa5; margin-top:4px; user-select:none">
+        展开总评 ▾
+      </summary>
+      <pre class="feedback">{{ s.feedback }}</pre>
+    </details>
+    {% endif %}
   </div>
   {% endfor %}
   {% else %}
