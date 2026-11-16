@@ -1947,11 +1947,15 @@ def lecture_tag_analysis(hid):
         "SELECT COUNT(DISTINCT q.submission_id) FROM questions q "
         "JOIN submissions s ON s.id=q.submission_id "
         "WHERE s.lecture_id=? AND q.verdict<>''", (hid,)).fetchone()[0]
+    # 提取全班共性薄弱标签，用课程 KG 生成「前置 -> 薄弱」知识链注入 prompt
+    weak_tag_names = [s["tag"] for s in stats if s["n_wrong"] or s["n_partial"]]
+    kg_chains = _kg_weakness_chains(db, hw["course_id"], weak_tag_names)
     context = {
         "subject_and_course": _course_label(course),
         "lecture_name": hw["title"],
         "total_students": total_students,
         "aggregated_question_stats": question_stats,
+        "kg_weakness_chains": kg_chains or "本课程未挂载知识图谱，或薄弱标签未能匹配图谱节点。",
     }
     prompt = _prompt_content("tag_horizontal", course["tag_horizontal_prompt_id"])
     api_url, api_key, model, err = _ai_endpoint(g.user["id"])
@@ -2031,9 +2035,14 @@ def lecture_summary_generate(hid):
     model = get_setting(g.user["id"], "ai_model")
     operation = _start_ai_operation(
         g.user["id"], "lecture_summary", model, course_id=hw["course_id"], lecture_id=hid)
+    # 提取全班共性薄弱标签，用课程 KG 生成前置知识链，让汇总能指出根因
+    lec_stats = tag_utils.lecture_stats(db, hid)
+    weak_tag_names = [s["tag"] for s in lec_stats if s["n_wrong"] or s["n_partial"]]
+    kg_chains = _kg_weakness_chains(db, hw["course_id"], weak_tag_names)
     try:
         result = ai_lecture_summary(qstats, api_url, api_key, model,
                                     max_tokens=_get_max_tokens(g.user["id"], "max_tokens_summary"),
+                                    kg_chains=kg_chains,
                                     usage_hook=operation["usage_hook"])
     except Exception as e:
         _finish_ai_operation(operation, "failed", str(e))
@@ -2154,15 +2163,19 @@ def student_tag_analysis(cid, sid):
     titles = [row["lecture"] for row in trend]
     lecture_range = (f"{titles[0]} ~ {titles[-1]}（共 {len(titles)} 讲）"
                      if len(titles) > 1 else (titles[0] if titles else ""))
+    # 用课程挂载的 KG 生成真实的「前置 -> 薄弱」知识链；未挂载时给出提示
+    kg_chains = _kg_weakness_chains(db, cid, [row["tag"] for row in weak])
+    if not kg_chains:
+        kg_chains = ("本课程未挂载知识图谱，或薄弱标签未能匹配图谱节点；"
+                     "请仅依据同一或相近标签在不同讲次的重复出错推断前置基础，"
+                     "不要编造数据中不存在的依赖关系。")
     context = {
         "lecture_count": len(trend),
         "subject_and_course": _course_label(course),
         "student_name": student["display_name"],
         "lecture_range": lecture_range,
         "module_mastery_stats": mastery,
-        "kg_weakness_chains": (
-            "系统暂未内置学科知识图谱；请仅依据同一或相近标签在不同讲次的重复出错"
-            "推断前置基础与衍生知识点，不要编造数据中不存在的依赖关系。"),
+        "kg_weakness_chains": kg_chains,
         "error_habit_stats": tag_utils.habit_stats(db, cid, sid),
         "trend_data": trend,
     }
@@ -3946,6 +3959,63 @@ def generate_report(db, sub_id, teacher_id, reuse=False):
     return md
 
 
+def _kg_match_node(nodes, name_to_node, tag):
+    """先精确匹配，再尝试模糊匹配（包含关系）。
+    知识点标签由 AI 从作业答案生成，KG 节点从教材提取，名称可能不完全一致。
+    例如标签「溶度积常数」可匹配 KG 节点「溶度积」。返回 (node, match_type)。"""
+    node = name_to_node.get(tag)
+    if node:
+        return node, "exact"
+    candidates = []
+    for n in nodes:
+        # 标签包含节点名，或节点名包含标签（至少 2 个字符避免误匹配）
+        if len(n["name"]) >= 2 and n["name"] in tag:
+            candidates.append((n, "tag_contains_node"))
+        elif len(tag) >= 2 and tag in n["name"]:
+            candidates.append((n, "node_contains_tag"))
+    if candidates:
+        # 优先选名称最长的匹配（更具体）
+        candidates.sort(key=lambda c: len(c[0]["name"]), reverse=True)
+        return candidates[0]
+    return None, "no_match"
+
+
+def _kg_weakness_chains(db, course_id, weak_tag_names):
+    """基于课程挂载的 KG，为一组薄弱知识点标签生成「前置 -> 薄弱」知识链文本。
+
+    供横向/纵向知识点分析的 prompt 注入，让 AI 能引用真实的图谱依赖关系做归因。
+    返回多行文本；无 KG、无匹配或无前置关系时返回空字符串。
+    """
+    if not weak_tag_names:
+        return ""
+    graph_rows = db.execute(
+        "SELECT graph_id FROM course_knowledge_graphs WHERE course_id=?",
+        (course_id,)).fetchall()
+    if not graph_rows:
+        return ""
+    graph_ids = [g["graph_id"] for g in graph_rows]
+    ph = ",".join("?" * len(graph_ids))
+    nodes = db.execute(
+        f"SELECT id,graph_id,name,definition FROM kg_nodes WHERE graph_id IN ({ph})",
+        graph_ids).fetchall()
+    if not nodes:
+        return ""
+    name_to_node = {n["name"]: n for n in nodes}
+    lines = []
+    for tag in sorted(set(weak_tag_names)):
+        node, _ = _kg_match_node(nodes, name_to_node, tag)
+        if not node:
+            continue
+        neighbors = kg_utils.concept_neighbors(db, node["graph_id"], node["id"])
+        prereqs = (neighbors or {}).get("prerequisites", [])
+        if prereqs:
+            pre_names = "、".join(p["name"] for p in prereqs[:5])
+            lines.append(f"- {tag}（图谱节点：{node['name']}）：前置依赖 {pre_names}")
+        else:
+            lines.append(f"- {tag}（图谱节点：{node['name']}）：图谱中无前置依赖，属基础概念")
+    return "\n".join(lines)
+
+
 def _kg_diagnosis(db, sub):
     """基于课程挂载的知识图谱，为批阅报告生成知识点诊断。
 
@@ -4010,30 +4080,10 @@ def _kg_diagnosis(db, sub):
         graph_ids).fetchall()
     name_to_node = {n["name"]: n for n in nodes}
 
-    def _match_node(tag):
-        """先精确匹配，再尝试模糊匹配（包含关系）。
-        知识点标签由 AI 从作业答案生成，KG 节点从教材提取，名称可能不完全一致。
-        例如标签「溶度积常数」可匹配 KG 节点「溶度积」。"""
-        node = name_to_node.get(tag)
-        if node:
-            return node, "exact"
-        candidates = []
-        for n in nodes:
-            # 标签包含节点名，或节点名包含标签（至少 2 个字符避免误匹配）
-            if len(n["name"]) >= 2 and n["name"] in tag:
-                candidates.append((n, "tag_contains_node"))
-            elif len(tag) >= 2 and tag in n["name"]:
-                candidates.append((n, "node_contains_tag"))
-        if candidates:
-            # 优先选名称最长的匹配（更具体）
-            candidates.sort(key=lambda c: len(c[0]["name"]), reverse=True)
-            return candidates[0]
-        return None, "no_match"
-
     matched_tags, unmatched_tags = [], []
     diagnoses = []
     for tag in sorted(weak_tags):
-        node, match_type = _match_node(tag)
+        node, match_type = _kg_match_node(nodes, name_to_node, tag)
         if not node:
             unmatched_tags.append(tag)
             continue

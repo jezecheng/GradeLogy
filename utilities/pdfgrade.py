@@ -534,13 +534,17 @@ LECTURE_SUMMARY_PROMPT = (
     '{"per_question":{"题号":"要点",...},'
     '"overall":"整体总结内容"}\n'
     "要求：只依据给定数据，不要编造；每题要点简洁，重点突出；整体总结客观、有教学参考价值。"
+    "若提供了知识图谱前置依赖，整体总结中应指出全班共性失分的底层前置知识漏洞，"
+    "并建议讲评课先补对应前置基础；若未提供，则仅依据题目统计总结。"
 )
 
 
-def ai_lecture_summary(qstats, api_url, api_key, model, max_tokens=4096, usage_hook=None):
+def ai_lecture_summary(qstats, api_url, api_key, model, max_tokens=4096,
+                       kg_chains="", usage_hook=None):
     """根据全班逐题判定与评语，生成讲次汇总。
     成功返回 {"per_question": ..., "overall": ...}；
     失败返回 {"error": "具体原因", "error_type": "truncated|network|json"}。
+    kg_chains：课程知识图谱的前置知识链文本（可选），用于归因全班共性失分的根因。
     """
     payload = []
     for row in qstats or []:
@@ -555,8 +559,10 @@ def ai_lecture_summary(qstats, api_url, api_key, model, max_tokens=4096, usage_h
             "unknown": row["n_unknown"],
             "sample_comments": comments,
         })
-    content = [{"type": "text", "text": LECTURE_SUMMARY_PROMPT + "\n\n数据：\n" +
-                json.dumps(payload, ensure_ascii=False)}]
+    text = LECTURE_SUMMARY_PROMPT + "\n\n数据：\n" + json.dumps(payload, ensure_ascii=False)
+    if kg_chains:
+        text += "\n\n知识图谱前置依赖（薄弱知识点 -> 前置基础）：\n" + kg_chains
+    content = [{"type": "text", "text": text}]
     reply, finish, err = llm.chat(api_url, api_key, model, content,
                                   max_tokens=max_tokens, timeout=60, retries=1,
                                   usage_hook=usage_hook)
@@ -582,15 +588,18 @@ DEFAULT_TAG_HORIZONTAL_PROMPT = (
     "- 作业/讲次名称：{lecture_name}\n"
     "- 参与批改总人数：{total_students}\n"
     "- 题目与知识点统计列表（含题号、关联知识点、全班错误率、典型错误 comment 摘录）：\n"
-    "{aggregated_question_stats}\n\n"
+    "{aggregated_question_stats}\n"
+    "- 知识图谱前置依赖（来自本课程挂载的知识图谱，列出薄弱知识点的前置知识链）：\n"
+    "{kg_weakness_chains}\n\n"
     "### 红线与要求\n"
     "1. **严格基于数据**：所有错误率、人数比例、典型错误特征必须严格依据输入统计，"
     "严禁编造未出现的错误类型或主观臆测原因。\n"
     "2. **聚焦共性痛点**：重点剖析错误率较高的题目（如错误率 ≥ 40%），"
     "从“核心概念/原理理解偏差”、“解题思路/逻辑断层”、“审题与作答规范性问题”三个维度"
     "归纳全班共性盲区。\n"
-    "3. **知识图谱关联（如有）**：若输入数据中包含知识点关联或前置依赖信息，"
-    "需指出高频错题共同指向的底层核心知识模块。\n"
+    "3. **知识图谱归因**：若“知识图谱前置依赖”中给出了薄弱知识点的前置知识链，"
+    "必须指出高频错题共同指向的底层核心知识模块，并判断全班失分是源于前置基础不牢还是当前概念理解偏差；"
+    "若该数据提示未挂载图谱，则仅依据题目统计推断，不要编造依赖关系。\n"
     "4. **可执行性**：教学建议必须具体、可落地，明确指出讲评课的时间分配重点与前置概念补充方向。"
 )
 
@@ -698,6 +707,7 @@ def ai_horizontal_analysis(context, api_url, api_key, model,
         "lecture_name": context.get("lecture_name", ""),
         "total_students": str(context.get("total_students", 0)),
         "aggregated_question_stats": context.get("aggregated_question_stats") or [],
+        "kg_weakness_chains": context.get("kg_weakness_chains", ""),
     }
     text = _compose_tag_prompt(prompt or DEFAULT_TAG_HORIZONTAL_PROMPT,
                                TAG_HORIZONTAL_OUTPUT_CONTRACT, values)

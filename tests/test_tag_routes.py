@@ -295,7 +295,7 @@ class TagRouteTest(unittest.TestCase):
         ai.assert_called_once()
         context = ai.call_args[0][0]
         self.assertEqual(context["student_name"], "学生")
-        self.assertIn("系统暂未内置学科知识图谱", context["kg_weakness_chains"])
+        self.assertIn("本课程未挂载知识图谱", context["kg_weakness_chains"])
         con = self._db()
         row = con.execute(
             "SELECT * FROM tag_analyses WHERE kind='vertical' AND student_id=4"
