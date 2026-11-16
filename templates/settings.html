@@ -59,6 +59,10 @@
 .danger-text { color: #c93338; }
 .api-catalog { margin-top: 12px; }
 .api-catalog summary { cursor: pointer; color: #8a8f99; font-size: 13px; }
+.max-tokens-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+.max-tokens-table th, .max-tokens-table td { border-bottom: 1px solid #eef0f3; padding: 8px; text-align: left; vertical-align: middle; }
+.max-tokens-table th { color: #8a8f99; font-weight: 500; }
+.max-tokens-input { width: 120px; padding: 4px 8px; text-align: right; }
 </style>
 <h1>AI 批阅设置</h1>
 
@@ -307,6 +311,28 @@
       开启后：工作日 9:00-12:00、14:00-18:00 会阻止所有 AI 调用（整份批阅、范围分析、讲次汇总、报告评语），
       提示你在闲时（夜间、午休、周末）再操作。其他时间不受影响。
     </p>
+
+    <h3 style="margin-top:18px">AI 输出上限（max_tokens）</h3>
+    <p class="muted small">留空使用默认值；推理模型会把大量 token 花在思考上，遇到「输出被截断」时可调大对应场景的上限。
+      注意：输出 token 越多费用越高，按需调整即可。</p>
+    <table class="max-tokens-table">
+      <thead>
+        <tr><th>场景</th><th>max_tokens</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+      {% for key, cfg in max_tokens_settings.items() %}
+        <tr>
+          <td class="nowrap"><strong>{{ cfg.label }}</strong></td>
+          <td class="nowrap">
+            <input type="number" name="{{ key }}" value="{{ max_tokens[key] }}"
+                   min="1" step="1" placeholder="{{ cfg.default }}" class="max-tokens-input">
+          </td>
+          <td class="muted small">{{ cfg.hint }}<br>默认 {{ cfg.default }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+
     <button type="submit">保存设置</button>
   </form>
   <form method="post" action="{{ url_for('settings_test') }}" style="margin-top:10px">

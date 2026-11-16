@@ -18,6 +18,30 @@ ENV_AI_SETTINGS = {
 
 AI_SETTING_KEYS = ("ai_api_url", "ai_api_key", "ai_model")
 
+# 各 AI 场景的输出上限（max_tokens）：老师可在「AI 设置」页按需调整；
+# 未设置时回落到 default。default 与 utilities 里的函数默认值保持一致。
+MAX_TOKENS_SETTINGS = {
+    "max_tokens_answer_pdf": {"label": "作业范围分析", "default": 16384,
+                              "hint": "识别教师版答案中的题目清单与分值"},
+    "max_tokens_tagging": {"label": "知识点标注", "default": 16384,
+                           "hint": "为每道题生成知识点标签"},
+    "max_tokens_grading": {"label": "作业批阅", "default": 32768,
+                           "hint": "逐题判定、OCR、标准答案与评语"},
+    "max_tokens_summary": {"label": "讲次汇总", "default": 4096,
+                           "hint": "每题要点 + 整体总结"},
+    "max_tokens_horizontal": {"label": "横向知识点分析", "default": 4096,
+                              "hint": "全班共性薄弱知识点"},
+    "max_tokens_vertical": {"label": "纵向知识点分析", "default": 4096,
+                            "hint": "单个学生跨讲次薄弱点"},
+    "max_tokens_kg_build": {"label": "知识图谱构建", "default": 32768,
+                            "hint": "从资料抽取概念与关系"},
+    "max_tokens_kg_audit": {"label": "知识图谱体检", "default": 32768,
+                            "hint": "审校图谱并给出治理建议"},
+    "max_tokens_report": {"label": "报告评语", "default": 2048,
+                          "hint": "生成学生作业的个性化评语"},
+}
+MAX_TOKENS_KEYS = tuple(MAX_TOKENS_SETTINGS.keys())
+
 
 def _connect():
     con = sqlite3.connect(config.DB_PATH, timeout=10)

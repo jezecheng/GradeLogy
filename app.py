@@ -40,7 +40,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 import ai_routes
 import config as cfg
 import db as database
-from ai_config import AI_SETTING_KEYS, ENV_AI_SETTINGS, get_ai_setting
+from ai_config import AI_SETTING_KEYS, ENV_AI_SETTINGS, MAX_TOKENS_SETTINGS, get_ai_setting
 from ai_usage import (AI_OPERATION_LABEL, AI_STATUS_LABEL, _ai_dashboard_data,
                       _ai_operation_history, _ai_usage_text, _compact_number,
                       _finish_ai_operation, _now_in_peak, _start_ai_operation)
@@ -502,6 +502,19 @@ def save_setting(teacher_id, key, value):
         "INSERT INTO settings(teacher_id,key,value) VALUES(?,?,?) "
         "ON CONFLICT(teacher_id,key) DO UPDATE SET value=excluded.value",
         (teacher_id, key, value))
+
+
+def _get_max_tokens(teacher_id, key):
+    """读取老师为某 AI 场景配置的 max_tokens；未设置或非法时回落到注册表默认值。"""
+    default = MAX_TOKENS_SETTINGS[key]["default"]
+    raw = get_setting(teacher_id, key)
+    if raw == "":
+        return default
+    try:
+        value = int(raw)
+        return value if value > 0 else default
+    except (TypeError, ValueError):
+        return default
 
 
 # ---------- 老师：多组 AI API Key ----------
@@ -1734,7 +1747,8 @@ def _generate_question_tags(hw, keys):
         rows, err = analyze_question_tags(
             os.path.join(UPLOAD_DIR, hw["answer_pdf"]), picked,
             api_url, api_key, model, pages=_page_list(hw["answer_pages"]),
-            usage_hook=operation["usage_hook"])
+            usage_hook=operation["usage_hook"],
+            max_tokens=_get_max_tokens(g.user["id"], "max_tokens_tagging"))
     except Exception as e:  # noqa: BLE001 标签失败不影响作业范围本身
         _finish_ai_operation(operation, "failed", str(e))
         log.exception("生成知识点标签失败 lecture=%s", hw["id"])
@@ -1777,7 +1791,8 @@ def _analyze_scope(hw, pages):
     try:
         questions, err = analyze_answer_pdf(
             os.path.join(UPLOAD_DIR, hw["answer_pdf"]), api_url, api_key, model,
-            pages=pages, usage_hook=operation["usage_hook"])
+            pages=pages, usage_hook=operation["usage_hook"],
+            max_tokens=_get_max_tokens(teacher_id, "max_tokens_answer_pdf"))
     except Exception as e:
         _finish_ai_operation(operation, "failed", str(e))
         raise
@@ -1947,7 +1962,8 @@ def lecture_tag_analysis(hid):
     try:
         result = ai_horizontal_analysis(context, api_url, api_key, model,
                                         prompt=prompt,
-                                        usage_hook=operation["usage_hook"])
+                                        usage_hook=operation["usage_hook"],
+                                        max_tokens=_get_max_tokens(g.user["id"], "max_tokens_horizontal"))
     except Exception as e:
         _finish_ai_operation(operation, "failed", str(e))
         raise
@@ -2012,7 +2028,8 @@ def lecture_summary_generate(hid):
     operation = _start_ai_operation(
         g.user["id"], "lecture_summary", model, course_id=hw["course_id"], lecture_id=hid)
     try:
-        result = ai_lecture_summary(qstats, api_url, api_key, model, max_tokens=4096,
+        result = ai_lecture_summary(qstats, api_url, api_key, model,
+                                    max_tokens=_get_max_tokens(g.user["id"], "max_tokens_summary"),
                                     usage_hook=operation["usage_hook"])
     except Exception as e:
         _finish_ai_operation(operation, "failed", str(e))
@@ -2131,7 +2148,8 @@ def student_tag_analysis(cid, sid):
     try:
         result = ai_vertical_analysis(context, api_url, api_key, model,
                                       prompt=prompt,
-                                      usage_hook=operation["usage_hook"])
+                                      usage_hook=operation["usage_hook"],
+                                      max_tokens=_get_max_tokens(g.user["id"], "max_tokens_vertical"))
     except Exception as e:
         _finish_ai_operation(operation, "failed", str(e))
         raise
@@ -2927,7 +2945,8 @@ def _kg_build_worker(graph_id, material_id, teacher_id):
                     try:
                         result = kg_utils.build_material(
                             db, material_id, api_url, api_key, model,
-                            usage_hook=operation["usage_hook"])
+                            usage_hook=operation["usage_hook"],
+                            max_tokens=_get_max_tokens(teacher_id, "max_tokens_kg_build"))
                     except Exception as e:  # noqa: BLE001 后台任务失败写入资料状态
                         _finish_ai_operation(operation, "failed", str(e))
                         db.execute("UPDATE kg_materials SET status=?, error=?,"
@@ -3402,7 +3421,8 @@ def knowledge_graph_audit_run(gid):
     suggestions, rejected = [], []
     try:
         suggestions, rejected, err = kg_utils.analyze_graph(
-            db, gid, api_url, api_key, model, usage_hook=operation["usage_hook"])
+            db, gid, api_url, api_key, model, usage_hook=operation["usage_hook"],
+            max_tokens=_get_max_tokens(g.user["id"], "max_tokens_kg_audit"))
     except Exception as e:  # noqa: BLE001 体检失败要落状态，便于老师重试
         err = str(e)
         log.exception("知识图谱体检失败 graph=%s", gid)
@@ -3789,7 +3809,8 @@ def run_grading(teacher_id, file_name, answer_pdf="", scope="", answer_pages=Non
         student_paths,
         os.path.join(UPLOAD_DIR, answer_pdf) if answer_pdf else "",
         api_url, api_key, model,
-        extra=extra, answer_pages=answer_pages, prompt=prompt, usage_hook=usage_hook)
+        extra=extra, answer_pages=answer_pages, prompt=prompt, usage_hook=usage_hook,
+        max_tokens=_get_max_tokens(teacher_id, "max_tokens_grading"))
     gen["summary"] = _build_summary(gen["questions"], gen.get("weak_points") or [],
                                     gen.get("evaluation", ""), gen.get("errors") or [])
     return gen
@@ -3856,7 +3877,8 @@ def generate_report(db, sub_id, teacher_id, reuse=False):
                         questions, summary.get("weak_points") or [],
                         summary.get("evaluation", ""), api_url, api_key, model,
                         prompt=_prompt_content("report", course["report_prompt_id"] if course else 0),
-                        usage_hook=operation["usage_hook"])
+                        usage_hook=operation["usage_hook"],
+                        max_tokens=_get_max_tokens(teacher_id, "max_tokens_report"))
                 except Exception as e:
                     _finish_ai_operation(operation, "failed", str(e))
                     raise
@@ -3949,7 +3971,8 @@ def submission_report_comment(sid):
         detail = ai_report_comment(questions, summary.get("weak_points") or [],
                                    summary.get("evaluation", ""), api_url, api_key, model,
                                    prompt=_prompt_content("report", course["report_prompt_id"]),
-                                   usage_hook=operation["usage_hook"])
+                                   usage_hook=operation["usage_hook"],
+                                   max_tokens=_get_max_tokens(g.user["id"], "max_tokens_report"))
     except Exception as e:
         _finish_ai_operation(operation, "failed", str(e))
         raise

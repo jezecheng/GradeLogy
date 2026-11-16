@@ -15,6 +15,7 @@ import re
 from flask import flash, g, redirect, render_template, request, url_for
 from werkzeug.utils import secure_filename
 
+from ai_config import MAX_TOKENS_SETTINGS
 from utilities import llm
 
 _REQUIRED = (
@@ -134,6 +135,11 @@ def register(registry, deps):
     def settings_context(extra=None):
         conf = {k: get_setting(g.user["id"], k)
                 for k in ("ai_api_url", "ai_api_key", "ai_model", "ai_demo", "ai_offpeak_only")}
+        # 各场景 max_tokens：未设置时显示注册表默认值（占位符），保存时才写入 settings
+        max_tokens = {
+            key: get_setting(g.user["id"], key, "") or str(cfg["default"])
+            for key, cfg in MAX_TOKENS_SETTINGS.items()
+        }
         view = build_model_rows(g.user["id"], conf["ai_api_url"], get_db())
         api_keys = api_key_rows(g.user["id"])
         ctx = {
@@ -150,6 +156,8 @@ def register(registry, deps):
             "api_configured": bool(conf["ai_api_key"]),
             # 只有环境变量接管了 Key 才禁用页面管理；仅注入 AI_API_URL 时仍可保存多套配置
             "api_env_managed": bool(env_ai_settings.get("ai_api_key")),
+            "max_tokens_settings": MAX_TOKENS_SETTINGS,
+            "max_tokens": max_tokens,
         }
         if extra:
             ctx.update(extra)
@@ -162,9 +170,23 @@ def register(registry, deps):
             if request.form.get("demo_only"):
                 save_setting(g.user["id"], "ai_demo", "1" if request.form.get("ai_demo") else "")
             else:
-                # 模型由每套 API 配置单独保存，这里只维护批阅开关
+                # 模型由每套 API 配置单独保存，这里维护批阅开关与各场景 max_tokens
                 save_setting(g.user["id"], "ai_demo", "1" if request.form.get("ai_demo") else "")
-                save_setting(g.user["id"], "ai_offpeak_only", "1" if request.form.get("ai_offpeak_only") else "")
+                save_setting(g.user["id"], "ai_offpeak_only",
+                             "1" if request.form.get("ai_offpeak_only") else "")
+                for key in MAX_TOKENS_SETTINGS:
+                    raw = (request.form.get(key) or "").strip()
+                    if raw:
+                        try:
+                            value = int(raw)
+                            if value > 0:
+                                save_setting(g.user["id"], key, str(value))
+                            else:
+                                save_setting(g.user["id"], key, "")
+                        except (TypeError, ValueError):
+                            save_setting(g.user["id"], key, "")
+                    else:
+                        save_setting(g.user["id"], key, "")
             get_db().commit()
             flash("已保存")
             return redirect(url_for("settings_page"))

@@ -454,7 +454,8 @@ def extract_material(db, material, abs_path):
     return len(kept), truncated
 
 
-def build_material(db, material_id, api_url, api_key, model, usage_hook=None):
+def build_material(db, material_id, api_url, api_key, model, usage_hook=None,
+                   max_tokens=KG_MAX_TOKENS):
     """逐块持久化抽取结果，重启后续建；最后统一合图以保留跨块关系。"""
     material = db.execute("SELECT * FROM kg_materials WHERE id=?",
                           (material_id,)).fetchone()
@@ -484,7 +485,8 @@ def build_material(db, material_id, api_url, api_key, model, usage_hook=None):
         def analyze_texts(texts):
             """截断时对半拆批；单块则拆正文，避免推理模型一次输出过长。"""
             batch_concepts, batch_relations, error = analyze_batch(
-                texts, api_url, api_key, model, usage_hook=chunk_usage)
+                texts, api_url, api_key, model, max_tokens=max_tokens,
+                usage_hook=chunk_usage)
             if error.startswith(TRUNCATED_MARK):
                 if len(texts) > 1:
                     left_texts, right_texts = texts[:len(texts) // 2], texts[len(texts) // 2:]
@@ -803,7 +805,8 @@ def _audit_catalog(db, graph_id, node_limit=150, edge_limit=250):
     return "\n".join(lines), len(nodes)
 
 
-def analyze_graph(db, graph_id, api_url, api_key, model, usage_hook=None):
+def analyze_graph(db, graph_id, api_url, api_key, model, usage_hook=None,
+                  max_tokens=AUDIT_MAX_TOKENS):
     """让模型审校图谱，返回 (可用建议, 被校验拦截的建议, 错误)。"""
     catalog, node_count = _audit_catalog(db, graph_id)
     if not node_count:
@@ -818,13 +821,13 @@ def analyze_graph(db, graph_id, api_url, api_key, model, usage_hook=None):
         reply, finish, err = llm.chat(
             api_url, api_key, model,
             [{"type": "text", "text": AUDIT_PROMPT + "\n\n" + catalog + hint}],
-            max_tokens=AUDIT_MAX_TOKENS, usage_hook=usage_hook, report_running=True)
+            max_tokens=max_tokens, usage_hook=usage_hook, report_running=True)
     except Exception as e:  # noqa: BLE001 体检失败不影响图谱本身
         return [], [], str(e)
     if err:
         return [], [], err
     if finish == "length" or not (reply or "").strip():
-        return [], [], (f"{TRUNCATED_MARK}（max_tokens={AUDIT_MAX_TOKENS}），"
+        return [], [], (f"{TRUNCATED_MARK}（max_tokens={max_tokens}），"
                         "可改用非推理模型或调大输出上限")
     data = llm.extract_json(reply)
     if not isinstance(data, dict):
