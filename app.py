@@ -4010,16 +4010,45 @@ def _kg_diagnosis(db, sub):
         graph_ids).fetchall()
     name_to_node = {n["name"]: n for n in nodes}
 
+    def _match_node(tag):
+        """先精确匹配，再尝试模糊匹配（包含关系）。
+        知识点标签由 AI 从作业答案生成，KG 节点从教材提取，名称可能不完全一致。
+        例如标签「溶度积常数」可匹配 KG 节点「溶度积」。"""
+        node = name_to_node.get(tag)
+        if node:
+            return node, "exact"
+        candidates = []
+        for n in nodes:
+            # 标签包含节点名，或节点名包含标签（至少 2 个字符避免误匹配）
+            if len(n["name"]) >= 2 and n["name"] in tag:
+                candidates.append((n, "tag_contains_node"))
+            elif len(tag) >= 2 and tag in n["name"]:
+                candidates.append((n, "node_contains_tag"))
+        if candidates:
+            # 优先选名称最长的匹配（更具体）
+            candidates.sort(key=lambda c: len(c[0]["name"]), reverse=True)
+            return candidates[0]
+        return None, "no_match"
+
+    matched_tags, unmatched_tags = [], []
     diagnoses = []
     for tag in sorted(weak_tags):
-        node = name_to_node.get(tag)
+        node, match_type = _match_node(tag)
         if not node:
+            unmatched_tags.append(tag)
             continue
+        matched_tags.append(f"{tag}→{node['name']}({match_type})")
         neighbors = kg_utils.concept_neighbors(db, node["graph_id"], node["id"])
         prereqs = (neighbors or {}).get("prerequisites", [])
         weak_pre, untested_pre = [], []
         for p in prereqs:
+            # 前置知识名称是 KG 节点名，tag_perf 的 key 是知识点标签，需模糊匹配
             p_perf = tag_perf.get(p["name"])
+            if not p_perf:
+                for tag_name, perf in tag_perf.items():
+                    if p["name"] in tag_name or tag_name in p["name"]:
+                        p_perf = perf
+                        break
             item = {"name": p["name"], "evidence": p.get("evidence", "")}
             if p_perf and (p_perf["wrong"] + p_perf["partial"]) > 0:
                 item["perf"] = p_perf
@@ -4033,6 +4062,9 @@ def _kg_diagnosis(db, sub):
             "weak_prereqs": weak_pre,
             "untested_prereqs": untested_pre,
         })
+    log.info("KG 诊断匹配结果 submission=%s: 薄弱知识点=%d, 匹配成功=%d [%s], 未匹配=%d [%s]",
+             sub["id"], len(weak_tags), len(matched_tags), "; ".join(matched_tags),
+             len(unmatched_tags), ", ".join(unmatched_tags))
     return diagnoses or None
 
 
