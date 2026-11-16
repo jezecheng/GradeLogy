@@ -15,8 +15,14 @@ def _md_cell(value):
     return str(value or "").replace("|", "｜").replace("\n", " ").strip()
 
 
-def build_report_md(student_name, lecture_title, date_label, questions, summary, detail):
-    """生成学生的 Markdown 批改报告：逐题明细 + 失分归因 + 评价。"""
+def build_report_md(student_name, lecture_title, date_label, questions, summary, detail,
+                    kg_diagnosis=None):
+    """生成学生的 Markdown 批改报告：逐题明细 + 失分归因 + 评价 + KG 诊断。
+
+    逐题明细的「批改说明」优先使用老师复核后的 note（人工评语），
+    为空时回退到 AI 原始的 ai_comment。
+    kg_diagnosis: 知识图谱诊断数据列表，存在时在报告末尾追加 KG 分析部分。
+    """
     qs = [dict(q) for q in questions]
     n_total = len(qs)
     right = [q for q in qs if (q.get("verdict") or "") == "对"]
@@ -30,7 +36,9 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
            "| # | 题目 | 判定 | 批改说明 |", "| ---: | --- | :---: | --- |"]
     for i, q in enumerate(qs, 1):
         icon = VERDICT_ICON.get(q.get("verdict") or "", q.get("verdict") or "—")
-        out.append(f"| {i} | {_md_cell(q.get('no'))} | {icon} | {_md_cell(q.get('ai_comment'))} |")
+        # 优先用老师复核后的评语（note），为空时回退到 AI 原始评语
+        comment = (q.get("note") or "").strip() or (q.get("ai_comment") or "").strip()
+        out.append(f"| {i} | {_md_cell(q.get('no'))} | {icon} | {_md_cell(comment)} |")
 
     def _nos(items, limit=6):
         names = [str(q.get("no")) for q in items]
@@ -67,6 +75,32 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
     nxt = (detail or {}).get("next") or ""
     if nxt:
         out += [f"**下一步建议：** {nxt}", ""]
+
+    # 知识图谱诊断：将 KG 的前置知识断层分析直接写入 MD 报告
+    if kg_diagnosis:
+        out += ["## 四、知识图谱诊断", "",
+                "基于本课程知识图谱，分析薄弱知识点的关联概念与前置知识断层。", ""]
+        for d in kg_diagnosis:
+            p = d["perf"]
+            out.append(f"### {d['tag']}（对{p['right']} / 半对{p['partial']} / 错{p['wrong']}）")
+            if d.get("definition"):
+                out.append(f"> {d['definition']}")
+                out.append("")
+            if d.get("weak_prereqs"):
+                out.append("**⚠ 前置知识断层**（你在这些前置概念上也失分，建议优先补强）：")
+                out.append("")
+                for x in d["weak_prereqs"]:
+                    line = f"- **{x['name']}**"
+                    if x.get("perf"):
+                        line += f"（对{x['perf']['right']}/半对{x['perf']['partial']}/错{x['perf']['wrong']}）"
+                    if x.get("evidence"):
+                        line += f" — {x['evidence']}"
+                    out.append(line)
+                out.append("")
+            if d.get("untested_prereqs"):
+                names = "、".join(x["name"] for x in d["untested_prereqs"])
+                out.append(f"本次未涉及的前置知识（如也不熟悉可一并复习）：{names}")
+                out.append("")
     return "\n".join(out).strip() + "\n"
 
 

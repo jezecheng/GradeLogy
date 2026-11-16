@@ -493,7 +493,8 @@ def ai_report_comment(questions, weak_points, evaluation, api_url, api_key, mode
         return ""
 
     brief = [{"no": _field(q, "no"), "verdict": _field(q, "verdict"),
-              "comment": _field(q, "ai_comment", "comment"), "note": _field(q, "note")}
+              "comment": (_field(q, "note") or _field(q, "ai_comment", "comment")),
+              "note": _field(q, "note")}
              for q in (questions or [])]
     payload = json.dumps({"questions": brief, "weak_points": weak_points or [],
                           "evaluation": evaluation or ""}, ensure_ascii=False)

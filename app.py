@@ -3906,7 +3906,8 @@ def generate_report(db, sub_id, teacher_id, reuse=False):
     except (TypeError, ValueError):
         date_label = ""
     md = build_report_md(sub["display_name"], sub["lecture_title"], date_label,
-                         questions, summary, detail)
+                         questions, summary, detail,
+                         kg_diagnosis=_kg_diagnosis(db, sub))
     db.execute("UPDATE submissions SET report_md=?, report_detail=? WHERE id=?",
                (md, json.dumps(detail, ensure_ascii=False) if detail else "", sub_id))
     db.commit()
@@ -4090,11 +4091,14 @@ def submission_report_comment(sid):
         g.user["id"], "report_comment", model, course_id=course["id"],
         lecture_id=hw["id"], submission_id=sid)
     try:
+        kg_diag = _kg_diagnosis(db, sub)
+        kg_context = _kg_diagnosis_text(kg_diag) if kg_diag else ""
         detail = ai_report_comment(questions, summary.get("weak_points") or [],
                                    summary.get("evaluation", ""), api_url, api_key, model,
                                    prompt=_prompt_content("report", course["report_prompt_id"]),
                                    usage_hook=operation["usage_hook"],
-                                   max_tokens=_get_max_tokens(g.user["id"], "max_tokens_report"))
+                                   max_tokens=_get_max_tokens(g.user["id"], "max_tokens_report"),
+                                   kg_context=kg_context)
     except Exception as e:
         _finish_ai_operation(operation, "failed", str(e))
         raise

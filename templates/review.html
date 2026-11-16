@@ -86,15 +86,17 @@
         id="review-form" data-has-report="{{ '1' if sub.report_md else '0' }}">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     {% for q in questions %}
-    <details class="review-item">
+    <details class="review-item" data-qid="{{ q.id }}">
       <summary>
         <span class="q-no">{{ ('第 ' ~ q.no ~ ' 题') if q.no[:1].isdigit() else q.no }}</span>
         {% for t in tag_by_key.get(q.no) or [] %}<span class="tag tag-knowledge">{{ t }}</span>{% endfor %}
         {% if q.verdict %}
-        <span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">AI 判定：{{ q.verdict }}</span>
+        <span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">判定：{{ q.verdict }}</span>
         {% endif %}
         <span class="reviewed-badge{% if not q.reviewed %} is-pending{% endif %}"
               data-reviewed="{{ 1 if q.reviewed else 0 }}">{{ '✓ 已复核' if q.reviewed else '待复核' }}</span>
+        <span class="note-preview muted small" data-note-preview>{{ (q.note or '')[:60] }}</span>
+        <span class="save-hint small" data-save-hint style="display:none"></span>
       </summary>
       <div class="review-row">
         <div class="review-col">
@@ -202,7 +204,7 @@
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape') toggle(false); });
 })();
 
-// 单题「已复核」：点击即保存，折叠时标题栏显示复核状态
+// 逐题自动保存：判定/评语/OCR/标准答案修改后自动保存，标题栏实时同步
 (function () {
   var csrf = '{{ csrf_token() }}';
   var total = {{ n_total }};
@@ -210,6 +212,7 @@
   var genBtn = document.getElementById('gen-overall');
   var genHint = document.getElementById('gen-overall-hint');
   var reportBtn = document.getElementById('gen-report');
+  var verdictCls = {'对':'right','半对':'partial','错':'wrong','无法判定':'unknown'};
 
   function syncProgress() {
     var done = document.querySelectorAll('.reviewed-badge[data-reviewed="1"]').length;
@@ -227,51 +230,124 @@
     }
   }
 
-  document.querySelectorAll('.reviewed-toggle').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      var next = btn.dataset.reviewed === '1' ? 0 : 1;
-      var card = btn.closest('details');
-      var qid = btn.dataset.qid;
-      // 带上该题当前的判定/OCR/标准答案/评语，点「已复核」即保存本题修改
-      var payload = {
-        reviewed: next,
-        verdict: (card.querySelector('[name="verdict_' + qid + '"]') || {}).value || '',
-        ocr_text: (card.querySelector('[name="ocr_' + qid + '"]') || {}).value || '',
-        standard_answer: (card.querySelector('[name="standard_' + qid + '"]') || {}).value || '',
-        note: (card.querySelector('[name="note_' + qid + '"]') || {}).value || ''
-      };
-      btn.disabled = true;
-      fetch('/question/' + qid + '/reviewed', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
-        body: JSON.stringify(payload)
-      }).then(function (r) {
-        if (!r.ok) throw new Error(r.status);
-        return r.json();
-      }).then(function (d) {
+  // 更新某题折叠标题栏的判定与评语摘要
+  function syncSummary(card, verdict, note) {
+    var verdictEl = card.querySelector('.verdict');
+    if (verdictEl) {
+      if (verdict) {
+        verdictEl.textContent = '判定：' + verdict;
+        verdictEl.className = 'verdict verdict-' + (verdictCls[verdict] || '');
+        verdictEl.style.display = '';
+      } else {
+        verdictEl.style.display = 'none';
+      }
+    }
+    var noteEl = card.querySelector('[data-note-preview]');
+    if (noteEl) {
+      noteEl.textContent = (note || '').slice(0, 60);
+    }
+  }
+
+  // 显示保存状态提示
+  function showHint(card, text, isError) {
+    var hint = card.querySelector('[data-save-hint]');
+    if (!hint) return;
+    hint.textContent = text;
+    hint.style.color = isError ? '#c62828' : '#2e7d32';
+    hint.style.display = '';
+    clearTimeout(hint._timer);
+    hint._timer = setTimeout(function () { hint.style.display = 'none'; }, 2500);
+  }
+
+  // 核心：自动保存某题的所有字段到后端
+  function autoSave(card, markReviewed) {
+    var qid = card.dataset.qid;
+    if (!qid) return Promise.resolve();
+    var badge = card.querySelector('.reviewed-badge');
+    var reviewed = markReviewed !== undefined ? markReviewed
+      : (badge && badge.dataset.reviewed === '1' ? 1 : 0);
+    var payload = {
+      reviewed: reviewed,
+      verdict: (card.querySelector('[name="verdict_' + qid + '"]') || {}).value || '',
+      ocr_text: (card.querySelector('[name="ocr_' + qid + '"]') || {}).value || '',
+      standard_answer: (card.querySelector('[name="standard_' + qid + '"]') || {}).value || '',
+      note: (card.querySelector('[name="note_' + qid + '"]') || {}).value || ''
+    };
+    showHint(card, '保存中…');
+    return fetch('/question/' + qid + '/reviewed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+      body: JSON.stringify(payload)
+    }).then(function (r) {
+      if (!r.ok) throw new Error(r.status);
+      return r.json();
+    }).then(function (d) {
+      // 同步标题栏
+      syncSummary(card, d.verdict, payload.note);
+      // 同步复核状态
+      if (badge) {
+        badge.dataset.reviewed = d.reviewed ? '1' : '0';
+        badge.textContent = d.reviewed ? '✓ 已复核' : '待复核';
+        badge.classList.toggle('is-pending', !d.reviewed);
+      }
+      var btn = card.querySelector('.reviewed-toggle');
+      if (btn) {
         btn.dataset.reviewed = d.reviewed;
         btn.textContent = d.reviewed ? '已复核 ✓' : '标记已复核';
         btn.classList.toggle('reviewed-on', !!d.reviewed);
-        var badge = card.querySelector('.reviewed-badge');
-        if (badge) {
-          badge.dataset.reviewed = d.reviewed ? '1' : '0';
-          badge.textContent = d.reviewed ? '✓ 已复核' : '待复核';
-          badge.classList.toggle('is-pending', !d.reviewed);
-        }
-        // 同步标题栏判定显示，让老师确认修改已生效
-        var verdictEl = card.querySelector('.verdict');
-        if (verdictEl && d.verdict) {
-          verdictEl.textContent = 'AI 判定：' + d.verdict;
-          verdictEl.className = 'verdict verdict-' +
-            ({'对':'right','半对':'partial','错':'wrong','无法判定':'unknown'}[d.verdict] || '');
-        }
-        syncProgress();
-      }).catch(function () {
-        alert('保存失败，请检查网络后重试');
-      }).then(function () {
-        btn.disabled = false;
-      });
+      }
+      showHint(card, '✓ 已自动保存');
+      syncProgress();
+      return d;
+    }).catch(function () {
+      showHint(card, '✗ 保存失败', true);
     });
+  }
+
+  // 遍历每道题，绑定自动保存事件
+  document.querySelectorAll('details.review-item[data-qid]').forEach(function (card) {
+    var qid = card.dataset.qid;
+
+    // 判定下拉框：change 立即保存
+    var verdictSel = card.querySelector('[name="verdict_' + qid + '"]');
+    if (verdictSel) {
+      verdictSel.addEventListener('change', function () { autoSave(card); });
+    }
+
+    // 评语：debounce 800ms 自动保存（输入停顿后触发）
+    var noteArea = card.querySelector('[name="note_' + qid + '"]');
+    if (noteArea) {
+      var timer = null;
+      noteArea.addEventListener('input', function () {
+        clearTimeout(timer);
+        timer = setTimeout(function () { autoSave(card); }, 800);
+      });
+      // 失焦时立即保存（不等 debounce）
+      noteArea.addEventListener('blur', function () {
+        clearTimeout(timer);
+        autoSave(card);
+      });
+    }
+
+    // OCR 和标准答案：blur 时自动保存
+    ['ocr_' + qid, 'standard_' + qid].forEach(function (name) {
+      var el = card.querySelector('[name="' + name + '"]');
+      if (el) {
+        el.addEventListener('blur', function () { autoSave(card); });
+      }
+    });
+
+    // 「已复核」按钮：切换复核状态并保存
+    var toggleBtn = card.querySelector('.reviewed-toggle');
+    if (toggleBtn) {
+      toggleBtn.addEventListener('click', function () {
+        var next = toggleBtn.dataset.reviewed === '1' ? 0 : 1;
+        toggleBtn.disabled = true;
+        autoSave(card, next).then(function () {
+          toggleBtn.disabled = false;
+        });
+      });
+    }
   });
 
   // 全部复核完成后，用 AI 生成一份新总评回填文本框，教师可继续修改
@@ -295,7 +371,6 @@
             syncProgress();
           });
       };
-      // 已有总评时，重新生成会覆盖当前内容，先确认
       if (genBtn.dataset.hasResult === '1') {
         confirmDialog('重新生成会用 AI 新写的总评覆盖当前总评内容（含手工修改的部分），确定继续吗？',
                       '重新生成').then(function (ok) { if (ok) run(); });
