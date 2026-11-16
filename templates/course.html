@@ -257,7 +257,7 @@
     {% for h in lectures %}
     <tr>
       <td><a href="{{ url_for('lecture_detail', hid=h.id) }}">{{ h.title }}</a></td>
-      <td class="muted">{{ (h.deadline or '').replace('T',' ') or '—' }}</td>
+      <td class="muted">{{ h.deadline|legacytime or '—' }}</td>
       <td>{{ h.n_subs }} / {{ h.n_students }}</td>
       <td class="small">
         {% if h.student_pdf %}<a href="{{ url_for('uploaded_file', filename=h.student_pdf) }}"
@@ -296,7 +296,7 @@
     <tbody>
       {% for item in exports %}
       <tr>
-        <td>{{ item.created }}</td>
+        <td>{{ item.created|legacytime }}</td>
         <td>{{ item.size }}</td>
         <td><a href="{{ url_for('course_export_file', cid=course.id, name=item.name) }}">下载</a></td>
       </tr>

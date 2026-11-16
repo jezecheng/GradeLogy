@@ -16,7 +16,7 @@
 <p><a href="{{ url_for('lecture_detail', hid=hw.id) }}">← 返回 {{ hw.title }}</a></p>
 <h1>逐题批改：{{ sub.display_name }}</h1>
 <p class="muted">
-  {{ sub.username }} · {{ hw.title }} · 提交于 {{ sub.created_at }}
+  {{ sub.username }} · {{ hw.title }} · 提交于 {{ sub.created_at|localtime }}
   · <a href="{{ pdf_url }}" target="_blank" data-pdf-toggle>查看原始扫描件{% if pdf_files|length > 1 %}（1/{{ pdf_files|length }}）{% endif %}</a>
   {% for f in pdf_files[1:] %}
   · <a href="{{ url_for('uploaded_file', filename=f) }}" target="_blank">扫描件 {{ loop.index + 1 }}</a>

@@ -34,7 +34,7 @@
     <tr><td>附件文件</td>
       <td>{{ summary.files }} 个 · {{ (summary.bytes / 1024 / 1024)|round(2) }} MB</td></tr>
     {% if summary.manifest.exported_at %}
-    <tr><td>导出时间</td><td>{{ summary.manifest.exported_at }}</td></tr>
+    <tr><td>导出时间</td><td>{{ summary.manifest.exported_at|legacytime }}</td></tr>
     {% endif %}
     {% if summary.manifest.version %}
     <tr><td>导出时版本</td><td>{{ summary.manifest.version }}</td></tr>

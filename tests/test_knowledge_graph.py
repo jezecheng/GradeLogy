@@ -24,7 +24,7 @@ from utilities import kg_text, knowledge_graph as kg  # noqa: E402
 _TABLES = ("kg_chunks", "kg_edges", "kg_nodes", "kg_materials", "knowledge_graphs",
            "tag_analyses", "question_tags", "questions", "submissions", "lectures",
            "exams", "exam_scores", "enrollments", "course_teachers", "courses",
-           "users", "ai_usage_events", "ai_operations")
+           "users", "settings", "ai_usage_events", "ai_operations")
 
 
 class KGLogicTest(unittest.TestCase):
@@ -458,6 +458,8 @@ class KGLogicTest(unittest.TestCase):
 class KGRouteTest(unittest.TestCase):
     def setUp(self):
         app_module.app.config.update(TESTING=True)
+        app_module.cfg.DISPLAY_TIMEZONE = "Asia/Shanghai"
+        app_module.cfg.LEGACY_TIMEZONE = "Asia/Shanghai"
         with app_module._kg_schedule_lock:
             app_module._kg_enqueued.clear()
         self._clear()
@@ -532,6 +534,31 @@ class KGRouteTest(unittest.TestCase):
         listing = self.client.get(self.url("knowledge_graphs"))
         self.assertEqual(listing.status_code, 200)
         self.assertIn("高中化学", listing.get_data(as_text=True))
+
+    def test_graph_times_use_default_and_per_user_display_timezones(self):
+        graph = self._create_graph()
+        con = self._db()
+        con.execute("UPDATE knowledge_graphs SET created_at='2026-01-02 03:04:05',"
+                    "updated_at='2026-01-02 04:05:06' WHERE id=?", (graph["id"],))
+        con.commit()
+        con.close()
+
+        detail_url = self.url("knowledge_graph_detail", gid=graph["id"])
+        html = self.client.get(detail_url).get_data(as_text=True)
+        self.assertIn("创建于 2026-01-02 11:04，最近更新 2026-01-02 12:05", html)
+        listing = self.client.get(self.url("knowledge_graphs")).get_data(as_text=True)
+        self.assertIn("更新于 2026-01-02 12:05", listing)
+
+        con = self._db()
+        con.executemany(
+            "INSERT INTO settings(teacher_id,key,value) VALUES(?,'display_timezone',?)",
+            [(2, "UTC"), (3, "America/New_York")])
+        con.commit()
+        con.close()
+        utc_html = self.client.get(detail_url).get_data(as_text=True)
+        self.assertIn("创建于 2026-01-02 03:04，最近更新 2026-01-02 04:05", utc_html)
+        ny_html = self.login(3).get(detail_url).get_data(as_text=True)
+        self.assertIn("创建于 2026-01-01 22:04，最近更新 2026-01-01 23:05", ny_html)
 
     def test_detail_shows_batch_progress_and_status_badges(self):
         graph = self._create_graph()
@@ -1077,7 +1104,7 @@ class KGRouteTest(unittest.TestCase):
         con.commit()
         con.close()
 
-        local_created = app_module._localtime("2026-01-02 03:04:05")
+        local_created = "2026-01-02 11:04"
         html = self.client.get(
             self.url("knowledge_graph_detail", gid=graph["id"])).get_data(as_text=True)
         self.assertIn(local_created, html)
@@ -1095,8 +1122,7 @@ class KGRouteTest(unittest.TestCase):
         self.assertGreaterEqual(building["eta_s"], 35)
         self.assertLessEqual(building["eta_s"], 40)
         self.assertEqual(items[171]["elapsed_text"], "1 分 5 秒")
-        self.assertEqual(items[171]["finished_at_local"],
-                         app_module._localtime("2026-01-02 03:06:05"))
+        self.assertEqual(items[171]["finished_at_local"], "2026-01-02 11:06")
         self.assertIsNone(items[172]["eta_s"])
         self.assertEqual(items[172]["started_at_local"], "")
 
@@ -1136,6 +1162,9 @@ class KGRouteTest(unittest.TestCase):
         self.assertEqual(con.execute(
             "SELECT COUNT(*) FROM ai_usage_events WHERE operation_id=?",
             (first["id"],)).fetchone()[0], 1)
+        con.execute("UPDATE ai_usage_events SET created_at='2026-01-02 03:04:05' "
+                    "WHERE operation_id=?", (first["id"],))
+        con.commit()
         con.close()
         data = self.client.get(
             self.url("knowledge_graph_status", gid=graph["id"]) + "?material_id=180").get_json()
@@ -1146,7 +1175,7 @@ class KGRouteTest(unittest.TestCase):
                          (1, 1, "success"))
         self.assertEqual(success["elapsed_text"], "13 秒")
         self.assertEqual(success["total_tokens"], 30)
-        self.assertTrue(success["started_at"])
+        self.assertEqual(success["started_at"], "2026-01-02 11:04")
         self.assertEqual(data["requests"][1]["error"], "请求超时")
         self.assertEqual(data["requests"][1]["operation_id"], second["id"])
 

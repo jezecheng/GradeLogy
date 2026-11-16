@@ -22,7 +22,7 @@
     {% for h in group.lectures %}
     <tr>
       <td><a href="{{ url_for('student_lecture_page', hid=h.id) }}">{{ h.title }}</a></td>
-      <td class="muted">{{ (h.deadline or '').replace('T',' ') or '—' }}</td>
+      <td class="muted">{{ h.deadline|legacytime or '—' }}</td>
       <td>
         {% if h.my_subs %}
           <span class="tag tag-{{ h.my_status }}">{{ h.my_status }}</span>

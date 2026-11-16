@@ -49,6 +49,9 @@ KG_MAX_UPLOAD_MB = int(_env("KG_MAX_UPLOAD_MB", "500"))
 # 备份包解压后的总大小上限（MB），防止恶意 zip 撑爆磁盘
 MAX_RESTORE_MB = int(_env("MAX_RESTORE_MB", "2048"))
 LOG_LEVEL = _env("LOG_LEVEL", "INFO").upper()
+# UI 默认显示上海时间；旧本地 naive 字段按部署时区解释，避免二次转换
+DISPLAY_TIMEZONE = _env("DISPLAY_TIMEZONE", "Asia/Shanghai")
+LEGACY_TIMEZONE = _env("LEGACY_TIMEZONE", _env("TZ", "Asia/Shanghai"))
 # HTTPS 部署时设为 1：会话 Cookie 只通过加密连接传输（本地 http 访问时保持 0）
 COOKIE_SECURE = _env("COOKIE_SECURE", "0").lower() in ("1", "true", "yes", "on")
 

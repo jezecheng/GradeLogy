@@ -13,7 +13,7 @@
     {% for h in lectures %}
     <tr>
       <td><a href="{{ url_for('lecture_detail', hid=h.id) }}">{{ h.title }}</a></td>
-      <td class="muted">{{ (h.deadline or '').replace('T',' ') or '—' }}</td>
+      <td class="muted">{{ h.deadline|legacytime or '—' }}</td>
       <td>{{ h.n_subs }} 次</td>
       <td>
         {% if h.my_status %}<span class="tag tag-{{ h.my_status }}">{{ h.my_status }}</span>

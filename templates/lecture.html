@@ -6,7 +6,7 @@
 {% set grade_ready = hw.answer_pdf and cands and chosen %}
 <p><a href="{{ url_for('course_detail', cid=course.id) }}">← 返回 {{ course.name }}</a></p>
 <h1>{{ hw.title }}</h1>
-<p class="muted">讲次{% if hw.deadline %} · 截止 {{ hw.deadline.replace('T',' ') }}{% endif %}{% if hw.description %} · {{ hw.description }}{% endif %}</p>
+<p class="muted">讲次{% if hw.deadline %} · 截止 {{ hw.deadline|legacytime }}{% endif %}{% if hw.description %} · {{ hw.description }}{% endif %}</p>
 
 <div class="card">
   <div class="card-head">
@@ -15,14 +15,14 @@
   </div>
   <p><span class="muted">标题</span>　{{ hw.title }}</p>
   <p><span class="muted">说明</span>　{{ hw.description or '—' }}</p>
-  <p><span class="muted">截止时间</span>　{{ hw.deadline.replace('T', ' ') if hw.deadline else '不限' }}</p>
+  <p><span class="muted">截止时间</span>　{{ hw.deadline|legacytime if hw.deadline else '不限' }}</p>
   <dialog id="lecture-edit-dialog" class="modal">
     <h2>编辑讲次信息</h2>
     <form method="post" action="{{ url_for('lecture_edit', hid=hw.id) }}" class="stack-form">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
       <label>讲次名称 <input name="title" value="{{ hw.title }}" required></label>
       <label>说明 <textarea name="description" rows="3">{{ hw.description or '' }}</textarea></label>
-      <label>截止时间 <input type="datetime-local" name="deadline" value="{{ hw.deadline or '' }}"></label>
+      <label>截止时间 <input type="datetime-local" name="deadline" value="{{ hw.deadline|datetime_local }}"></label>
       <p class="muted small">清空截止时间再保存，即取消截止限制。</p>
       <div class="modal-actions">
         <button type="button" class="ghost" data-dialog-close>取消</button>
@@ -232,7 +232,7 @@
   <div class="sub-card">
     <div class="sub-head">
       <strong>{{ s.display_name }}</strong>
-      <span class="muted">{{ s.username }} · {{ s.created_at }}</span>
+      <span class="muted">{{ s.username }} · {{ s.created_at|localtime }}</span>
       <span class="tag tag-{{ s.status }}">{{ s.status }}</span>
       {% if s.n_questions %}
         <span class="review-state review-done" title="AI 已完成批阅">✓ AI 已批阅</span>
@@ -278,7 +278,7 @@
     {% if job_status == 'failed' %}
     <p class="muted small danger-text">上次后台批阅失败：{{ job.error }}</p>
     {% endif %}
-    {% if s.grader %}<p class="muted small">批改来源：{{ s.grader }} · 更新于 {{ s.updated_at }}</p>{% endif %}
+    {% if s.grader %}<p class="muted small">批改来源：{{ s.grader }} · 更新于 {{ s.updated_at|localtime }}</p>{% endif %}
     {% if s.feedback %}<pre class="feedback">{{ s.feedback }}</pre>{% endif %}
   </div>
   {% endfor %}
@@ -358,7 +358,7 @@
   {% if hw.summary_md %}
   <div style="margin-top:20px; padding-top:12px; border-top:1px dashed #eef0f3">
     <h3 style="margin-bottom:4px">讲次汇总</h3>
-    <p class="muted small">生成于 {{ hw.summary_at }}（覆盖生成会弹确认）</p>
+    <p class="muted small">生成于 {{ hw.summary_at|legacytime }}（覆盖生成会弹确认）</p>
     <div class="lecture-summary-body">{{ hw.summary_md|markdown_safe }}</div>
   </div>
   {% endif %}

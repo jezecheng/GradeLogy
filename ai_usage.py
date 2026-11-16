@@ -7,7 +7,7 @@ ai_usage_events 一行；费用按操作开始时的价格与高峰倍率快照�
 依赖方向：只依赖 db / model_catalog，不反向导入 app。
 """
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from db import get_db
 from model_catalog import MODEL_PRESETS
@@ -428,20 +428,14 @@ def _ai_dashboard_data(filters):
           """ + event_model + """ AS model,e.prompt_tokens,e.completion_tokens,e.total_tokens,
           e.cached_tokens,e.reasoning_tokens,e.latency_ms,e.finish_reason,e.estimated_cost,
           e.status AS event_status,e.error AS event_error,
-          COALESCE(e.created_at,o.started_at) AS request_time,
+          COALESCE(e.created_at,o.started_at) AS request_time,e.created_at AS event_created_at,
           o.started_at AS operation_started_at,o.operation_type,o.status AS operation_status,
           o.error AS operation_error,u.display_name AS teacher_name,u.username AS teacher_username,
           c.name AS course_name
     """ + event_from + event_where + " ORDER BY e.id DESC LIMIT 50", params).fetchall()]
     for row in request_logs:
-        try:
-            # SQLite CURRENT_TIMESTAMP 使用 UTC；操作时间仍保留应用本地时间口径。
-            recorded_at = datetime.fromisoformat(row["request_time"])
-            if recorded_at.tzinfo is None:
-                recorded_at = recorded_at.replace(tzinfo=timezone.utc)
-            row["request_time"] = recorded_at.astimezone().isoformat(sep=" ", timespec="seconds")
-        except (TypeError, ValueError):
-            pass
+        # 事件时间是 UTC；回退到 operation 时使用旧应用本地时间，由显示层按用户时区转换。
+        row["request_time_source"] = "UTC" if row["event_created_at"] else "legacy"
 
     options = {
         "teachers": db.execute(

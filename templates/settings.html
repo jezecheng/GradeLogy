@@ -215,7 +215,7 @@
           {%- if model_view.state and model_view.state.error %}
           · <span class="warn-text">上次同步失败：{{ model_view.state.error }}</span>
           {%- elif model_view.state %}
-          · 清单更新于 {{ model_view.state.fetched_at }}
+          · 清单更新于 {{ model_view.state.fetched_at|legacytime }}
           {%- endif %}
         </div>
       </div>

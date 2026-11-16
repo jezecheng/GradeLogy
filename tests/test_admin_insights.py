@@ -30,6 +30,8 @@ atexit.register(shutil.rmtree, _TEST_ROOT, ignore_errors=True)
 class AdminInsightsTest(unittest.TestCase):
     def setUp(self):
         app_module.app.config.update(TESTING=True)
+        app_module.cfg.DISPLAY_TIMEZONE = "Asia/Shanghai"
+        app_module.cfg.LEGACY_TIMEZONE = "Asia/Shanghai"
         for n in range(6):
             name = "app.log" if n == 0 else f"app.log.{n}"
             try:
@@ -37,7 +39,8 @@ class AdminInsightsTest(unittest.TestCase):
             except OSError:
                 pass
         con = sqlite3.connect(app_module.DB_PATH)
-        for table in ("ai_usage_events", "ai_operations", "course_teachers", "courses", "users"):
+        for table in ("ai_usage_events", "ai_operations", "settings",
+                      "course_teachers", "courses", "users"):
             con.execute(f"DELETE FROM {table}")
         users = [
             (1, "admin", "管理员", "admin"),
@@ -224,6 +227,106 @@ class AdminInsightsTest(unittest.TestCase):
         anonymous = app_module.app.test_client()
         for path in paths:
             self.assertEqual(anonymous.get(path).status_code, 302, path)
+
+    def test_timezone_preferences_for_all_roles_validation_and_isolation(self):
+        for uid, name in ((1, "UTC"), (2, "America/New_York"), (4, "Asia/Tokyo")):
+            client = self.login(uid)
+            initial = client.get("/password").get_data(as_text=True)
+            self.assertIn('name="display-timezone" content="Asia/Shanghai"', initial)
+            self.assertIn('name="display_timezone"', initial)
+            resp = client.post("/preferences/timezone", data={
+                "_csrf": "test-token", "display_timezone": name}, follow_redirects=True)
+            self.assertEqual(resp.status_code, 200)
+            html = resp.get_data(as_text=True)
+            self.assertIn(f"显示时区已保存为 {name}", html)
+            self.assertIn(f'name="display-timezone" content="{name}"', html)
+            self.assertIn(f'value="{name}"', html)
+
+        con = sqlite3.connect(app_module.DB_PATH)
+        saved = dict(con.execute(
+            "SELECT teacher_id,value FROM settings WHERE key='display_timezone'").fetchall())
+        con.close()
+        self.assertEqual(saved, {1: "UTC", 2: "America/New_York", 4: "Asia/Tokyo"})
+
+        resp = self.login(2).post("/preferences/timezone", data={
+            "_csrf": "test-token", "display_timezone": "Invalid/Zone"}, follow_redirects=True)
+        self.assertIn("请输入有效的 IANA 时区名称", resp.get_data(as_text=True))
+        con = sqlite3.connect(app_module.DB_PATH)
+        teacher = con.execute(
+            "SELECT value FROM settings WHERE teacher_id=2 AND key='display_timezone'"
+        ).fetchone()[0]
+        con.close()
+        self.assertEqual(teacher, "America/New_York")
+        other = self.login(3).get("/password").get_data(as_text=True)
+        self.assertIn('name="display-timezone" content="Asia/Shanghai"', other)
+
+    def test_ai_usage_times_distinguish_utc_events_from_legacy_operations(self):
+        self.operation(1, 2, "grade", "model-a", "success", "2026-01-02 11:04:05")
+        self.event(1, 1, 10, 5, 15, 0.001, 1000, provider_request_id="req-utc")
+        self.operation(2, 2, "grade", "model-a", "success", "2026-01-02 12:00:00")
+        self.event(2, 1, 10, 5, 15, 0.001, 1000, provider_request_id="req-legacy")
+        con = sqlite3.connect(app_module.DB_PATH)
+        con.execute("UPDATE ai_usage_events SET created_at='2026-01-02 03:04:05' "
+                    "WHERE operation_id=1")
+        con.execute("UPDATE ai_usage_events SET created_at=NULL WHERE operation_id=2")
+        con.commit()
+        con.close()
+
+        html = self.login().get("/admin/ai-usage?period=all").get_data(as_text=True)
+        # UTC 事件加 8 小时；旧操作本地时间保持 11:04 / 12:00，不重复加 8。
+        self.assertGreaterEqual(html.count("2026-01-02 11:04"), 2)
+        self.assertGreaterEqual(html.count("2026-01-02 12:00"), 2)
+        self.assertNotIn("2026-01-02 19:04", html)
+        self.assertNotIn("2026-01-02 20:00", html)
+
+        con = sqlite3.connect(app_module.DB_PATH)
+        con.execute("INSERT INTO settings(teacher_id,key,value) VALUES(1,'display_timezone','UTC')")
+        con.commit()
+        con.close()
+        html = self.login().get("/admin/ai-usage?period=all").get_data(as_text=True)
+        self.assertGreaterEqual(html.count("2026-01-02 03:04"), 2)
+        self.assertGreaterEqual(html.count("2026-01-02 04:00"), 2)
+
+    def test_deadline_display_edit_storage_and_student_timezone_roundtrip(self):
+        con = sqlite3.connect(app_module.DB_PATH)
+        con.executemany(
+            "INSERT INTO settings(teacher_id,key,value) VALUES(?,'display_timezone',?)",
+            [(2, "UTC"), (4, "Asia/Tokyo")])
+        con.execute("INSERT INTO enrollments(course_id,student_id) VALUES(10,4)")
+        con.commit()
+        con.close()
+
+        teacher = self.login(2)
+        course_id = app_module._id_signer.dumps(10)
+        resp = teacher.post(f"/course/{course_id}/lecture/create", data={
+            "_csrf": "test-token", "title": "时区讲次", "description": "",
+            "deadline": "2026-01-02T03:04"})
+        self.assertEqual(resp.status_code, 302)
+        con = sqlite3.connect(app_module.DB_PATH)
+        lecture_id, stored = con.execute(
+            "SELECT id,deadline FROM lectures WHERE title='时区讲次'").fetchone()
+        con.close()
+        self.assertEqual(stored, "2026-01-02T11:04")
+
+        lecture_url = f"/lecture/{app_module._id_signer.dumps(lecture_id)}"
+        html = teacher.get(lecture_url).get_data(as_text=True)
+        self.assertIn("截止 2026-01-02 03:04", html)
+        self.assertIn('value="2026-01-02T03:04"', html)
+        resp = teacher.post(lecture_url + "/edit", data={
+            "_csrf": "test-token", "title": "时区讲次", "description": "",
+            "deadline": "2026-01-03T04:05"})
+        self.assertEqual(resp.status_code, 302)
+        con = sqlite3.connect(app_module.DB_PATH)
+        stored = con.execute("SELECT deadline FROM lectures WHERE id=?",
+                             (lecture_id,)).fetchone()[0]
+        con.close()
+        self.assertEqual(stored, "2026-01-03T12:05")
+
+        student = self.login(4)
+        html = student.get(
+            f"/student/lecture/{app_module._id_signer.dumps(lecture_id)}").get_data(as_text=True)
+        self.assertIn("截止 2026-01-03 13:05", html)
+        self.assertIn("2026-01-03 13:05", student.get("/student").get_data(as_text=True))
 
     def write_log(self, name, data):
         path = os.path.join(app_module.cfg.LOG_DIR, name)

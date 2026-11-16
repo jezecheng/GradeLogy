@@ -68,7 +68,7 @@
     </span>
     {% if g.grade_level %}<span class="kg-meta">{{ g.grade_level }}</span>{% endif %}
     <span class="kg-meta">{{ g.n_materials }} 份资料 · {{ g.n_nodes }} 个概念 · {{ g.n_edges }} 条关系</span>
-    <span class="kg-meta">更新于 {{ g.updated_at }}</span>
+    <span class="kg-meta">更新于 {{ g.updated_at|localtime }}</span>
   </div>
   {% endfor %}
 </div>

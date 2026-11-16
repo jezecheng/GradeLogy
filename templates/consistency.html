@@ -35,7 +35,7 @@
     <tr>
       <td><code>{{ b.name }}</code></td>
       <td>{{ b.size }}</td>
-      <td class="muted">{{ b.mtime }}</td>
+      <td class="muted">{{ b.mtime|legacytime }}</td>
       <td><a href="{{ url_for('admin_backup_download', name=b.name) }}">下载</a></td>
     </tr>
     {% endfor %}

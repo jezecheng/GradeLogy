@@ -13,7 +13,7 @@
     <label>日志文件
       <select id="log-file" {% if not files %}disabled{% endif %}>
         {% for file in files %}
-        <option value="{{ file.name }}" {% if file.name == selected %}selected{% endif %}>{{ file.name }} · {{ file.size_text }} · {{ file.mtime_text }}</option>
+        <option value="{{ file.name }}" {% if file.name == selected %}selected{% endif %}>{{ file.name }} · {{ file.size_text }} · {{ file.mtime_text|legacytime }}</option>
         {% endfor %}
       </select>
     </label>

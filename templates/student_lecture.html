@@ -4,7 +4,7 @@
 {% set verdict_cls = {'对': 'right', '半对': 'partial', '错': 'wrong', '无法判定': 'unknown'} %}
 <p><a href="{{ url_for('student_home') }}">← 返回我的学习</a></p>
 <h1>{{ hw.title }}</h1>
-<p class="muted">{{ hw.course_name }} · 讲次{% if hw.deadline %} · 截止 {{ hw.deadline.replace('T',' ') }}{% endif %}</p>
+<p class="muted">{{ hw.course_name }} · 讲次{% if hw.deadline %} · 截止 {{ hw.deadline|legacytime }}{% endif %}</p>
 {% if hw.description %}<p>{{ hw.description }}</p>{% endif %}
 {% if hw.student_pdf %}
 <p><a href="{{ url_for('uploaded_file', filename=hw.student_pdf) }}"
@@ -54,7 +54,7 @@
         <a href="{{ url_for('uploaded_file', filename=f) }}" target="_blank">第 {{ sn }} 次提交{% if sfiles|length > 1 %} · {{ loop.index }}/{{ sfiles|length }}{% endif %}</a>{% if not loop.last %} · {% endif %}
       {% endfor %}
       </span>
-      <span class="muted">{{ s.created_at }}</span>
+      <span class="muted">{{ s.created_at|localtime }}</span>
       <span class="tag tag-{{ s.status }}">{{ s.status }}</span>
       {% if revealed and sm_acc %}<span class="score" title="正确率">{{ sm_acc }}</span>{% endif %}
       {% if s.report_published %}<a class="btn-link" href="{{ url_for('student_report', sid=s.id) }}">查看批改报告</a>{% endif %}

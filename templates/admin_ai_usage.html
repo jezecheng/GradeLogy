@@ -257,7 +257,7 @@
       <tbody>
         {% for row in request_logs %}
         <tr>
-          <td class="nowrap">{{ row.request_time }}</td>
+          <td class="nowrap">{{ row.request_time|localtime(row.request_time_source) }}</td>
           <td>
             {% if row.provider_request_id %}
             <code class="request-id" title="{{ row.provider_request_id }}">{{ row.provider_request_id[:16] }}{% if row.provider_request_id|length > 16 %}…{% endif %}</code>
@@ -308,7 +308,7 @@
       <tr><th>开始时间</th><th>教师 / 课程</th><th>操作</th><th>模型 / 状态</th><th>消耗</th></tr>
       {% for op in recent %}
       <tr>
-        <td class="nowrap">{{ op.started_at }}</td>
+        <td class="nowrap">{{ op.started_at|legacytime }}</td>
         <td>{{ op.teacher_name or op.teacher_username or '已删除教师' }}<br><span class="muted small">{{ op.course_name or '未关联课程' }}</span></td>
         <td>{{ ai_operation_label(op.operation_type) or op.operation_type }}<br><span class="muted small">#{{ op.id }}</span></td>
         <td>{{ op.model or '未指定模型' }}<br><span class="muted small">{{ ai_status_label(op.status) or op.status }}</span></td>

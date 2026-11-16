@@ -98,7 +98,7 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
 <p class="muted">
   {% if graph.grade_level %}{{ graph.grade_level }} · {% endif %}
   {% if graph.description %}{{ graph.description }} · {% endif %}
-  创建于 {{ graph.created_at }}，最近更新 {{ graph.updated_at }}
+  创建于 {{ graph.created_at|localtime }}，最近更新 {{ graph.updated_at|localtime }}
 </p>
 
 <div class="kg-stats">

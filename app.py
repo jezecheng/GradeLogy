@@ -24,14 +24,15 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta, timezone
 from functools import wraps
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     import fcntl  # 仅类 Unix 可用，用于保证自动备份只在一个进程里跑
 except ImportError:  # pragma: no cover
     fcntl = None
 
-from flask import (Flask, abort, flash, g, jsonify, redirect, render_template,
-                   request, send_file, send_from_directory, session, url_for)
+from flask import (Flask, abort, flash, g, has_request_context, jsonify, redirect,
+                   render_template, request, send_file, send_from_directory, session, url_for)
 from itsdangerous import BadSignature, URLSafeSerializer
 from werkzeug.routing import BaseConverter, ValidationError
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -86,6 +87,11 @@ except ImportError:
     pass
 
 ROLE_LABEL = {"admin": "管理员", "teacher": "老师", "student": "学生"}
+DISPLAY_TIMEZONE_OPTIONS = (
+    "Asia/Shanghai", "UTC", "Asia/Singapore", "Asia/Tokyo", "Europe/London",
+    "Europe/Berlin", "America/New_York", "America/Chicago", "America/Denver",
+    "America/Los_Angeles", "Australia/Sydney",
+)
 
 DEFAULT_PASSWORDS = ("admin123", "123456")
 
@@ -262,9 +268,11 @@ def _inject_app_meta():
         "app_version": cfg.APP_VERSION,
         "app_commit": APP_GIT_COMMIT,
         "app_branch": APP_GIT_BRANCH,
-        "app_version_updated": APP_GIT_DATE,
+        "app_version_updated": _legacytime(APP_GIT_DATE),
         "app_python": platform.python_version(),
-        "app_started": APP_STARTED_AT.strftime("%Y-%m-%d %H:%M"),
+        "app_started": _legacytime(APP_STARTED_AT),
+        "display_timezone": _display_timezone_name(),
+        "display_timezone_options": DISPLAY_TIMEZONE_OPTIONS,
         "help_docs": [{"slug": slug, "title": title}
                       for slug, (title, roles) in HELP_DOCS.items() if role in roles],
     }
@@ -315,16 +323,89 @@ def _md_safe(md):
     return render_markdown(md)
 
 
-@_routes.template_filter("localtime")
-def _localtime(value):
-    """SQLite CURRENT_TIMESTAMP 存 UTC，展示时转成本机时区。"""
+def _is_valid_timezone(name):
+    if not name:
+        return False
+    try:
+        ZoneInfo(name)
+        return True
+    except (ZoneInfoNotFoundError, ValueError):
+        return False
+
+
+def _zone(name):
+    return ZoneInfo(name if _is_valid_timezone(name) else "Asia/Shanghai")
+
+
+def _display_timezone_name():
+    """当前请求的用户显示时区；无设置、非法旧值和未登录场景回退上海。"""
+    if not has_request_context():
+        return cfg.DISPLAY_TIMEZONE if _is_valid_timezone(cfg.DISPLAY_TIMEZONE) else "Asia/Shanghai"
+    cached = getattr(g, "_display_timezone_name", None)
+    if cached:
+        return cached
+    user = getattr(g, "user", None)
+    preferred = get_setting(user["id"], "display_timezone") if user else ""
+    for name in (preferred, cfg.DISPLAY_TIMEZONE, "Asia/Shanghai"):
+        if _is_valid_timezone(name):
+            g._display_timezone_name = name
+            return name
+    return "Asia/Shanghai"  # pragma: no cover - 最后候选始终有效
+
+
+def _parse_display_time(value, source):
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        if source == "UTC":
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.replace(tzinfo=_zone(cfg.LEGACY_TIMEZONE if source == "legacy" else source))
+    return dt
+
+
+def _format_display_time(value, source="UTC", fmt="%Y-%m-%d %H:%M"):
     if not value:
         return ""
-    try:
-        dt = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
-    except (TypeError, ValueError):
+    dt = _parse_display_time(value, source)
+    if dt is None:
+        return str(value)
+    return dt.astimezone(_zone(_display_timezone_name())).strftime(fmt)
+
+
+@_routes.template_filter("localtime")
+def _localtime(value, source="UTC"):
+    """UTC 或明确来源的时间统一转为当前用户显示时区。"""
+    return _format_display_time(value, source)
+
+
+@_routes.template_filter("legacytime")
+def _legacytime(value):
+    """旧应用本地 naive 时间按部署来源时区解释，避免二次加 8。"""
+    return _format_display_time(value, "legacy")
+
+
+@_routes.template_filter("datetime_local")
+def _datetime_local(value):
+    return _format_display_time(value, "legacy", "%Y-%m-%dT%H:%M")
+
+
+def _deadline_storage(value):
+    """用户本地截止时间转回旧存储口径，历史数据无需迁移。"""
+    if not value:
+        return ""
+    dt = _parse_display_time(value, _display_timezone_name())
+    if dt is None:
         return value
-    return dt.replace(tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+    return dt.astimezone(_zone(cfg.LEGACY_TIMEZONE)).strftime("%Y-%m-%dT%H:%M")
 
 
 def csrf_token():
@@ -694,6 +775,19 @@ def change_password():
             flash("密码已更新")
             return redirect(url_for("index"))
     return render_template("password.html")
+
+
+@_routes.route("/preferences/timezone", methods=["POST"])
+@login_required
+def display_timezone_save():
+    name = request.form.get("display_timezone", "").strip()[:100]
+    if not _is_valid_timezone(name):
+        flash("请输入有效的 IANA 时区名称，例如 Asia/Shanghai")
+    else:
+        save_setting(g.user["id"], "display_timezone", name)
+        get_db().commit()
+        flash(f"显示时区已保存为 {name}")
+    return redirect(url_for("change_password"))
 
 
 @_routes.route("/")
@@ -1410,7 +1504,7 @@ def lecture_create(cid):
     hid = db.execute("INSERT INTO lectures(course_id,title,description,deadline) "
                      "VALUES(?,?,?,?)",
                      (cid, title, request.form.get("description", "").strip(),
-                      request.form.get("deadline", ""))).lastrowid
+                      _deadline_storage(request.form.get("deadline", "")))).lastrowid
     paths = {"answer_pdf": "", "student_pdf": ""}
     for field, (f, fname) in pending.items():
         paths[field] = save_upload(f, cid, hid, filename=fname)
@@ -1557,7 +1651,7 @@ def lecture_edit(hid):
     if title:
         db.execute("UPDATE lectures SET title=?, description=?, deadline=? WHERE id=?",
                    (title, request.form.get("description", "").strip(),
-                    request.form.get("deadline", ""), hid))
+                    _deadline_storage(request.form.get("deadline", "")), hid))
         db.commit()
     return redirect(url_for("lecture_detail", hid=hid))
 

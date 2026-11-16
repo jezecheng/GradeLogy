@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="csrf-token" content="{{ csrf_token() }}">
+  <meta name="display-timezone" content="{{ display_timezone }}">
   <title>{% block title %}教学管理平台{% endblock %}</title>
   <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" sizes="any">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
@@ -56,7 +57,7 @@
     {% for op in ai_operations %}
     <div style="padding:10px 0;{% if not loop.last %}border-bottom:1px solid #eef0f3{% endif %}">
       <strong>{{ ai_operation_label(op.operation_type) }}</strong>
-      <span class="muted small">{{ op.started_at }} · {{ op.model or '未指定模型' }} · {{ ai_status_label(op.status) }}</span>
+      <span class="muted small">{{ op.started_at|legacytime }} · {{ op.model or '未指定模型' }} · {{ ai_status_label(op.status) }}</span>
       <div class="muted small">{{ ai_usage_text(op) }}</div>
       {% if op.request_count > 1 %}<div class="muted small">共 {{ op.request_count }} 次模型请求（含重试），以上 token 与费用为合计。</div>{% endif %}
       {% if op.error %}<div class="muted small">失败原因：{{ op.error }}</div>{% endif %}

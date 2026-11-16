@@ -18,6 +18,8 @@
   var timer = null;
   var generation = 0;
   var controller = null;
+  var timezoneMeta = document.querySelector('meta[name="display-timezone"]');
+  var displayTimezone = timezoneMeta ? timezoneMeta.content : 'Asia/Shanghai';
 
   function setStatus(text) {
     status.textContent = text;
@@ -109,7 +111,7 @@
       appendLines(data.lines || []);
       render();
       nextDelay = data.has_more ? 250 : 3000;
-      var message = data.message || ('最后更新 ' + new Date().toLocaleTimeString() +
+      var message = data.message || ('最后更新 ' + new Date().toLocaleTimeString('zh-CN', {timeZone: displayTimezone}) +
         ' · 当前保留 ' + entries.length + ' 行');
       setStatus(message);
     }).catch(function (error) {
