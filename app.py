@@ -1968,7 +1968,9 @@ def lecture_tag_analysis(hid):
                                         max_tokens=_get_max_tokens(g.user["id"], "max_tokens_horizontal"))
     except Exception as e:
         _finish_ai_operation(operation, "failed", str(e))
-        raise
+        log.exception("横向知识点分析异常 lecture=%s by=%s", hid, g.user["username"])
+        flash(f"知识点分析失败：{e}")
+        return redirect(url_for("lecture_detail", hid=hid))
     error = "" if result else "AI 未返回可用的分析结果，请稍后重试"
     _finish_ai_operation(operation, "success" if result else "failed", error)
     if not result:
@@ -2178,7 +2180,9 @@ def student_tag_analysis(cid, sid):
                                       max_tokens=_get_max_tokens(g.user["id"], "max_tokens_vertical"))
     except Exception as e:
         _finish_ai_operation(operation, "failed", str(e))
-        raise
+        log.exception("纵向知识点分析异常 course=%s student=%s by=%s", cid, sid, g.user["username"])
+        flash(f"纵向知识点分析失败：{e}")
+        return redirect(url_for("student_detail", cid=cid, sid=sid))
     error = "" if result else "AI 未返回可用的分析结果，请稍后重试"
     _finish_ai_operation(operation, "success" if result else "failed", error)
     if not result:
@@ -3923,7 +3927,9 @@ def generate_report(db, sub_id, teacher_id, reuse=False):
                         kg_context=kg_context)
                 except Exception as e:
                     _finish_ai_operation(operation, "failed", str(e))
-                    raise
+                    log.exception("生成报告评语异常 submission=%s by=%s", sub_id, teacher_id)
+                    # 不中断报告生成：AI 评语失败时，报告仍包含表格与统计
+                    detail = {}
                 error = "" if detail else "AI 未返回可用的报告评价"
                 _finish_ai_operation(operation, "success" if detail else "failed", error)
     try:
