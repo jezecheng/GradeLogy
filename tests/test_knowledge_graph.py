@@ -21,11 +21,11 @@ import app as app_module  # noqa: E402
 import db as database  # noqa: E402
 from utilities import kg_text, knowledge_graph as kg  # noqa: E402
 
-_TABLES = ("kg_audits", "kg_chunks", "kg_edges", "kg_nodes", "kg_materials",
-           "knowledge_graphs", "tag_analyses", "question_tags", "questions",
-           "submissions", "lectures", "exams", "exam_scores", "enrollments",
-           "course_teachers", "courses", "users", "settings", "ai_usage_events",
-           "ai_operations")
+_TABLES = ("kg_members", "kg_audits", "kg_chunks", "kg_edges", "kg_nodes",
+           "kg_materials", "knowledge_graphs", "tag_analyses", "question_tags",
+           "questions", "submissions", "lectures", "exams", "exam_scores",
+           "enrollments", "course_teachers", "courses", "users", "settings",
+           "ai_usage_events", "ai_operations")
 
 
 class KGLogicTest(unittest.TestCase):
@@ -1453,6 +1453,149 @@ class KGRouteTest(unittest.TestCase):
         con.close()
         self.assertEqual(audit["status"], kg.AUDIT_FAILED)
         self.assertIn("未配置 AI", audit["error"])
+
+    def test_detail_shows_storage_time_tokens_and_model(self):
+        graph = self._create_graph()
+        con = self._db()
+        con.execute(
+            "INSERT INTO kg_materials(graph_id,filename,stored_name,sha256,size,"
+            "status,uploaded_by,started_at,finished_at)"
+            " VALUES(?,?,?,?,1536,'已完成',2,'2026-01-02 03:00:00',"
+            "'2026-01-02 03:01:05')",
+            (graph["id"], "讲义.pdf", f"kg/{graph['id']}/a.pdf", "a" * 64))
+        material_id = con.execute(
+            "SELECT id FROM kg_materials").fetchone()["id"]
+        operation_id = con.execute(
+            "INSERT INTO ai_operations(teacher_id,operation_type,material_id,model,"
+            "status,started_at,finished_at) VALUES(2,'kg_build',?,'test-model',"
+            "'success','2026-01-02 03:00:00','2026-01-02 03:01:05')",
+            (material_id,)).lastrowid
+        con.execute(
+            "INSERT INTO ai_usage_events(operation_id,attempt,total_tokens,status)"
+            " VALUES(?,1,12345,'success')", (operation_id,))
+        con.commit()
+        con.close()
+        html = self.client.get(
+            self.url("knowledge_graph_detail", gid=graph["id"])).get_data(as_text=True)
+        self.assertIn("1.5 KB", html)
+        self.assertIn("1 分 5 秒", html)
+        self.assertIn("12,345", html)
+        self.assertIn("test-model", html)
+
+    def test_edit_member_can_modify_but_not_rename(self):
+        graph = self._create_graph()
+        ids = self._add_graph_nodes(graph["id"], "A", "B")
+        edge_id = self._add_graph_edge(graph["id"], ids["A"], ids["B"])
+        con = self._db()
+        con.execute("INSERT INTO kg_members(graph_id,user_id,role) VALUES(?,?,?)",
+                    (graph["id"], 3, "edit"))
+        con.commit()
+        con.close()
+        other = self.login(3)
+        resp = self._post("knowledge_graph_edge_delete", client=other,
+                          gid=graph["id"], eid=edge_id)
+        self.assertEqual(resp.status_code, 302)
+        resp = self._post("knowledge_graph_edit", client=other,
+                          gid=graph["id"], data={"name": "改名尝试"})
+        self.assertEqual(resp.status_code, 403)
+
+    def test_use_member_can_attach_graph_to_own_course(self):
+        graph = self._create_graph()
+        con = self._db()
+        con.execute("INSERT INTO kg_members(graph_id,user_id,role) VALUES(?,?,?)",
+                    (graph["id"], 3, "use"))
+        con.execute("INSERT INTO courses(id,name,teacher_id) VALUES(9,'我的课',3)")
+        con.execute("INSERT INTO course_teachers(course_id,teacher_id) VALUES(9,3)")
+        con.commit()
+        con.close()
+        other = self.login(3)
+        self._post("course_knowledge_graphs_save", client=other, cid=9,
+                   data={"graph_ids": [str(graph["id"])]})
+        con = self._db()
+        count = con.execute(
+            "SELECT COUNT(*) FROM course_knowledge_graphs WHERE course_id=9"
+        ).fetchone()[0]
+        con.close()
+        self.assertEqual(count, 1)
+
+    def test_non_member_cannot_attach_graph_to_course(self):
+        graph = self._create_graph()
+        con = self._db()
+        con.execute("INSERT INTO courses(id,name,teacher_id) VALUES(9,'我的课',3)")
+        con.execute("INSERT INTO course_teachers(course_id,teacher_id) VALUES(9,3)")
+        con.commit()
+        con.close()
+        other = self.login(3)
+        self._post("course_knowledge_graphs_save", client=other, cid=9,
+                   data={"graph_ids": [str(graph["id"])]})
+        con = self._db()
+        count = con.execute(
+            "SELECT COUNT(*) FROM course_knowledge_graphs WHERE course_id=9"
+        ).fetchone()[0]
+        con.close()
+        self.assertEqual(count, 0)
+
+    def test_member_management_requires_manage_role(self):
+        graph = self._create_graph()
+        con = self._db()
+        con.execute("INSERT INTO kg_members(graph_id,user_id,role) VALUES(?,?,?)",
+                    (graph["id"], 3, "edit"))
+        con.commit()
+        con.close()
+        other = self.login(3)
+        resp = self._post("knowledge_graph_member_save", client=other,
+                          gid=graph["id"], data={"user_id": "3", "role": "use"})
+        self.assertEqual(resp.status_code, 403)
+        resp = self._post("knowledge_graph_member_save",
+                          gid=graph["id"], data={"user_id": "3", "role": "use"})
+        self.assertEqual(resp.status_code, 302)
+        con = self._db()
+        role = con.execute(
+            "SELECT role FROM kg_members WHERE graph_id=? AND user_id=3",
+            (graph["id"],)).fetchone()["role"]
+        con.close()
+        self.assertEqual(role, "use")
+
+    def test_detail_shows_db_table_usage(self):
+        graph = self._create_graph()
+        ids = self._add_graph_nodes(graph["id"], "A", "B")
+        self._add_graph_edge(graph["id"], ids["A"], ids["B"])
+        html = self.client.get(
+            self.url("knowledge_graph_detail", gid=graph["id"])).get_data(as_text=True)
+        self.assertIn("存储明细", html)
+        self.assertIn("kg_nodes", html)
+        self.assertIn("kg_edges", html)
+        self.assertIn("数据库表", html)
+
+    def test_manage_member_can_manage_collaborators(self):
+        graph = self._create_graph()
+        con = self._db()
+        con.execute("INSERT INTO users(id,username,password_hash,display_name,role,"
+                    "active,must_change_password) VALUES(5,'teacher5','x','第五位老师',"
+                    "'teacher',1,0)")
+        con.execute("INSERT INTO kg_members(graph_id,user_id,role) VALUES(?,?,?)",
+                    (graph["id"], 3, "manage"))
+        con.commit()
+        con.close()
+        manager = self.login(3)
+        resp = self._post("knowledge_graph_member_save", client=manager,
+                          gid=graph["id"], data={"user_id": "5", "role": "use"})
+        self.assertEqual(resp.status_code, 302)
+        con = self._db()
+        role = con.execute(
+            "SELECT role FROM kg_members WHERE graph_id=? AND user_id=5",
+            (graph["id"],)).fetchone()["role"]
+        con.close()
+        self.assertEqual(role, "use")
+        resp = self._post("knowledge_graph_member_remove", client=manager,
+                          gid=graph["id"], uid=5)
+        self.assertEqual(resp.status_code, 302)
+        con = self._db()
+        count = con.execute(
+            "SELECT COUNT(*) FROM kg_members WHERE graph_id=? AND user_id=5",
+            (graph["id"],)).fetchone()[0]
+        con.close()
+        self.assertEqual(count, 0)
 
     def test_backup_includes_graph_tables_and_materials(self):
         graph = self._create_graph()

@@ -12,16 +12,41 @@
 
 知识图谱用于把教材、考纲、讲义等资料沉淀为统一的学科概念及其关系，为讲评课诊断、跨讲次薄弱点分析和前置知识追问提供结构化参照。
 
-当前版本已经完成：
+当前版本**不会在每次批阅时自动把整张图谱注入模型**。图谱首先是独立的知识底座和可视化模块；课程关联已经可用，但与横向、纵向根因分析的进一步自动联动仍在建设中。
 
-- PDF、Markdown、TXT 资料上传与自动建图；
-- 多资料串行处理、增量合并、失败恢复和重启续建；
-- 概念节点、三类关系、资料出处和置信度存储；
-- 前置关系分层 SVG、概念上下游邻域和资料管理；
-- 一个课程关联一个或多个图谱；
-- 建图进度、处理时间、AI Request 明细和剩余时间粗估。
+### 1.1 为什么需要知识图谱（价值）
 
-当前版本**不会在每次批阅时自动把整张图谱注入模型**。图谱首先是独立的知识底座和可视化模块；课程关联已经可用，但与横向、纵向根因分析的进一步自动联动不属于本模块当前接口范围。
+| 价值 | 说明 |
+| --- | --- |
+| 从"错题"到"错因" | 错题标签定位到知识点后，沿 `prerequisite` 反向追溯前置概念缺口，避免只在表面知识点上反复讲评。 |
+| 教学决策 | 按讲次、班级统计概念命中与前置缺口，帮助老师决定讲评优先级和复习顺序。 |
+| 学科结构沉淀 | 把教材、考纲、讲义中的概念与关系沉淀为可复用的学科资产，新老师接班不必从零梳理。 |
+| AI 可解释 | 节点与关系保留来源资料和证据，AI 的讲解、组卷和答疑可以引用具体依据，而不是凭空生成。 |
+| 多人共建 | 学科组内老师按角色协作：管理维护图谱本身，编辑补充语料与关系，使用者把图谱引入自己的课程。 |
+
+### 1.2 当前实现进度
+
+| 能力 | 状态 | 说明 |
+| --- | --- | --- |
+| 资料上传、解析、分块、概念与关系抽取 | 已完成 | PDF/Word/PPT/Markdown/TXT；后台建图，支持多文件、失败重试和重启续建。 |
+| 增量建图防环 | 已完成 | 写入 `prerequisite` 前用递归 CTE 检查可达性，会成环的关系直接跳过并计数提示。 |
+| 存量成环报告 | 已完成 | 对前置子图做强连通分量分析，在详情页列出环上概念和置信度最低、建议优先处理的关系。 |
+| 关系维护 | 已完成 | 关系边支持删除与反向；反向仅限 `prerequisite`，先排除原边做防环校验，重复反向边自动合并。 |
+| AI 图谱体检 | 已完成 | LLM 只输出结构化建议（合并节点/反向/删除/下线），服务端校验 ID、合并冲突与成环风险后生成预览；用户确认后应用，应用前保存快照，可回滚。 |
+| 协作权限 | 已完成 | `管理 / 编辑 / 使用` 三级角色；成员管理只对管理角色开放，创建者和管理员默认拥有管理权限。 |
+| 图谱运营指标 | 已完成 | 详情页展示语料文件与各数据表的空间占用、累计构建用时、Token 和涉及模型。 |
+| 课程关联 | 已完成 | 有使用及以上权限的老师可把图谱引入自己的课程；课程页可按讲次查看覆盖情况。 |
+| 根因联动 | 进行中 | 标签分析与图谱前置关系尚未自动串联，目前由老师结合图谱人工判断。 |
+
+### 1.3 Roadmap
+
+| 阶段 | 目标 |
+| --- | --- |
+| P1 根因联动 | 错题标签 → 图谱节点 → 前置缺口链路自动生成，讲评页直接给出"建议先补哪个概念"，并允许老师确认/否决。 |
+| P2 质量治理自动化 | 在体检建议基础上，对高置信的同名合并、孤立节点下线提供"一键应用"；补充置信度校准、重复证据检测与体检定时任务。 |
+| P3 教学闭环 | 学生端按前置关系生成复习路径；班级/讲次概念覆盖热力图；图谱缺口与错题分布联动。 |
+| P4 工程能力 | 建图任务多 worker 队列与限流；按资料增量重建；图谱 JSON/GraphML 导入导出；图谱版本快照与差异对比。 |
+| P5 治理与审计 | 全量操作审计、快照保留策略、跨学科图谱复用与归档。 |
 
 ## 2. 图谱形成的依据
 
@@ -233,6 +258,8 @@ erDiagram
 | `kg_chunks` | 资料文本块及断点续建状态 | 保存页码、块号、正文、chunk 状态、抽取 JSON、错误和时间 |
 | `kg_nodes` | 概念节点 | `UNIQUE(graph_id, normalized)`；保存定义、别名、出处和置信度 |
 | `kg_edges` | 有向关系边 | `UNIQUE(graph_id, src_id, dst_id, relation)`；保存依据、出处和置信度 |
+| `kg_audits` | 图谱体检记录 | 保存模型、建议 JSON、未通过校验的原因、应用前快照、`operation_id` 与状态 |
+| `kg_members` | 图谱协作成员 | 复合主键 `(graph_id, user_id)`；`role` 为 `manage/edit/use` |
 | `course_knowledge_graphs` | 课程与图谱多对多关联 | 复合主键 `(course_id, graph_id)` |
 
 `aliases` 使用 JSON 文本保存；`source_materials` 使用带分隔符的资料 ID 列表保存，用于判断一个节点或边由哪些资料共同支撑。
@@ -245,17 +272,21 @@ erDiagram
 - 图、资料、文本块和关联：主 SQLite 数据库；
 - 建图任务：`ai_operations.operation_type = 'kg_build'`，通过 `material_id` 关联资料；
 - 单次模型尝试：`ai_usage_events`，通过 `chunk_id` 关联文本块；
+- 图谱体检：`ai_operations.operation_type = 'kg_audit'`，`kg_audits.operation_id` 记录对应调用，用于把 token 归属到图谱；
 - 备份迁移：数据库与 `uploads/kg/` 一起进入系统备份范围。
+
+详情页的「存储明细」把空间拆成两部分：语料文件大小，以及 `knowledge_graphs/kg_materials/kg_chunks/kg_nodes/kg_edges/kg_audits/kg_members` 各表的估算占用。由于运行环境的 SQLite 未启用 `dbstat`，表占用按行文本长度加约 15% 行头与索引开销估算，并在页面上注明口径。
 
 因此，恢复系统时既能恢复图数据，也能恢复形成图谱的原始证据和逐块处理记录。
 
 ### 4.4 展示组织
 
-详情页同时使用三种视图：
+详情页同时使用四种视图：
 
 1. **资料视图**：文件状态、页数、字数、本地处理时间、chunk 统计、ETA 和请求明细；
-2. **表格视图**：概念节点与关系边，可折叠；
-3. **图形视图**：按前置关系拓扑分层，最多展示关联度最高的 80 个节点；点击概念进入直接前置、直接延伸、包含和相关概念邻域。
+2. **表格视图**：概念节点与关系边，可折叠；关系边支持反向与删除；
+3. **图形视图**：按前置关系拓扑分层，最多展示关联度最高的 80 个节点；点击概念进入直接前置、直接延伸、包含和相关概念邻域；
+4. **治理视图**：成环告警、AI 体检建议预览、协作成员管理、空间/耗时/Token/模型指标与存储明细。
 
 ## 5. 当前提供的 HTTP 接口
 
@@ -263,7 +294,16 @@ erDiagram
 
 这些接口是 GradeLogy 内部 Web 功能的一部分，使用登录会话鉴权，不是带独立 API Token 的公开 REST API。
 
-路径中的 `<oid:...>` 是系统签名后的对象 ID，不应直接替换为未经编码的数据库整数。教师和管理员可查看共享图谱；上传、编辑、删除要求图谱创建者或管理员。课程关联要求课程负责人或管理员。
+路径中的 `<oid:...>` 是系统签名后的对象 ID，不应直接替换为未经编码的数据库整数。图谱可被所有老师查看；写操作按协作角色控制：
+
+| 角色 | 能力 |
+| --- | --- |
+| `manage` | 改名、删除图谱、分配/移除成员；创建者和管理员自动拥有 |
+| `edit` | 上传/删除资料、反向/删除关系、执行体检并应用建议 |
+| `use` | 把自己的课程关联到该图谱 |
+| 只读 | 查看图谱、概念邻域与运营指标 |
+
+课程关联还要求课程负责人或管理员；成员管理只对 `manage` 开放。
 
 | 方法 | 路径 | 用途 | 返回 |
 |---|---|---|---|
@@ -276,6 +316,14 @@ erDiagram
 | POST | `/knowledge-graphs/materials/<oid:mid>/delete` | 删除资料并回收其独有节点和边 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/edit` | 修改名称和说明；表单 `name/description` | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/delete` | 删除整张图谱、关联和原始文件 | 重定向 |
+| POST | `/knowledge-graphs/<oid:gid>/edges/<oid:eid>/reverse` | 反向前置关系；会成环则拒绝，重复边自动合并 | 重定向 |
+| POST | `/knowledge-graphs/<oid:gid>/edges/<oid:eid>/delete` | 删除一条关系边 | 重定向 |
+| POST | `/knowledge-graphs/<oid:gid>/audit` | 运行 AI 图谱体检并保存建议 | 重定向 |
+| POST | `/knowledge-graphs/<oid:gid>/audit/<oid:aid>/apply` | 应用体检建议并保存应用前快照 | 重定向 |
+| POST | `/knowledge-graphs/<oid:gid>/audit/<oid:aid>/rollback` | 从快照回滚已应用的建议 | 重定向 |
+| POST | `/knowledge-graphs/<oid:gid>/audit/<oid:aid>/discard` | 忽略一次体检结果 | 重定向 |
+| POST | `/knowledge-graphs/<oid:gid>/members` | 新增或调整协作老师；表单 `user_id/role` | 重定向 |
+| POST | `/knowledge-graphs/<oid:gid>/members/<oid:uid>/remove` | 移除协作老师 | 重定向 |
 | POST | `/course/<oid:cid>/knowledge-graphs` | 整体替换课程关联；表单 `graph_ids` 可多选 | 重定向 |
 
 ### 5.2 建图状态 JSON
@@ -395,10 +443,15 @@ Content-Type: application/json
 | `utilities/knowledge_graph.py` | `analyze_batch(...)` | 调用 LLM 并清洗抽取 JSON |
 | `utilities/knowledge_graph.py` | `extract_material(...)` | 资料解析、截断和 chunk 持久化 |
 | `utilities/knowledge_graph.py` | `build_material(...)` | 逐块续建、保存结果并统一合图 |
-| `utilities/knowledge_graph.py` | `merge_extraction(...)` | 节点、别名、关系和出处增量合并 |
+| `utilities/knowledge_graph.py` | `merge_extraction(...)` | 节点、别名、关系和出处增量合并，前置关系写前防环 |
+| `utilities/knowledge_graph.py` | `prerequisite_reachable(...)` | 递归 CTE 判断前置子图可达性 |
+| `utilities/knowledge_graph.py` | `prerequisite_cycles(...)` | 强连通分量找出存量前置环 |
 | `utilities/knowledge_graph.py` | `delete_material(...)` | 删除资料并回收独有图元素 |
 | `utilities/knowledge_graph.py` | `layered_graph(...)` | 生成前置关系分层图数据 |
 | `utilities/knowledge_graph.py` | `concept_neighbors(...)` | 查询概念直接上下游邻域 |
+| `utilities/knowledge_graph.py` | `analyze_graph(...)` | 调用模型生成图谱体检建议 |
+| `utilities/knowledge_graph.py` | `validate_audit_suggestions(...)` | 校验建议的 ID、合并冲突和成环风险 |
+| `utilities/knowledge_graph.py` | `apply_audit(...)` / `restore_snapshot(...)` | 应用建议与快照回滚 |
 | `app.py` | `start_kg_recovery()` | 启动时恢复待建图和建图中资料 |
 
 ## 7. 当前边界
@@ -409,6 +462,9 @@ Content-Type: application/json
 4. **抽取结果需要教学复核**：置信度来自模型自评，不等同于经过教师审核的正确率。
 5. **归一化不是完整本体推理**：当前主要解决同名和别名合并，不自动证明两个不同概念在语义上完全等价。
 6. **ETA 是经验估算**：模型限流、重试、推理长度和网络状况都可能使实际时间变化。
+7. **表空间是估算值**：环境未启用 SQLite `dbstat`，不读取真实页分配，按行内容长度与固定开销推算。
+8. **体检不自动落库**：LLM 建议必须经过服务端校验和人工确认；同名合并、孤立节点下线目前也不自动执行。
+9. **根因联动尚未自动化**：标签分析与前置缺口仍由老师结合图谱判断，没有自动注入批改提示词。
 
 ## 8. 实现与验证索引
 

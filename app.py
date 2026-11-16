@@ -1303,10 +1303,11 @@ def course_detail(cid):
         WHERE u.role='teacher' AND u.active=1 AND u.id NOT IN
               (SELECT teacher_id FROM course_teachers WHERE course_id=?)
         ORDER BY u.display_name""", (cid,)).fetchall()
-    kg_options = db.execute("""
+    kg_options = [row for row in db.execute("""
         SELECT g.id, g.subject, g.name, g.grade_level,
           (SELECT COUNT(*) FROM kg_nodes n WHERE n.graph_id=g.id) AS n_nodes
-        FROM knowledge_graphs g ORDER BY g.subject, g.name COLLATE NOCASE""").fetchall()
+        FROM knowledge_graphs g ORDER BY g.subject, g.name COLLATE NOCASE""")
+        if row["id"] in _kg_accessible_ids(db, g.user)]
     assigned_kg_ids = {r["graph_id"] for r in db.execute(
         "SELECT graph_id FROM course_knowledge_graphs WHERE course_id=?", (cid,))}
     return render_template("course.html", course=course, students=students,
@@ -2730,7 +2731,7 @@ def course_knowledge_graphs_save(cid):
     """为课程关联一个或多个学科知识图谱；提交空选择即解除全部关联。"""
     own_course(cid)
     db = get_db()
-    valid = {r["id"] for r in db.execute("SELECT id FROM knowledge_graphs")}
+    valid = _kg_accessible_ids(db, g.user)
     chosen = set()
     for raw in request.form.getlist("graph_ids"):
         try:
@@ -2748,15 +2749,136 @@ def course_knowledge_graphs_save(cid):
 
 
 # ---------- 老师：学科知识图谱 ----------
-def _kg_graph(gid, edit=False):
-    """图谱按学科共享：所有老师可查看，仅创建者与管理员可修改。"""
+KG_ROLE_LABEL = {"manage": "管理", "edit": "编辑", "use": "使用"}
+KG_ROLE_RANK = {"use": 1, "edit": 2, "manage": 3}
+
+
+def _kg_role(graph):
+    """当前用户在该图谱上的最高协作角色；创建者与管理员始终是管理。"""
+    if g.user["role"] == "admin" or graph["created_by"] == g.user["id"]:
+        return "manage"
+    row = get_db().execute(
+        "SELECT role FROM kg_members WHERE graph_id=? AND user_id=?",
+        (graph["id"], g.user["id"])).fetchone()
+    return row["role"] if row else ""
+
+
+def _kg_accessible_ids(db, user):
+    """用户可引入到自己课程里的图谱集合：自己创建或被授予任意协作角色。"""
+    if user["role"] == "admin":
+        return {row["id"] for row in db.execute("SELECT id FROM knowledge_graphs")}
+    return {row["id"] for row in db.execute(
+        "SELECT id FROM knowledge_graphs WHERE created_by=? UNION "
+        "SELECT graph_id FROM kg_members WHERE user_id=?",
+        (user["id"], user["id"]))}
+
+
+def _kg_graph(gid, edit=False, manage=False, use=False):
+    """图谱按学科共享可查看；修改需要编辑权限，改名/删除需要管理权限。"""
     row = get_db().execute("SELECT * FROM knowledge_graphs WHERE id=?",
                            (gid,)).fetchone()
     if not row:
         abort(404)
-    if edit and g.user["role"] != "admin" and row["created_by"] != g.user["id"]:
+    if not (edit or manage or use):
+        return row
+    role = _kg_role(row)
+    if role == "manage":
+        return row
+    if manage or (edit and KG_ROLE_RANK.get(role, 0) < KG_ROLE_RANK["edit"]):
+        abort(403)
+    if use and KG_ROLE_RANK.get(role, 0) < KG_ROLE_RANK["use"]:
         abort(403)
     return row
+
+
+def _kg_size_text(size):
+    size = max(0, int(size or 0))
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return "0 B"
+
+
+# 图谱相关表及其行内容长度估算：表名仅用于展示，SQL 按图谱过滤
+KG_DB_TABLES = (
+    ("图谱记录", "knowledge_graphs",
+     "SELECT 1 AS n, LENGTH(subject)+LENGTH(name)+LENGTH(description)"
+     "+LENGTH(grade_level)+48 AS b FROM knowledge_graphs WHERE id=?"),
+    ("语料记录", "kg_materials",
+     "SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(filename)+LENGTH(stored_name)"
+     "+LENGTH(mime)+LENGTH(sha256)+LENGTH(status)+LENGTH(error)"
+     "+LENGTH(COALESCE(started_at,''))+LENGTH(COALESCE(finished_at,''))"
+     "+LENGTH(created_at)+72),0) AS b FROM kg_materials WHERE graph_id=?"),
+    ("文本块", "kg_chunks",
+     "SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(content)+LENGTH(status)"
+     "+LENGTH(error)+LENGTH(extraction_json)+LENGTH(COALESCE(started_at,''))"
+     "+LENGTH(COALESCE(finished_at,''))+48),0) AS b"
+     " FROM kg_chunks WHERE graph_id=?"),
+    ("概念节点", "kg_nodes",
+     "SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(name)+LENGTH(normalized)"
+     "+LENGTH(category)+LENGTH(definition)+LENGTH(aliases)"
+     "+LENGTH(source_materials)+LENGTH(created_at)+LENGTH(updated_at)"
+     "+48),0) AS b FROM kg_nodes WHERE graph_id=?"),
+    ("关系边", "kg_edges",
+     "SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(relation)+LENGTH(evidence)"
+     "+LENGTH(source_materials)+LENGTH(created_at)+40),0) AS b"
+     " FROM kg_edges WHERE graph_id=?"),
+    ("体检记录", "kg_audits",
+     "SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(status)+LENGTH(model)"
+     "+LENGTH(error)+LENGTH(suggestions)+LENGTH(rejected)+LENGTH(snapshot)"
+     "+LENGTH(created_at)+LENGTH(COALESCE(applied_at,''))+56),0) AS b"
+     " FROM kg_audits WHERE graph_id=?"),
+    ("协作成员", "kg_members",
+     "SELECT COUNT(*) AS n, COUNT(*)*40 AS b FROM kg_members WHERE graph_id=?"),
+)
+
+
+def _kg_db_usage(db, graph_id):
+    """按数据表估算该图谱的数据库占用；行内容之外计入约 15% 行头与索引开销。"""
+    items, total = [], 0
+    for label, table, sql in KG_DB_TABLES:
+        row = db.execute(sql, (graph_id,)).fetchone()
+        count = row["n"] or 0
+        size = int(round((row["b"] or 0) * 1.15)) if count else 0
+        items.append({"label": label, "table": table, "count": count,
+                      "bytes": size, "text": _kg_size_text(size)})
+        total += size
+    return items, total
+
+
+def _kg_metrics(db, graph_id):
+    """图谱空间占用、累计建图耗时、token 与涉及过的模型。"""
+    usage_sql = (
+        "o.material_id IN (SELECT id FROM kg_materials WHERE graph_id=?)"
+        " OR o.id IN (SELECT operation_id FROM kg_audits"
+        " WHERE graph_id=? AND operation_id IS NOT NULL)")
+    material = db.execute(
+        "SELECT COALESCE(SUM(size),0) AS bytes,"
+        " COALESCE(SUM(CASE WHEN started_at IS NOT NULL AND finished_at IS NOT NULL"
+        " THEN MAX(0,(julianday(finished_at)-julianday(started_at))*86400)"
+        " ELSE 0 END),0) AS seconds"
+        " FROM kg_materials WHERE graph_id=?", (graph_id,)).fetchone()
+    usage = db.execute(
+        "SELECT SUM(e.total_tokens) AS tokens FROM ai_usage_events e"
+        " JOIN ai_operations o ON o.id=e.operation_id WHERE " + usage_sql,
+        (graph_id, graph_id)).fetchone()
+    models = [row["model"] for row in db.execute(
+        "SELECT DISTINCT o.model FROM ai_operations o WHERE o.model<>'' AND ("
+        + usage_sql + ") ORDER BY o.model", (graph_id, graph_id))]
+    tokens = usage["tokens"] if usage else None
+    db_items, db_bytes = _kg_db_usage(db, graph_id)
+    file_bytes = material["bytes"] or 0
+    return {
+        "size_text": _kg_size_text(file_bytes + db_bytes),
+        "file_text": _kg_size_text(file_bytes),
+        "db_text": _kg_size_text(db_bytes),
+        "db_rows": db_items,
+        "duration_text": (_kg_duration_text(material["seconds"])
+                          if material["seconds"] else "—"),
+        "tokens_text": f"{int(tokens):,}" if tokens is not None else "—",
+        "models_text": "、".join(models) if models else "—",
+    }
 
 
 # 多份资料集中上传时串行建图，避免同时打满模型限流；集合防止重复入队
@@ -3019,6 +3141,16 @@ def knowledge_graph_detail(gid):
     audits = [_kg_audit_view(row) for row in db.execute(
         "SELECT * FROM kg_audits WHERE graph_id=? ORDER BY id DESC LIMIT 3",
         (gid,)).fetchall()]
+    role = _kg_role(graph)
+    members = db.execute(
+        "SELECT m.user_id, m.role, u.username, u.display_name FROM kg_members m"
+        " JOIN users u ON u.id=m.user_id WHERE m.graph_id=? ORDER BY m.role, u.display_name",
+        (gid,)).fetchall()
+    member_ids = {row["user_id"] for row in members}
+    teacher_candidates = [row for row in db.execute(
+        "SELECT id, username, display_name FROM users WHERE role='teacher'"
+        " AND active=1 AND id<>? ORDER BY display_name",
+        (graph["created_by"],)) if row["id"] not in member_ids]
     return render_template(
         "knowledge_graph.html", graph=graph, materials=materials,
         counts=kg_utils.graph_counts(db, gid),
@@ -3028,8 +3160,13 @@ def knowledge_graph_detail(gid):
         layered=kg_utils.layered_graph(db, gid),
         cycles=kg_utils.prerequisite_cycles(db, gid),
         audits=audits,
+        metrics=_kg_metrics(db, gid),
+        members=members, teacher_candidates=teacher_candidates,
+        role=role, role_label=KG_ROLE_LABEL.get(role, "只读"),
+        role_labels=KG_ROLE_LABEL,
         max_upload_mb=cfg.KG_MAX_UPLOAD_MB,
-        can_edit=g.user["role"] == "admin" or graph["created_by"] == g.user["id"])
+        can_edit=role in ("manage", "edit"),
+        can_manage=role == "manage")
 
 
 @_routes.route("/knowledge-graphs/<oid:gid>/concepts/<oid:nid>")
@@ -3172,7 +3309,7 @@ def knowledge_graph_material_delete(mid):
 @role_required("teacher", "admin")
 def knowledge_graph_edit(gid):
     """修改图谱名称与说明；学科与资料范围保持不变。"""
-    _kg_graph(gid, edit=True)
+    _kg_graph(gid, manage=True)
     name = request.form.get("name", "").strip()[:80]
     if not name:
         flash("图谱名称不能为空")
@@ -3286,10 +3423,11 @@ def knowledge_graph_audit_run(gid):
               else f"体检完成：{len(rejected)} 条建议未通过校验")
     db.execute(
         "INSERT INTO kg_audits(graph_id,status,model,error,suggestions,rejected,"
-        "created_by) VALUES(?,?,?,?,?,?,?)",
+        "operation_id,created_by) VALUES(?,?,?,?,?,?,?,?)",
         (gid, status, model, err[:500],
          json.dumps(suggestions, ensure_ascii=False),
-         json.dumps(rejected, ensure_ascii=False), g.user["id"]))
+         json.dumps(rejected, ensure_ascii=False), operation["id"],
+         g.user["id"]))
     db.commit()
     log.info("知识图谱体检 user=%s#%s graph=%s status=%s 建议=%s 拦截=%s",
              g.user["username"], g.user["id"], gid, status,
@@ -3381,9 +3519,10 @@ def knowledge_graph_audit_discard(gid, aid):
 @_routes.route("/knowledge-graphs/<oid:gid>/delete", methods=["POST"])
 @role_required("teacher", "admin")
 def knowledge_graph_delete(gid):
-    graph = _kg_graph(gid, edit=True)
+    graph = _kg_graph(gid, manage=True)
     db = get_db()
     db.execute("DELETE FROM kg_audits WHERE graph_id=?", (gid,))
+    db.execute("DELETE FROM kg_members WHERE graph_id=?", (gid,))
     db.execute("DELETE FROM kg_chunks WHERE graph_id=?", (gid,))
     db.execute("DELETE FROM kg_edges WHERE graph_id=?", (gid,))
     db.execute("DELETE FROM kg_nodes WHERE graph_id=?", (gid,))
@@ -3396,6 +3535,52 @@ def knowledge_graph_delete(gid):
              g.user["username"], g.user["id"], gid, graph["name"])
     flash(f"已删除知识图谱「{graph['name']}」")
     return redirect(url_for("knowledge_graphs"))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/members", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_member_save(gid):
+    """新增或调整协作老师；同一老师在同一图谱只保留一条角色记录。"""
+    graph = _kg_graph(gid, manage=True)
+    db = get_db()
+    try:
+        user_id = int(request.form.get("user_id") or 0)
+    except (TypeError, ValueError):
+        user_id = 0
+    role = request.form.get("role") or "use"
+    if role not in KG_ROLE_LABEL:
+        role = "use"
+    user = db.execute(
+        "SELECT * FROM users WHERE id=? AND role='teacher' AND active=1",
+        (user_id,)).fetchone()
+    if not user:
+        flash("请选择启用状态的老师账号")
+    elif user_id == graph["created_by"]:
+        flash("创建者已拥有管理权限")
+    else:
+        db.execute(
+            "INSERT INTO kg_members(graph_id,user_id,role) VALUES(?,?,?)"
+            " ON CONFLICT(graph_id,user_id) DO UPDATE SET role=excluded.role",
+            (gid, user_id, role))
+        db.commit()
+        log.info("设置知识图谱协作 user=%s#%s graph=%s member=%s role=%s",
+                 g.user["username"], g.user["id"], gid, user_id, role)
+        flash(f"已把「{user['display_name']}」设为{KG_ROLE_LABEL[role]}")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/members/<oid:uid>/remove", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_member_remove(gid, uid):
+    _kg_graph(gid, manage=True)
+    db = get_db()
+    db.execute("DELETE FROM kg_members WHERE graph_id=? AND user_id=?",
+               (gid, uid))
+    db.commit()
+    log.info("移除知识图谱协作 user=%s#%s graph=%s member=%s",
+             g.user["username"], g.user["id"], gid, uid)
+    flash("已移除该老师的协作权限")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
 
 
 @_routes.route("/assistant/chat", methods=["POST"])

@@ -304,10 +304,19 @@ CREATE TABLE IF NOT EXISTS kg_audits(
   suggestions TEXT DEFAULT '',
   rejected TEXT DEFAULT '',
   snapshot TEXT DEFAULT '',
+  operation_id INTEGER,
   created_by INTEGER NOT NULL DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   applied_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_kg_audits_graph ON kg_audits(graph_id, id);
+-- 图谱协作：manage 可改名/删除/管理成员，edit 可加语料与改关系，use 可在自己的课程中引入
+CREATE TABLE IF NOT EXISTS kg_members(
+  graph_id INTEGER NOT NULL REFERENCES knowledge_graphs(id),
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  role TEXT NOT NULL DEFAULT 'use',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(graph_id, user_id));
+CREATE INDEX IF NOT EXISTS idx_kg_members_user ON kg_members(user_id, graph_id);
 -- 价目表：静态清单之外的覆盖值（目前由价目截图识别后确认写入），按模型 ID 全局生效
 CREATE TABLE IF NOT EXISTS model_prices(
   model TEXT PRIMARY KEY,
@@ -492,6 +501,10 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=()):
                      ("started_at", "TEXT"), ("finished_at", "TEXT")):
         if col not in chunk_cols:
             con.execute(f"ALTER TABLE kg_chunks ADD COLUMN {col} {ddl}")
+    # 图谱体检操作的 token 归属：记录体检调用的 ai_operations
+    audit_cols = {r[1] for r in con.execute("PRAGMA table_info(kg_audits)")}
+    if "operation_id" not in audit_cols:
+        con.execute("ALTER TABLE kg_audits ADD COLUMN operation_id INTEGER")
     con.execute("CREATE INDEX IF NOT EXISTS idx_ai_operations_material "
                 "ON ai_operations(material_id, id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_ai_usage_chunk "
