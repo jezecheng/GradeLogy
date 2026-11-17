@@ -85,6 +85,17 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
 .kg-audit-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .kg-audit-status { border-radius: 999px; padding: 2px 10px; font-size: 12px;
   background: #f1f2f4; color: #4b5563; }
+.kg-cat-batch { border-top: 1px solid #eef0f3; padding: 4px 0; }
+.kg-cat-batch:first-of-type { border-top: 0; }
+.kg-cat-batch > summary { cursor: pointer; list-style: none; display: flex;
+  align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 2px; }
+.kg-cat-batch > summary::-webkit-details-marker { display: none; }
+.kg-cat-batch > summary::before { content: '▸'; color: #8a8f99; font-size: 12px;
+  transition: transform .15s; }
+.kg-cat-batch[open] > summary::before { transform: rotate(90deg); }
+.kg-cat-batch-tip { margin-left: auto; color: #1456f0; font-size: 12px; }
+.kg-cat-batch .kg-audit { border-top: 0; padding-top: 2px; }
+.kg-cat-check { width: 34px; }
 .kg-role-badge { background: #eef0f3; color: #4b5563; border-radius: 999px;
   padding: 2px 10px; font-size: 12px; font-weight: 500; vertical-align: middle; }
 .kg-stat-model b { font-size: 13px; max-width: 240px; word-break: break-all; }
@@ -349,6 +360,7 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
   </summary>
   <div class="kg-galaxy-shell" id="kg-galaxy-shell"
        data-url="{{ url_for('knowledge_graph_graph_data', gid=graph.id) }}"
+       data-scope-url="{{ url_for('knowledge_graph_scope_data', gid=graph.id) }}"
        data-neighbors-url="{{ url_for('knowledge_graph_neighbors_data', gid=graph.id) }}">
     <div class="kg-galaxy-toolbar">
       <div class="kg-galaxy-toolbar-row">
@@ -377,11 +389,11 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
 {% endif %}
 
 <details class="card kg-fold" open>
-  <summary class="card-head"><h2>概念节点 <span class="muted small">（{{ counts.nodes }} 个，最多展示 200 个）</span></h2></summary>
+  <summary class="card-head"><h2>概念节点 <span class="muted small" id="kg-node-summary">（跟随星图当前层级）</span></h2></summary>
   {% if nodes %}
-  <table class="kg">
+  <table class="kg" id="kg-node-table">
     <thead><tr><th>概念</th><th>分类</th><th>定义</th><th>别名</th><th>置信度</th></tr></thead>
-    <tbody>
+    <tbody id="kg-node-body">
       {% for n in nodes %}
       {% set aliases = n.aliases | fromjson if n.aliases else [] %}
       <tr>
@@ -394,17 +406,20 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
       {% endfor %}
     </tbody>
   </table>
+  <p class="muted small" id="kg-node-empty" hidden>
+    当前是星团概览：点击星团下钻到概念层后，这里只显示该层的概念。
+  </p>
   {% else %}
   <p class="muted small">暂无概念。资料构建完成后会出现在这里。</p>
   {% endif %}
 </details>
 
 <details class="card kg-fold">
-  <summary class="card-head"><h2>关系边 <span class="muted small">（{{ counts.edges }} 条，最多展示 200 条）</span></h2></summary>
+  <summary class="card-head"><h2>关系边 <span class="muted small" id="kg-edge-summary">（跟随星图当前层级）</span></h2></summary>
   {% if edges %}
-  <table class="kg">
+  <table class="kg" id="kg-edge-table">
     <thead><tr><th>关系</th><th>依据</th><th>置信度</th>{% if can_edit %}<th>操作</th>{% endif %}</tr></thead>
-    <tbody>
+    <tbody id="kg-edge-body">
       {% for e in edges %}
       <tr>
         <td>
@@ -436,6 +451,9 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
       {% endfor %}
     </tbody>
   </table>
+  <p class="muted small" id="kg-edge-empty" hidden>
+    当前是星团概览：下钻到概念层后，这里只显示该层概念之间的关系。
+  </p>
   {% else %}
   <p class="muted small">暂无关系。可再上传覆盖更完整的教材或考纲。</p>
   {% endif %}
@@ -532,65 +550,104 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
   <p class="muted small">还没有分类重构记录。</p>
   {% endif %}
   {% for m in cat_maps %}
-  <div class="kg-audit">
-    <div class="kg-audit-head">
+  <details class="kg-cat-batch" {% if m.status == '待确认' %}open{% endif %}>
+    <summary class="kg-cat-batch-head">
       <span class="kg-audit-status">{{ m.status }}</span>
-      <span class="muted small">{{ m.created_at }}{% if m.applied_at %} · 应用 {{ m.applied_at }}{% endif %}{% if m.model %} · {{ m.model }}{% endif %}{% if m.count %} · 覆盖 {{ m.count }} 个概念{% endif %}</span>
-    </div>
-    {% if m.error %}
-    <p class="kg-request-error">{{ m.error }}</p>
-    {% endif %}
-    {% if m['items'] %}
-    <div class="kg-table-wrap">
-      <table class="kg">
-        <thead><tr><th>原分类</th><th>概念数</th><th>新路径</th><th>理由</th></tr></thead>
-        <tbody>
-          {% for item in m['items'] %}
-          <tr>
-            <td class="kg-name">{{ item['from'] or '（未分类）' }}</td>
-            <td>{{ item.count }}</td>
-            <td>{{ item['to'] }}</td>
-            <td class="kg-note">{{ item.reason or '—' }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    {% endif %}
-    {% if m.rejected %}
-    <details>
-      <summary class="muted small">{{ m.rejected | length }} 条映射未通过校验</summary>
-      <ul class="kg-cycle-list">
-        {% for r in m.rejected %}
-        <li>{{ r.text }}：{{ r.reason }}</li>
-        {% endfor %}
-      </ul>
-    </details>
-    {% endif %}
-    {% if can_edit and m.status == '待确认' and m['items'] %}
-    <div class="kg-audit-actions">
+      <span class="muted small">批次 #{{ m.id }} · {{ m.created_at }}{% if m.applied_at %} · 应用 {{ m.applied_at }}{% endif %}{% if m.model %} · {{ m.model }}{% endif %}{% if m.count %} · 覆盖 {{ m.count }} 个概念{% endif %}</span>
+      {% if m.status == '待确认' %}
+      <span class="kg-cat-batch-tip">可勾选后应用</span>
+      {% endif %}
+    </summary>
+    <div class="kg-audit">
+      {% if m.error %}
+      <p class="kg-request-error">{{ m.error }}</p>
+      {% endif %}
+      {% if m['items'] %}
+      {% if can_edit and m.status == '待确认' %}
       <form method="post"
             action="{{ url_for('knowledge_graph_category_apply', gid=graph.id, mid=m.id) }}"
-            onsubmit="return confirm('应用后会批量改写节点分类，应用后仍可回滚。继续？')">
+            onsubmit="return confirm('应用选中的映射会批量改写节点分类，应用后仍可回滚。继续？')">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-        <button class="ghost small">应用映射</button>
+        <div class="kg-table-wrap">
+          <table class="kg">
+            <thead>
+              <tr>
+                <th class="kg-cat-check"><input type="checkbox" data-kg-cat-all checked
+                      aria-label="全选" onchange="kgCatToggleAll(this)"></th>
+                <th>原分类</th><th>概念数</th><th>新路径</th><th>理由</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for item in m['items'] %}
+              <tr>
+                <td><input type="checkbox" name="selected" value="{{ loop.index0 }}" checked
+                      aria-label="选择这条映射"></td>
+                <td class="kg-name">{{ item['from'] or '（未分类）' }}</td>
+                <td>{{ item.count }}</td>
+                <td>{{ item['to'] }}</td>
+                <td class="kg-note">{{ item.reason or '—' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <div class="kg-audit-actions">
+          <span class="muted small">勾选需要生效的映射，未勾选的保留原分类。</span>
+          <button class="ghost small">应用选中</button>
+          <button class="ghost small" formnovalidate
+                  formaction="{{ url_for('knowledge_graph_category_discard', gid=graph.id, mid=m.id) }}"
+                  onclick="return confirm('忽略这一批映射？不会改动图谱。')">忽略本批</button>
+        </div>
       </form>
+      {% else %}
+      <div class="kg-table-wrap">
+        <table class="kg">
+          <thead><tr><th>原分类</th><th>概念数</th><th>新路径</th><th>理由</th></tr></thead>
+          <tbody>
+            {% for item in m['items'] %}
+            <tr>
+              <td class="kg-name">{{ item['from'] or '（未分类）' }}</td>
+              <td>{{ item.count }}</td>
+              <td>{{ item['to'] }}</td>
+              <td class="kg-note">{{ item.reason or '—' }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+      {% endif %}
+      {% if m.rejected %}
+      <details>
+        <summary class="muted small">{{ m.rejected | length }} 条映射未应用</summary>
+        <ul class="kg-cycle-list">
+          {% for r in m.rejected %}
+          <li>{{ r.text }}：{{ r.reason }}</li>
+          {% endfor %}
+        </ul>
+      </details>
+      {% endif %}
+      {% if can_edit and m.status == '已应用' and m.has_snapshot %}
       <form method="post"
-            action="{{ url_for('knowledge_graph_category_discard', gid=graph.id, mid=m.id) }}">
+            action="{{ url_for('knowledge_graph_category_rollback', gid=graph.id, mid=m.id) }}"
+            onsubmit="return confirm('回滚会用快照覆盖图谱当前状态。继续？')">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-        <button class="ghost small">忽略</button>
+        <button class="ghost small">回滚</button>
       </form>
+      {% endif %}
     </div>
-    {% elif can_edit and m.status == '已应用' and m.has_snapshot %}
-    <form method="post"
-          action="{{ url_for('knowledge_graph_category_rollback', gid=graph.id, mid=m.id) }}"
-          onsubmit="return confirm('回滚会用快照覆盖图谱当前状态。继续？')">
-      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-      <button class="ghost small">回滚</button>
-    </form>
-    {% endif %}
-  </div>
+  </details>
   {% endfor %}
+  <script>
+    function kgCatToggleAll(box) {
+      var all = box.getAttribute('data-kg-cat-all') !== null
+        ? box : box.querySelector('[data-kg-cat-all]');
+      var checked = all.checked;
+      Array.prototype.forEach.call(
+        all.form.querySelectorAll('input[name="selected"]'),
+        function (input) { input.checked = checked; });
+    }
+  </script>
 </details>
 {% endif %}
 

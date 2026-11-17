@@ -3550,7 +3550,7 @@ def knowledge_graph_detail(gid):
         "SELECT * FROM kg_audits WHERE graph_id=? ORDER BY id DESC LIMIT 3",
         (gid,)).fetchall()]
     cat_maps = [_kg_category_map_view(row) for row in db.execute(
-        "SELECT * FROM kg_category_maps WHERE graph_id=? ORDER BY id DESC LIMIT 3",
+        "SELECT * FROM kg_category_maps WHERE graph_id=? ORDER BY id DESC LIMIT 10",
         (gid,)).fetchall()]
     role = _kg_role(graph)
     members = db.execute(
@@ -3617,6 +3617,68 @@ def knowledge_graph_neighbors_data(gid):
         "prerequisites": with_url(detail["prerequisites"]),
         "dependents": with_url(detail["dependents"]),
         "others": with_url(detail["others"]),
+    })
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/scope.json")
+@role_required("teacher", "admin")
+def knowledge_graph_scope_data(gid):
+    """当前下钻层级的节点与关联边，用于让下方概念/关系表跟随星图联动。"""
+    graph = _kg_graph(gid)
+    db = get_db()
+    ids = []
+    for part in (request.args.get("ids") or "").split(","):
+        part = part.strip()
+        if part.isdigit() and int(part) not in ids:
+            ids.append(int(part))
+    ids = ids[:200]
+    if not ids:
+        return jsonify({"nodes": [], "edges": [], "can_edit": False,
+                        "csrf": "", "node_total": 0, "edge_total": 0})
+    marks = ",".join("?" * len(ids))
+    rows = db.execute(
+        f"SELECT * FROM kg_nodes WHERE graph_id=? AND id IN ({marks})",
+        (gid, *ids)).fetchall()
+    order = {node_id: index for index, node_id in enumerate(ids)}
+    rows = sorted(rows, key=lambda row: order.get(row["id"], len(ids)))
+    node_payload = []
+    for row in rows:
+        try:
+            aliases = json.loads(row["aliases"] or "[]")
+        except (TypeError, ValueError):
+            aliases = []
+        node_payload.append({
+            "name": row["name"],
+            "url": url_for("knowledge_graph_concept", gid=gid, nid=row["id"]),
+            "category": row["category"] or "",
+            "definition": row["definition"] or "",
+            "aliases": "、".join(str(alias) for alias in aliases),
+            "confidence": round((row["confidence"] or 0) * 100),
+        })
+    edge_rows = db.execute(
+        f"SELECT e.*, s.name AS src_name, d.name AS dst_name FROM kg_edges e"
+        f" JOIN kg_nodes s ON s.id=e.src_id JOIN kg_nodes d ON d.id=e.dst_id"
+        f" WHERE e.graph_id=? AND e.src_id IN ({marks}) AND e.dst_id IN ({marks})"
+        f" ORDER BY e.confidence DESC, e.id LIMIT 400",
+        (gid, *ids, *ids)).fetchall()
+    edge_total = db.execute(
+        f"SELECT COUNT(*) FROM kg_edges WHERE graph_id=? AND src_id IN ({marks})"
+        f" AND dst_id IN ({marks})", (gid, *ids, *ids)).fetchone()[0]
+    can_edit = _kg_role(graph) in ("manage", "edit")
+    edge_payload = [{
+        "relation": row["relation"],
+        "relation_label": kg_utils.RELATION_LABEL.get(row["relation"], row["relation"]),
+        "src_name": row["src_name"], "dst_name": row["dst_name"],
+        "evidence": row["evidence"] or "",
+        "confidence": round((row["confidence"] or 0) * 100),
+        "reverse_url": url_for("knowledge_graph_edge_reverse", gid=gid,
+                               eid=row["id"]) if row["relation"] == "prerequisite" else "",
+        "delete_url": url_for("knowledge_graph_edge_delete", gid=gid, eid=row["id"]),
+    } for row in edge_rows]
+    return jsonify({
+        "nodes": node_payload, "edges": edge_payload, "can_edit": can_edit,
+        "csrf": csrf_token(),
+        "node_total": len(node_payload), "edge_total": edge_total,
     })
 
 
@@ -4083,15 +4145,38 @@ def knowledge_graph_category_apply(gid, mid):
     if not items:
         flash("没有可应用的分类映射")
         return redirect(url_for("knowledge_graph_detail", gid=gid))
-    snapshot = kg_utils.apply_category_map(db, gid, items)
+    picked = []
+    for raw in request.form.getlist("selected"):
+        try:
+            index = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= index < len(items) and index not in picked:
+            picked.append(index)
+    if not picked:
+        flash("请先勾选要应用的映射")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    chosen = [items[index] for index in picked]
+    skipped = [{"text": items[index].get("label") or items[index].get("from") or "",
+                "reason": "本次未勾选，未应用"}
+               for index in range(len(items)) if index not in picked]
+    try:
+        rejected = json.loads(record["rejected"] or "[]")
+    except (TypeError, ValueError):
+        rejected = []
+    snapshot = kg_utils.apply_category_map(db, gid, chosen)
     db.execute(
-        "UPDATE kg_category_maps SET status=?, snapshot=?, "
+        "UPDATE kg_category_maps SET status=?, snapshot=?, mappings=?, rejected=?, "
         "applied_at=CURRENT_TIMESTAMP WHERE id=?",
-        (kg_utils.CATEGORY_APPLIED, json.dumps(snapshot, ensure_ascii=False), mid))
+        (kg_utils.CATEGORY_APPLIED, json.dumps(snapshot, ensure_ascii=False),
+         json.dumps(chosen, ensure_ascii=False),
+         json.dumps(rejected + skipped, ensure_ascii=False), mid))
     db.commit()
-    kg_log.info("应用知识图谱分类重构 user=%s#%s graph=%s map=%s 映射=%s",
-                g.user["username"], g.user["id"], gid, mid, len(items))
-    flash(f"已应用 {len(items)} 条分类映射，可随时回滚")
+    kg_log.info("应用知识图谱分类重构 user=%s#%s graph=%s map=%s 选中=%s 跳过=%s",
+                g.user["username"], g.user["id"], gid, mid, len(chosen), len(skipped))
+    flash(f"已应用选中的 {len(chosen)} 条分类映射"
+          + (f"，{len(skipped)} 条未勾选保留原分类" if skipped else "")
+          + "，可随时回滚")
     return redirect(url_for("knowledge_graph_detail", gid=gid))
 
 

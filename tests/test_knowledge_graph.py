@@ -1619,26 +1619,38 @@ class KGRouteTest(unittest.TestCase):
             "INSERT INTO kg_nodes(graph_id,name,normalized,category,confidence)"
             " VALUES(?,?,?,?,0.8)",
             (graph["id"], "过滤", "过滤", "方法")).lastrowid
+        other_id = con.execute(
+            "INSERT INTO kg_nodes(graph_id,name,normalized,category,confidence)"
+            " VALUES(?,?,?,?,0.8)",
+            (graph["id"], "蒸馏", "蒸馏", "操作")).lastrowid
         map_id = con.execute(
             "INSERT INTO kg_category_maps(graph_id,status,mappings,created_by)"
             " VALUES(?, '待确认', ?, 2)",
-            (graph["id"], json.dumps([{
-                "from": "方法", "to": "实验方法/基本操作", "count": 1,
-                "reason": "归入实验", "label": "「方法」→「实验方法/基本操作」"}],
-                ensure_ascii=False))).lastrowid
+            (graph["id"], json.dumps([
+                {"from": "方法", "to": "实验方法/基本操作", "count": 1,
+                 "reason": "归入实验", "label": "「方法」→「实验方法/基本操作」"},
+                {"from": "操作", "to": "实验方法/分离提纯", "count": 1,
+                 "reason": "归入实验", "label": "「操作」→「实验方法/分离提纯」"},
+            ], ensure_ascii=False))).lastrowid
         con.commit()
         con.close()
 
-        self._post("knowledge_graph_category_apply", gid=graph["id"], mid=map_id)
+        self._post("knowledge_graph_category_apply", data={"selected": ["0"]},
+                   gid=graph["id"], mid=map_id)
         con = self._db()
         record = con.execute("SELECT * FROM kg_category_maps WHERE id=?",
                              (map_id,)).fetchone()
         category = con.execute("SELECT category FROM kg_nodes WHERE id=?",
                                (node_id,)).fetchone()["category"]
+        other_category = con.execute("SELECT category FROM kg_nodes WHERE id=?",
+                                     (other_id,)).fetchone()["category"]
         con.close()
         self.assertEqual(record["status"], kg.CATEGORY_APPLIED)
         self.assertTrue(record["snapshot"])
         self.assertEqual(category, "实验方法/基本操作")
+        self.assertEqual(other_category, "操作")
+        self.assertIn("本次未勾选，未应用", record["rejected"])
+        self.assertEqual(len(json.loads(record["mappings"])), 1)
 
         self._post("knowledge_graph_category_rollback", gid=graph["id"], mid=map_id)
         con = self._db()
@@ -1649,6 +1661,24 @@ class KGRouteTest(unittest.TestCase):
         con.close()
         self.assertEqual(record["status"], kg.CATEGORY_ROLLED_BACK)
         self.assertEqual(category, "方法")
+
+    def test_scope_json_filters_nodes_and_edges(self):
+        graph = self._create_graph()
+        ids = self._add_graph_nodes(graph["id"], "A", "B", "C")
+        self._add_graph_edge(graph["id"], ids["A"], ids["B"])
+        self._add_graph_edge(graph["id"], ids["B"], ids["C"])
+        resp = self.client.get(
+            self.url("knowledge_graph_scope_data", gid=graph["id"]),
+            query_string={"ids": f"{ids['A']},{ids['B']}"})
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.get_json()
+        self.assertEqual([node["name"] for node in payload["nodes"]], ["A", "B"])
+        self.assertEqual(len(payload["edges"]), 1)
+        self.assertEqual(payload["edge_total"], 1)
+        self.assertTrue(payload["can_edit"])
+        self.assertEqual(payload["nodes"][0]["url"],
+                         self.url("knowledge_graph_concept", gid=graph["id"],
+                                  nid=ids["A"]))
 
     def test_detail_shows_storage_time_tokens_and_model(self):
         graph = self._create_graph()

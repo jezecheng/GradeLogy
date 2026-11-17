@@ -9,6 +9,14 @@
   var categoryBox = document.getElementById('kg-galaxy-categories');
   var crumbsBox = document.getElementById('kg-galaxy-crumbs');
   var hintBox = shell.querySelector('.kg-galaxy-hint');
+  var nodeTable = document.getElementById('kg-node-table');
+  var nodeBody = document.getElementById('kg-node-body');
+  var nodeEmpty = document.getElementById('kg-node-empty');
+  var nodeSummary = document.getElementById('kg-node-summary');
+  var edgeTable = document.getElementById('kg-edge-table');
+  var edgeBody = document.getElementById('kg-edge-body');
+  var edgeEmpty = document.getElementById('kg-edge-empty');
+  var edgeSummary = document.getElementById('kg-edge-summary');
   var drawer = document.getElementById('kg-drawer');
   var drawerBody = document.getElementById('kg-drawer-body');
   var drawerClose = document.getElementById('kg-drawer-close');
@@ -47,6 +55,7 @@
   var labelTimer = null;
   var fitTimers = [];
   var roamTouched = false;
+  var scopeRequest = 0;
 
   var overlay = null;
   var overlayCtx = null;
@@ -186,6 +195,7 @@
     }
     renderCrumbs();
     updateHint();
+    syncTables(view);
     scheduleFit();
     if (loading) loading.style.display = 'none';
   }
@@ -741,6 +751,93 @@
       if (!b[left[i]]) return false;
     }
     return true;
+  }
+
+  // ---- 概念/关系表跟随当前下钻层级 ----
+
+  function syncTables(view) {
+    if (!nodeTable || !nodeBody || !edgeTable || !edgeBody) return;
+    if (view.kind !== 'nodes') {
+      scopeRequest += 1;
+      nodeTable.hidden = true;
+      edgeTable.hidden = true;
+      nodeEmpty.hidden = false;
+      edgeEmpty.hidden = false;
+      nodeEmpty.textContent = '当前是星团概览：点击星团下钻到概念层后，这里只显示该层的概念。';
+      edgeEmpty.textContent = '当前是星团概览：下钻到概念层后，这里只显示该层概念之间的关系。';
+      nodeSummary.textContent = '（等待选择星团）';
+      edgeSummary.textContent = '（等待选择星团）';
+      return;
+    }
+    var ids = view.nodes.map(function (node) { return String(node.id); });
+    var token = ++scopeRequest;
+    fetch(shell.dataset.scopeUrl + '?ids=' + encodeURIComponent(ids.join(',')),
+      { headers: { Accept: 'application/json' } })
+      .then(function (response) {
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        return response.json();
+      })
+      .then(function (payload) {
+        if (token !== scopeRequest) return;
+        renderNodeRows(payload);
+        renderEdgeRows(payload);
+      })
+      .catch(function () {
+        if (token !== scopeRequest) return;
+        nodeTable.hidden = true;
+        nodeEmpty.hidden = false;
+        nodeEmpty.textContent = '当前层级的概念加载失败，请稍后重试。';
+      });
+  }
+
+  function renderNodeRows(payload) {
+    var total = payload.nodes.length;
+    nodeBody.innerHTML = payload.nodes.map(function (node) {
+      return '<tr>'
+        + '<td class="kg-name"><a href="' + node.url + '">' + escapeHtml(node.name) + '</a></td>'
+        + '<td>' + escapeHtml(node.category || '—') + '</td>'
+        + '<td>' + escapeHtml(node.definition || '—') + '</td>'
+        + '<td class="kg-note">' + escapeHtml(node.aliases || '—') + '</td>'
+        + '<td>' + node.confidence + '%</td>'
+        + '</tr>';
+    }).join('');
+    nodeTable.hidden = total === 0;
+    nodeEmpty.hidden = total > 0;
+    if (!total) nodeEmpty.textContent = '当前分类下还没有概念。';
+    nodeSummary.textContent = '（本层 ' + total + ' 个）';
+  }
+
+  function renderEdgeRows(payload) {
+    var csrf = payload.csrf || '';
+    edgeBody.innerHTML = payload.edges.map(function (edge) {
+      var actions = '';
+      if (payload.can_edit) {
+        actions = '<td class="kg-edge-actions">';
+        if (edge.reverse_url) {
+          actions += '<form method="post" action="' + edge.reverse_url + '"'
+            + ' onsubmit="return confirm(\'把这条前置关系反向？系统会先检查是否会成环。\')">'
+            + '<input type="hidden" name="_csrf" value="' + escapeHtml(csrf) + '">'
+            + '<button class="ghost small">反向</button></form>';
+        }
+        actions += '<form method="post" action="' + edge.delete_url + '"'
+          + ' onsubmit="return confirm(\'删除这条关系？\')">'
+          + '<input type="hidden" name="_csrf" value="' + escapeHtml(csrf) + '">'
+          + '<button class="ghost small">删除</button></form></td>';
+      }
+      return '<tr>'
+        + '<td><span class="kg-name">' + escapeHtml(edge.src_name) + '</span>'
+        + '<span class="kg-arrow">—' + escapeHtml(edge.relation_label) + '→</span>'
+        + '<span class="kg-name">' + escapeHtml(edge.dst_name) + '</span></td>'
+        + '<td class="kg-note">' + escapeHtml(edge.evidence || '—') + '</td>'
+        + '<td>' + edge.confidence + '%</td>' + actions
+        + '</tr>';
+    }).join('');
+    edgeTable.hidden = payload.edges.length === 0;
+    edgeEmpty.hidden = payload.edges.length > 0;
+    if (!payload.edges.length) edgeEmpty.textContent = '当前层级的概念之间还没有关系。';
+    edgeSummary.textContent = '（本层 ' + payload.edge_total + ' 条'
+      + (payload.edge_total > payload.edges.length ? '，最多展示 ' + payload.edges.length : '')
+      + '）';
   }
 
   // ---- 抽屉 ----
