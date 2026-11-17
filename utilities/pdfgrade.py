@@ -44,9 +44,14 @@ DEFAULT_GRADE_PROMPT = (
 GRADE_OUTPUT_CONTRACT = (
     "输出格式（必须严格遵守）：只输出 JSON，不要输出解释或代码块标记：\n"
     '{"questions":[{"no":"题号","ocr":"学生实际作答内容","standard_answer":"标准答案要点",'
-    '"verdict":"对|半对|错|无法判定","score":0,"max_score":0,"comment":"给分/扣分说明"}],'
+    '"verdict":"对|半对|错|无法判定","score":0,"max_score":0,"comment":"给分/扣分说明",'
+    '"student_page":1,"answer_page":1,"student_box":[0,0,1,1],"answer_box":[0,0,1,1]}],'
     '"weak_points":[{"no":"题号","type":"失分类型","detail":"具体说明"}],'
-    '"evaluation":"整份作业总评（不超过 100 字）","total_score":"如 12/20，没有分值就留空"}'
+    '"evaluation":"整份作业总评（不超过 100 字）","total_score":"如 12/20，没有分值就留空"}\n'
+    "页码与裁剪框说明：\n"
+    "1. student_page：该题学生答案出现在「学生作业」图片中的第几页（1 起；多份文件按发送顺序连续编号），看不清填 1。\n"
+    "2. answer_page：该题标准答案出现在「标准答案」图片中的第几页（1 起，仅针对发送的页码），看不清填 1。\n"
+    "3. student_box / answer_box：裁剪框 [x, y, w, h]，均为 0~1 的比例（左上角为原点），大致圈住该题的学生答案/标准答案区域；不确定就用 [0,0,1,1] 表示整页。"
 )
 
 PDF_GRADE_PROMPT = DEFAULT_GRADE_PROMPT + "\n" + GRADE_OUTPUT_CONTRACT
@@ -142,8 +147,12 @@ def pdf_page_count(path):
         return 0
 
 
-def render_page_jpeg(path, page_no, scale=0.9, quality=65):
-    """渲染单页为 JPEG 字节，供页码选择界面做缩略图预览；页码越界返回 None。"""
+def render_page_jpeg(path, page_no, scale=0.9, quality=65, box=None):
+    """渲染单页为 JPEG 字节，供页码选择界面做缩略图预览；页码越界返回 None。
+
+    box 为 [x, y, w, h]（0~1 比例，左上角原点），提供时只裁剪该区域输出，
+    用于逐题复核时聚焦学生答案/标准答案。非法或越界的 box 自动退化为整页。
+    """
     if not path or not os.path.exists(path) or page_no < 1:
         log.warning("render_page_jpeg: 文件不存在或页码非法 path=%s page=%s", path, page_no)
         return None
@@ -157,6 +166,18 @@ def render_page_jpeg(path, page_no, scale=0.9, quality=65):
             return None
         bitmap = doc[page_no - 1].render(scale=scale)
         img = bitmap.to_pil().convert("RGB")
+        if box and isinstance(box, (list, tuple)) and len(box) == 4:
+            try:
+                x, y, w, h = [float(v) for v in box]
+                W, H = img.size
+                left = max(0, int(round(x * W)))
+                top = max(0, int(round(y * H)))
+                right = min(W, int(round((x + w) * W)))
+                bottom = min(H, int(round((y + h) * H)))
+                if right > left and bottom > top:
+                    img = img.crop((left, top, right, bottom))
+            except (TypeError, ValueError):
+                pass
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=quality)
         bitmap.close()
@@ -220,6 +241,29 @@ def _salvage_questions(text):
     return out
 
 
+def _box(value):
+    """把模型给的 [x,y,w,h] 归一化为 0~1 的四元组；非法则返回空串（表示整页）。"""
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return ""
+    try:
+        nums = [float(v) for v in value]
+    except (TypeError, ValueError):
+        return ""
+    if any(n < 0 or n > 1 for n in nums):
+        return ""
+    x, y, w, h = nums
+    if w <= 0 or h <= 0:
+        return ""
+    # 限制在页内
+    x = max(0.0, min(x, 1.0))
+    y = max(0.0, min(y, 1.0))
+    w = max(0.0, min(w, 1.0 - x))
+    h = max(0.0, min(h, 1.0 - y))
+    if w == 0 or h == 0:
+        return ""
+    return json.dumps([round(x, 4), round(y, 4), round(w, 4), round(h, 4)])
+
+
 def _normalize(raw):
     """把模型输出整理成落库需要的字段；坏数据丢弃而不是报错。"""
     questions = []
@@ -230,6 +274,8 @@ def _normalize(raw):
         verdict = str(q.get("verdict", "")).strip()
         if verdict not in VERDICTS:
             verdict = "无法判定"
+        sp = int(_as_num(q.get("student_page"), 1))
+        ap = int(_as_num(q.get("answer_page"), 1))
         questions.append({
             "no": no,
             "ocr": str(q.get("ocr", "")).strip(),
@@ -238,6 +284,10 @@ def _normalize(raw):
             "score": _as_num(q.get("score"), 0.0),
             "max_score": _as_num(q.get("max_score"), 0.0),
             "comment": str(q.get("comment", "")).strip(),
+            "student_page": sp if sp >= 1 else 1,
+            "answer_page": ap if ap >= 1 else 1,
+            "student_box": _box(q.get("student_box")),
+            "answer_box": _box(q.get("answer_box")),
         })
     return questions
 

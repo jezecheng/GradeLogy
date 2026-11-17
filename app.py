@@ -2358,16 +2358,31 @@ def exam_delete(eid):
 
 # ---------- 批改：学生作业与标准答案一起交给 AI，老师逐题核对 ----------
 # 队列调度（去重、线程池、定时扫描）在 grading_service.py，这里只保留批阅业务
-def _save_grading_result(db, sid, gen):
-    """把模型返回的逐题结果写入数据库；演示模式和后台任务共用。"""
+def _save_grading_result(db, sid, gen, answer_pages=None):
+    """把模型返回的逐题结果写入数据库；演示模式和后台任务共用。
+
+    answer_pages 为发送给模型的标准答案页码列表（1 起）；为空表示整份发送。
+    用于把模型返回的 answer_page（在发送页中的序号）映射回 PDF 实际页码。
+    """
     db.execute("DELETE FROM questions WHERE submission_id=?", (sid,))
+    ap_list = list(answer_pages or [])
     for i, q in enumerate(gen["questions"], 1):
         comment = (q.get("comment") or "").strip()
+        sp = int(q.get("student_page") or 1)
+        ap_idx = int(q.get("answer_page") or 1)
+        # 模型给的 answer_page 是「发送页中的序号」，映射回 PDF 实际页码
+        if ap_list:
+            apage = ap_list[ap_idx - 1] if 1 <= ap_idx <= len(ap_list) else 0
+        else:
+            apage = ap_idx if ap_idx >= 1 else 0
         db.execute(
             "INSERT INTO questions(submission_id,no,page_no,image_path,ocr_text,"
-            "standard_answer,note,verdict,ai_comment) VALUES(?,?,?,?,?,?,?,?,?)",
-            (sid, q.get("no") or str(i), 1, "", q.get("ocr", ""),
-             q.get("standard_answer", ""), comment, q.get("verdict", ""), comment))
+            "standard_answer,note,verdict,ai_comment,answer_page,student_box,answer_box) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, q.get("no") or str(i), sp if sp >= 1 else 1, "",
+             q.get("ocr", ""), q.get("standard_answer", ""), comment,
+             q.get("verdict", ""), comment, apage,
+             q.get("student_box", ""), q.get("answer_box", "")))
     summary = gen.get("summary") or {}
     db.execute("UPDATE submissions SET status='待批改', ai_summary=?, "
                "updated_at=CURRENT_TIMESTAMP WHERE id=?",
@@ -2409,7 +2424,7 @@ def _run_grading_job(teacher_id, sid, operation):
                 _finish_ai_operation(operation, "failed", gen["error"])
                 grading_log.warning("后台批阅失败 submission=%s 原因=%s", sid, gen["error"])
                 return
-            _save_grading_result(db, sid, gen)
+            _save_grading_result(db, sid, gen, answer_pages=_page_list(hw["answer_pages"]))
             _finish_ai_operation(operation, "success")
             try:
                 generate_report(db, sid, teacher_id)
@@ -2501,7 +2516,7 @@ def submission_grade(sid):
             log.exception("演示批阅失败 submission=%s", sid)
             flash(str(e))
             return _back_to_page()
-        _save_grading_result(db, sid, gen)
+        _save_grading_result(db, sid, gen, answer_pages=_page_list(hw["answer_pages"]))
         try:
             generate_report(db, sid, g.user["id"])
         except Exception:
@@ -2681,6 +2696,31 @@ def start_auto_grade():
                          lock_dir=cfg.DATA_DIR)
 
 
+def _resolve_student_page(files, global_page):
+    """把学生作业的全局页序号（发给 AI 的连续编号）映射回 (文件相对路径, 文件内页码)。
+
+    files 为 file_list(sub.file_path) 的结果；global_page 为 1 起序号。
+    找不到时返回 (None, 0)。
+    """
+    if global_page < 1:
+        return None, 0
+    acc = 0
+    for fp in files:
+        ext = os.path.splitext(fp)[1].lower()
+        if ext == ".pdf":
+            full = os.path.join(UPLOAD_DIR, fp)
+            try:
+                count = pdf_page_count(full)
+            except Exception:
+                count = 1
+        else:
+            count = 1
+        if acc + count >= global_page:
+            return fp, global_page - acc
+        acc += count
+    return None, 0
+
+
 @_routes.route("/submission/<oid:sid>/review")
 @role_required("teacher")
 def submission_review(sid):
@@ -2694,7 +2734,30 @@ def submission_review(sid):
     course = own_course(hw["course_id"])
     questions = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
                            (sid,)).fetchall()
+    # 为每题预生成学生答案/标准答案的图片 URL（含裁剪框），供复核页内嵌展示
+    sfiles = file_list(sub["file_path"])
+    answer_pdf = hw["answer_pdf"] or ""
+    q_media = []
+    for q in questions:
+        sp_file, sp_page = _resolve_student_page(sfiles, int(q["page_no"] or 1))
+        sbox = q["student_box"] or ""
+        abox = q["answer_box"] or ""
+        def _url(fp, page, box):
+            if not fp or page < 1:
+                return ""
+            u = url_for("uploaded_file", filename=fp, page=page)
+            if box:
+                # box 已存为 JSON 字符串 "[x,y,w,h]"
+                u += "&box=" + box.strip("[]").replace(" ", "")
+            return u
+        q_media.append({
+            "student_url": _url(sp_file, sp_page, sbox),
+            "student_full_url": _url(sp_file, sp_page, "") if sp_file else "",
+            "answer_url": _url(answer_pdf, int(q["answer_page"] or 0), abox),
+            "answer_full_url": _url(answer_pdf, int(q["answer_page"] or 0), "") if answer_pdf else "",
+        })
     return render_template("review.html", sub=sub, hw=hw, course=course, questions=questions,
+                           q_media=q_media,
                            tag_by_key=tag_utils.lecture_tags_by_key(db, hw["id"]),
                            grade_job=latest_operation(db, sid),
                            ai_operations=_ai_operation_history(submission_id=sid, limit=5))
@@ -5095,7 +5158,17 @@ def uploaded_file(filename):
         return jsonify(pages=pdf_page_count(full))
     page = request.args.get("page", type=int)
     if page:
-        data = render_page_jpeg(full, page, scale=1.8, quality=80)
+        # box=x,y,w,h（0~1 比例），用于逐题复核时裁剪学生答案/标准答案区域
+        box = None
+        box_str = request.args.get("box", "")
+        if box_str:
+            try:
+                parts = [float(v) for v in box_str.split(",")]
+                if len(parts) == 4:
+                    box = parts
+            except ValueError:
+                box = None
+        data = render_page_jpeg(full, page, scale=1.8, quality=80, box=box)
         if not data:
             abort(404)
         return send_file(io.BytesIO(data), mimetype="image/jpeg", max_age=3600)

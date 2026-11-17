@@ -117,9 +117,33 @@
         <div class="review-col">
           <div class="col-title">标准答案（可修正）</div>
           <textarea name="standard_{{ q.id }}" rows="7">{{ q.standard_answer }}</textarea>
-          <p class="muted small">如需核对原卷，点上方「查看原始扫描件」。</p>
+          <p class="muted small">如需核对原卷，可展开下方「题目原图」或点上方「查看原始扫描件」。</p>
         </div>
       </div>
+      {% set media = q_media[loop.index0] if q_media|length > loop.index0 else {} %}
+      {% if media.student_url or media.answer_url %}
+      <details class="q-media">
+        <summary>题目原图 <span class="muted small">（学生答案 / 标准答案，点击展开）</span></summary>
+        <div class="q-media-grid">
+          {% if media.student_url %}
+          <div class="q-media-item">
+            <div class="col-title small">学生答案</div>
+            <a href="{{ media.student_full_url }}" target="_blank" rel="noopener" class="q-img-link">
+              <img src="{{ media.student_url }}" alt="学生答案 {{ q.no }}" loading="lazy">
+            </a>
+          </div>
+          {% endif %}
+          {% if media.answer_url %}
+          <div class="q-media-item">
+            <div class="col-title small">标准答案</div>
+            <a href="{{ media.answer_full_url }}" target="_blank" rel="noopener" class="q-img-link">
+              <img src="{{ media.answer_url }}" alt="标准答案 {{ q.no }}" loading="lazy">
+            </a>
+          </div>
+          {% endif %}
+        </div>
+      </details>
+      {% endif %}
       <div class="review-actions">
         <button type="button" class="small reviewed-toggle{% if q.reviewed %} reviewed-on{% endif %}"
                 data-qid="{{ q.id }}" data-reviewed="{{ 1 if q.reviewed else 0 }}">

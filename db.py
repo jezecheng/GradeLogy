@@ -381,6 +381,12 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=()):
                      ("reviewed", "INTEGER DEFAULT 0")):
         if col not in qcols:
             con.execute(f"ALTER TABLE questions ADD COLUMN {col} {ddl}")
+    # 轻量迁移：逐题图片锚点（学生答案页/标准答案页 + 可选裁剪区域）
+    for col, ddl in (("answer_page", "INTEGER DEFAULT 0"),
+                     ("student_box", "TEXT DEFAULT ''"),
+                     ("answer_box", "TEXT DEFAULT ''")):
+        if col not in qcols:
+            con.execute(f"ALTER TABLE questions ADD COLUMN {col} {ddl}")
     scols = {r[1] for r in con.execute("PRAGMA table_info(submissions)")}
     if "ai_summary" not in scols:
         con.execute("ALTER TABLE submissions ADD COLUMN ai_summary TEXT DEFAULT ''")
