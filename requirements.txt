@@ -5,3 +5,4 @@ pypdfium2>=4.30
 pillow>=10.0
 pypinyin>=0.53
 requests>=2.31
+latex2mathml>=3.77

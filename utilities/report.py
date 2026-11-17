@@ -6,8 +6,30 @@ Markdown（标题/表格/列表/粗体）渲染成 HTML，避免引入额外依�
 """
 import re
 
+try:
+    from latex2mathml.converter import convert as _latex_to_mathml
+    _HAS_LATEX2MATHML = True
+except ImportError:  # 未安装时回退到原始 $...$ 文本，由前端 KaTeX 渲染
+    _latex_to_mathml = None
+    _HAS_LATEX2MATHML = False
+
 # 判定图标统一用彩色 emoji：⚠ 必须带变体选择符 U+FE0F，否则浏览器会渲染成灰白线框三角
 VERDICT_ICON = {"对": "✅", "半对": "⚠️", "错": "❌", "无法判定": "❔"}
+
+
+def _math_to_mathml(raw):
+    """把 ``$...$`` 或 ``$$...$$`` 片段转成 MathML；失败时返回转义后的原文。
+
+    服务端渲染，浏览器原生支持 MathML，不依赖任何 JS/CDN。
+    """
+    if not _HAS_LATEX2MATHML:
+        return None
+    is_block = raw.startswith("$$")
+    inner = raw[2:-2] if is_block else raw[1:-1]
+    try:
+        return _latex_to_mathml(inner, display="block" if is_block else "inline")
+    except Exception:
+        return None
 
 
 def _md_cell(value):
@@ -137,10 +159,12 @@ def _overall_text(detail, fallback=""):
 
 
 def render_markdown(md):
-    """把报告用的极简 Markdown（标题/表格/列表/粗体）渲染成 HTML，避免引入额外依赖。
+    """把报告用的极简 Markdown（标题/表格/列表/粗体）渲染成 HTML。
 
-    支持轻量 LaTeX：行内 ``$...$`` 与块级 ``$$...$$`` 会原样保留，交给前端 KaTeX
-    渲染；在 Markdown 转义阶段用占位符保护，避免 ``&`` ``<`` ``>`` 被破坏。
+    LaTeX 处理：行内 ``$...$`` 与块级 ``$$...$$`` 在转义阶段用占位符保护，
+    最终由服务端 ``latex2mathml`` 转成 MathML 直接嵌入 HTML，浏览器原生渲染，
+    不依赖任何前端 JS 或 CDN。若未安装 latex2mathml，则回退为原始 ``$...$``
+    文本，交由前端 KaTeX 渲染。
     """
     # 1) 先把所有数学片段抽出来，用占位符替换，避免被转义/被加粗等正则误伤
     math_store = {}
@@ -166,11 +190,14 @@ def render_markdown(md):
         return s
 
     def _restore(s):
-        """把占位符换回原始数学片段（不转义）。"""
+        """把占位符换成渲染后的 MathML；失败则回退为转义后的原始数学文本。"""
         for key, raw in math_store.items():
-            if key in s:
-                s = s.replace(esc(key), raw)
-                s = s.replace(key, raw)
+            if key not in s:
+                continue
+            mathml = _math_to_mathml(raw)
+            replacement = mathml if mathml is not None else esc(raw)
+            s = s.replace(esc(key), replacement)
+            s = s.replace(key, replacement)
         return s
 
     lines = text.splitlines()

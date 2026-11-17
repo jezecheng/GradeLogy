@@ -8,9 +8,7 @@
   <title>{% block title %}教学管理平台{% endblock %}</title>
   <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" sizes="any">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css"
-        integrity="sha384-nB0miv6/jRmo5UMMR1wu3Gz6NLsoTkbqJghGIsx//Rlm+ZU03BU6SQNC66uf4l5+"
-        crossorigin="anonymous">
+  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/katex/katex.min.css') }}">
 </head>
 <body>
 {% if g.user %}
@@ -260,13 +258,9 @@
 <div id="ai-toast-container" class="ai-toast-container"></div>
 {% include "_assistant.html" %}
 {% block scripts %}{% endblock %}
-<!-- KaTeX 轻量数学/化学式渲染：行内 $...$、块级 $$...$$ -->
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"
-        integrity="sha384-7zkQWkzuo3B5mTepMUcHkMB5jZaolc2xDwL6VFqjFALcbeS9Ggm/Yr2r3Dy4lfFg"
-        crossorigin="anonymous"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
-        integrity="sha384-43gviWU0YVjaDtb/GhzOouOXtZMP/7XUzwPTstBeZFe/+rCMvRwr4yROQP43s0Xk"
-        crossorigin="anonymous"></script>
+<!-- KaTeX 轻量数学/化学式渲染：行内 $...$、块级 $$...$$（本地托管，不依赖 CDN） -->
+<script defer src="{{ url_for('static', filename='vendor/katex/katex.min.js') }}"></script>
+<script defer src="{{ url_for('static', filename='vendor/katex/contrib/auto-render.min.js') }}"></script>
 <script>
 // KaTeX 渲染入口：等 auto-render 加载完成后再渲染目标元素。
 // 不依赖 defer 脚本的 onload（iOS Safari 下不可靠），改用轮询等待 renderMathInElement。
