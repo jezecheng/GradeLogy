@@ -1634,6 +1634,9 @@ def lecture_detail(hid):
         "JOIN submissions s ON s.id=o.submission_id WHERE s.lecture_id=?", (hid,))}
     tag_by_key = tag_utils.lecture_tags_by_key(db, hid)
     tag_stats = tag_utils.lecture_stats(db, hid)
+    lecture_weak_tags = [s["tag"] for s in tag_stats
+                         if s.get("n_wrong", 0) > 0 or s.get("n_partial", 0) > 0]
+    lecture_kg_chains = _kg_weakness_chains(db, course["id"], lecture_weak_tags)
     return render_template("lecture.html", hw=hw, course=course, subs=subs, students=students,
                            qstats=qstats, n_subs=n_subs, n_graded=n_graded, n_reviewed=n_reviewed,
                            answer_total=answer_total, answer_picked=answer_picked,
@@ -1641,6 +1644,7 @@ def lecture_detail(hid):
                            grading_active=any(j["status"] in ("queued", "running")
                                               for j in grade_jobs.values()),
                            acc_by=acc_by, tag_by_key=tag_by_key, tag_stats=tag_stats,
+                           lecture_kg_chains=lecture_kg_chains,
                            tag_analysis=tag_utils.latest_analysis(
                                db, "horizontal", lecture_id=hid),
                            ai_operations=_ai_operation_history(lecture_id=hid, limit=8))
@@ -2195,10 +2199,13 @@ def student_detail(cid, sid):
         FROM exams x LEFT JOIN exam_scores s ON s.exam_id=x.id AND s.student_id=?
         WHERE x.course_id=? ORDER BY x.id DESC""", (sid, cid)).fetchall()
     acc_by = _accuracy_by_submission(db, [h["last_sub_id"] for h in lectures])
+    weak_stats = tag_utils.student_stats(db, cid, sid)
+    vertical_kg_chains = _kg_weakness_chains(db, cid, [r["tag"] for r in weak_stats])
     return render_template(
         "student_detail.html", course=course, student=student,
         lectures=lectures, exams=exams, acc_by=acc_by,
-        weak_stats=tag_utils.student_stats(db, cid, sid),
+        weak_stats=weak_stats,
+        vertical_kg_chains=vertical_kg_chains,
         tag_analysis=tag_utils.latest_analysis(db, "vertical", student_id=sid))
 
 
@@ -2790,6 +2797,11 @@ def submission_review_save(sid):
                (request.form.get("overall", "").strip(),
                 f"{g.user['display_name']} 逐题批改", sid))
     db.commit()
+    # 更新学生个人薄弱点图谱（失败不影响批改保存）
+    try:
+        _update_student_weak_points(db, sub)
+    except Exception:
+        log.exception("更新学生薄弱点失败 submission=%s student=%s", sid, sub["student_id"])
     if (request.form.get("then") or "") == "report":
         pending = db.execute("SELECT COUNT(*) c FROM questions WHERE submission_id=? AND reviewed=0",
                              (sid,)).fetchone()["c"]
@@ -4309,6 +4321,105 @@ def _kg_match_node(nodes, name_to_node, tag):
     return None, "no_match"
 
 
+def _update_student_weak_points(db, submission):
+    """人工复核保存后，基于该次提交的题目判定与知识点标签，更新学生薄弱点记录。
+
+    - 按 question_tags.tag 聚合 questions.verdict（对/半对/错/总数）
+    - 匹配课程 KG 节点（复用 _kg_match_node），记录 node_name/definition
+    - UPSERT student_weak_points：保留学生已设 status 与 student_note；
+      已掌握(mastered)节点若本次又出现错/半对，自动回退为 weak。
+    - 计数字段覆盖为该次提交的统计；last_seen_at/source_submission_id 同步刷新。
+    """
+    if not submission:
+        return
+    student_id = submission["student_id"]
+    lecture_id = submission["lecture_id"]
+    sub_id = submission["id"]
+    hw = db.execute("SELECT course_id FROM lectures WHERE id=?", (lecture_id,)).fetchone()
+    if not hw:
+        return
+    course_id = hw["course_id"]
+
+    questions = db.execute(
+        "SELECT no, verdict FROM questions WHERE submission_id=? ORDER BY id",
+        (sub_id,)).fetchall()
+    if not questions:
+        return
+    no_to_verdict = {}
+    for q in questions:
+        v = (q["verdict"] or "").strip()
+        if v:
+            no_to_verdict[q["no"]] = v
+
+    tags_rows = db.execute(
+        "SELECT question_no, tag FROM question_tags WHERE lecture_id=? ORDER BY id",
+        (lecture_id,)).fetchall()
+    if not tags_rows:
+        return
+    tag_to_qnos = {}
+    for r in tags_rows:
+        tag_to_qnos.setdefault(r["tag"], []).append(r["question_no"])
+
+    gids = [r["graph_id"] for r in db.execute(
+        "SELECT graph_id FROM course_knowledge_graphs WHERE course_id=?",
+        (course_id,))]
+    nodes = []
+    name_to_node = {}
+    if gids:
+        ph = ",".join("?" * len(gids))
+        nodes = db.execute(
+            f"SELECT * FROM kg_nodes WHERE graph_id IN ({ph})", gids).fetchall()
+        name_to_node = {n["name"]: n for n in nodes}
+
+    now = db.execute("SELECT CURRENT_TIMESTAMP").fetchone()[0]
+    for tag, qnos in tag_to_qnos.items():
+        wrong = partial = right = total = 0
+        for qno in qnos:
+            v = no_to_verdict.get(qno, "")
+            if not v:
+                continue
+            total += 1
+            if v == "错":
+                wrong += 1
+            elif v == "半对":
+                partial += 1
+            elif v == "对":
+                right += 1
+        if total == 0:
+            continue
+        node = None
+        if nodes:
+            node, _ = _kg_match_node(nodes, name_to_node, tag)
+        node_name = node["name"] if node else ""
+        definition = (node["definition"] or "") if node else ""
+        graph_id = node["graph_id"] if node else 0
+        node_id = node["id"] if node else 0
+
+        existing = db.execute(
+            "SELECT * FROM student_weak_points WHERE student_id=? AND course_id=? AND tag=?",
+            (student_id, course_id, tag)).fetchone()
+        if existing:
+            new_status = existing["status"]
+            if new_status == "mastered" and (wrong > 0 or partial > 0):
+                new_status = "weak"
+            db.execute(
+                "UPDATE student_weak_points SET graph_id=?, node_id=?, node_name=?, "
+                "definition=?, source_submission_id=?, status=?, wrong_count=?, "
+                "partial_count=?, right_count=?, total_count=?, last_seen_at=?, "
+                "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (graph_id, node_id, node_name, definition, sub_id, new_status,
+                 wrong, partial, right, total, now, existing["id"]))
+        else:
+            db.execute(
+                "INSERT INTO student_weak_points(student_id,course_id,graph_id,node_id,"
+                "tag,node_name,definition,source_submission_id,status,wrong_count,"
+                "partial_count,right_count,total_count,last_seen_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (student_id, course_id, graph_id, node_id, tag, node_name, definition,
+                 sub_id, "weak", wrong, partial, right, total, now))
+    db.commit()
+
+
 def _kg_weakness_chains(db, course_id, weak_tag_names):
     """基于课程挂载的 KG，为一组薄弱知识点标签生成「前置 -> 薄弱」知识链文本。
 
@@ -4665,6 +4776,55 @@ def student_report(sid):
                            body=render_markdown(sub["report_md"]),
                            student_name=g.user["display_name"], is_teacher=False,
                            kg_diagnosis=kg_diag)
+
+
+@_routes.route("/student/weak-points")
+@role_required("student")
+def student_weak_points():
+    """学生查看自己的薄弱点知识图谱子图，可标记已复习/已掌握。"""
+    db = get_db()
+    rows = db.execute(
+        "SELECT w.*, c.name AS course_name FROM student_weak_points w "
+        "JOIN courses c ON c.id=w.course_id "
+        "WHERE w.student_id=? ORDER BY c.name, w.status, w.tag",
+        (g.user["id"],)).fetchall()
+    by_course = {}
+    for r in rows:
+        item = dict(r)
+        # 关联 KG 前置知识链
+        prereqs = []
+        if r["graph_id"] and r["node_id"]:
+            nb = kg_utils.concept_neighbors(db, r["graph_id"], r["node_id"])
+            if nb:
+                prereqs = nb.get("prerequisites", [])
+        item["prerequisites"] = prereqs
+        by_course.setdefault(r["course_id"], {"name": r["course_name"], "weak_points": []})
+        by_course[r["course_id"]]["weak_points"].append(item)
+    return render_template("student_weak_points.html", by_course=by_course)
+
+
+@_routes.route("/student/weak-point/<int:wid>/status", methods=["POST"])
+@role_required("student")
+def student_weak_point_status(wid):
+    """学生标记薄弱点状态（weak/reviewed/mastered）与备注。"""
+    status = (request.form.get("status") or "").strip()
+    if status not in ("weak", "reviewed", "mastered"):
+        flash("状态不合法")
+        return redirect(url_for("student_weak_points"))
+    note = (request.form.get("note") or "").strip()
+    db = get_db()
+    rec = db.execute(
+        "SELECT id FROM student_weak_points WHERE id=? AND student_id=?",
+        (wid, g.user["id"])).fetchone()
+    if not rec:
+        abort(404)
+    db.execute(
+        "UPDATE student_weak_points SET status=?, student_note=?, "
+        "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        (status, note, wid))
+    db.commit()
+    flash("薄弱点状态已更新")
+    return redirect(url_for("student_weak_points"))
 
 
 def _consistency_issues():

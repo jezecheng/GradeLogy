@@ -335,6 +335,12 @@
   {% if hw.summary_md %}
   <div class="lecture-summary-body">{{ hw.summary_md|markdown_safe }}</div>
   <p class="muted small" style="margin-top:8px">生成于 {{ hw.summary_at|legacytime }}（覆盖生成会弹确认）</p>
+  {% if lecture_kg_chains %}
+  <details class="kg-sourced" style="margin-top:10px">
+    <summary>图谱依据 <span class="muted small">（本讲薄弱知识点的前置知识链）</span></summary>
+    <pre style="white-space:pre-wrap;margin:8px 0 0;font-size:13px">{{ lecture_kg_chains }}</pre>
+  </details>
+  {% endif %}
   {% else %}
   <p class="muted small">批阅完成后点击「生成讲次汇总」，AI 聚合全班逐题判定与评语，生成每题要点与整体总结。</p>
   {% endif %}
@@ -368,6 +374,12 @@
   <div style="margin-top:12px; padding-top:12px; border-top:1px dashed #eef0f3">
     <p class="muted small">生成于 {{ tag_analysis.created_at|localtime }}（覆盖生成会弹确认）</p>
     <div class="lecture-summary-body">{{ tag_analysis.content_md|markdown_safe }}</div>
+    {% if lecture_kg_chains %}
+    <details class="kg-sourced" style="margin-top:10px">
+      <summary>图谱依据 <span class="muted small">（薄弱知识点的前置知识链）</span></summary>
+      <pre style="white-space:pre-wrap;margin:8px 0 0;font-size:13px">{{ lecture_kg_chains }}</pre>
+    </details>
+    {% endif %}
   </div>
   {% endif %}
 </div>

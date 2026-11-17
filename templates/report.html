@@ -36,6 +36,12 @@
   {% if md %}
   <div class="report-body">{{ body|safe }}</div>
 
+  {% if not is_teacher %}
+  <p class="muted small" style="margin-top:12px">
+    🔗 报告中的知识图谱诊断知识点会自动汇总到你的 <a href="{{ url_for('student_weak_points') }}">薄弱点图谱</a>，可在那里标记已复习/已掌握。
+  </p>
+  {% endif %}
+
   {% if is_teacher %}
   <details class="report-editor">
     <summary>编辑报告内容（Markdown）</summary>

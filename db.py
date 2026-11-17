@@ -217,6 +217,30 @@ CREATE TABLE IF NOT EXISTS tag_analyses(
   created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS idx_tag_analyses_lecture ON tag_analyses(kind, lecture_id, id);
 CREATE INDEX IF NOT EXISTS idx_tag_analyses_student ON tag_analyses(kind, student_id, id);
+-- 学生个人薄弱点：由每次人工复核后聚合 questions.verdict + question_tags 派生
+-- 关联课程 KG 节点；status 由学生自主维护（weak/reviewed/mastered），复核仅刷计数
+CREATE TABLE IF NOT EXISTS student_weak_points(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  student_id INTEGER NOT NULL,
+  course_id INTEGER NOT NULL,
+  graph_id INTEGER DEFAULT 0,
+  node_id INTEGER DEFAULT 0,
+  tag TEXT NOT NULL,
+  node_name TEXT DEFAULT '',
+  definition TEXT DEFAULT '',
+  source_submission_id INTEGER DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'weak',
+  wrong_count INTEGER DEFAULT 0,
+  partial_count INTEGER DEFAULT 0,
+  right_count INTEGER DEFAULT 0,
+  total_count INTEGER DEFAULT 0,
+  last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  student_note TEXT DEFAULT '',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(student_id, course_id, tag));
+CREATE INDEX IF NOT EXISTS idx_swp_student_course ON student_weak_points(student_id, course_id);
+CREATE INDEX IF NOT EXISTS idx_swp_student_status ON student_weak_points(student_id, status);
 -- 学科知识图谱：图本身、原始资料、切块文本、概念节点与前置/包含/相关边
 -- 全部驻留 data.sqlite；资料文件位于 uploads/kg/<graph_id>/，随备份包一起迁移
 CREATE TABLE IF NOT EXISTS knowledge_graphs(

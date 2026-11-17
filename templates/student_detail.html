@@ -59,6 +59,12 @@
   <div style="margin-top:12px; padding-top:12px; border-top:1px dashed #eef0f3">
     <p class="muted small">生成于 {{ tag_analysis.created_at|localtime }}</p>
     <div class="lecture-summary-body">{{ tag_analysis.content_md|markdown_safe }}</div>
+    {% if vertical_kg_chains %}
+    <details class="kg-sourced" style="margin-top:10px">
+      <summary>图谱依据 <span class="muted small">（该生跨讲次薄弱知识点的前置知识链）</span></summary>
+      <pre style="white-space:pre-wrap;margin:8px 0 0;font-size:13px">{{ vertical_kg_chains }}</pre>
+    </details>
+    {% endif %}
   </div>
   {% elif not weak_stats %}
   <p class="muted small">暂无可分析数据：先给讲次生成知识点标签，并完成该生作业的 AI 批阅。</p>

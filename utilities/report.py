@@ -268,4 +268,19 @@ def render_markdown(md):
             continue
         html.append(f"<p>{_restore(inline(line))}</p>")
         i += 1
-    return "\n".join(html)
+    body = "\n".join(html)
+    # 把「知识图谱诊断」整段包裹进 .kg-sourced，与普通报告区块视觉区分
+    body = re.sub(
+        r"(<h2>.*?知识图谱诊断.*?</h2>)",
+        r'<div class="kg-sourced">\1',
+        body, count=1)
+    # 若打开了 kg-sourced，在下一个 h2 前补上闭合标签
+    if '<div class="kg-sourced">' in body:
+        idx = body.find('<div class="kg-sourced">')
+        rest = body[body.find('</h2>', idx) + 5:]
+        nxt = rest.find('<h2>')
+        if nxt >= 0:
+            body = body[:body.find('</h2>', idx) + 5 + nxt] + '</div>' + rest[nxt:]
+        else:
+            body += '</div>'
+    return body

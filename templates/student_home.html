@@ -4,6 +4,8 @@
 <h1>我的学习</h1>
 <p class="muted">{{ g.user.display_name }}（{{ g.user.username }}）</p>
 
+<p><a href="{{ url_for('student_weak_points') }}">🔗 我的薄弱点图谱</a> <span class="muted small">（按知识点管理复习进度）</span></p>
+
 <h2>讲次批阅</h2>
 {% if course_groups %}
 {% for group in course_groups %}
