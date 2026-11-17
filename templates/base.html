@@ -269,21 +269,27 @@
                 + '.knowledge-graph-analysis,.markdown-body,.question-comment';
   var rendered = new WeakSet();
 
+  // 渲染单个元素；可重复调用，供动态内容使用
+  function renderElement(el) {
+    if (!el || typeof window.renderMathInElement !== 'function') return false;
+    try {
+      window.renderMathInElement(el, {
+        delimiters: [
+          {left: '$$', right: '$$', display: true},
+          {left: '$', right: '$', display: false}
+        ],
+        throwOnError: false
+      });
+      return true;
+    } catch (e) { return false; }
+  }
+
   function renderKatex() {
     if (typeof window.renderMathInElement !== 'function') return false;
     var nodes = document.querySelectorAll(SELECTORS);
     nodes.forEach(function (el) {
       if (rendered.has(el)) return;
-      try {
-        window.renderMathInElement(el, {
-          delimiters: [
-            {left: '$$', right: '$$', display: true},
-            {left: '$', right: '$', display: false}
-          ],
-          throwOnError: false
-        });
-        rendered.add(el);
-      } catch (e) { /* 单节点失败不影响其他 */ }
+      if (renderElement(el)) rendered.add(el);
     });
     return true;
   }
@@ -299,6 +305,7 @@
 
   // 暴露给动态内容（如局部刷新）手动触发重新渲染
   window.renderKatex = renderKatex;
+  window.renderKatexIn = renderElement;
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', waitAndRender);

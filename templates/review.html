@@ -101,7 +101,11 @@
       <div class="review-row">
         <div class="review-col">
           <div class="col-title">学生作答（OCR，可修正）</div>
-          <textarea name="ocr_{{ q.id }}" rows="7">{{ q.ocr_text }}</textarea>
+          <div class="latex-edit">
+            <textarea name="ocr_{{ q.id }}" rows="7" class="latex-source">{{ q.ocr_text }}</textarea>
+            <div class="latex-preview" tabindex="0" role="button"
+                 title="点击编辑" aria-label="学生作答，点击编辑"></div>
+          </div>
           <div class="field-row">
             <label>本题判定
               <select name="verdict_{{ q.id }}" class="small">
@@ -116,7 +120,11 @@
         </div>
         <div class="review-col">
           <div class="col-title">标准答案（可修正）</div>
-          <textarea name="standard_{{ q.id }}" rows="7">{{ q.standard_answer }}</textarea>
+          <div class="latex-edit">
+            <textarea name="standard_{{ q.id }}" rows="7" class="latex-source">{{ q.standard_answer }}</textarea>
+            <div class="latex-preview" tabindex="0" role="button"
+                 title="点击编辑" aria-label="标准答案，点击编辑"></div>
+          </div>
           <p class="muted small">如需核对原卷，可展开下方「题目原图」或点上方「查看原始扫描件」。</p>
         </div>
       </div>
@@ -254,6 +262,19 @@
     }
   }
 
+  // 按页面顺序找到当前题之后第一道尚未审核的题
+  function nextUnreviewed(card) {
+    var cards = document.querySelectorAll('details.review-item[data-qid]');
+    var seen = false;
+    for (var i = 0; i < cards.length; i++) {
+      if (cards[i] === card) { seen = true; continue; }
+      if (!seen) continue;
+      var badge = cards[i].querySelector('.reviewed-badge');
+      if (badge && badge.dataset.reviewed !== '1') return cards[i];
+    }
+    return null;
+  }
+
   // 更新某题折叠标题栏的判定与评语摘要
   function syncSummary(card, verdict, note) {
     var verdictEl = card.querySelector('.verdict');
@@ -317,7 +338,7 @@
       var btn = card.querySelector('.reviewed-toggle');
       if (btn) {
         btn.dataset.reviewed = d.reviewed;
-        btn.textContent = d.reviewed ? '已复核 ✓' : '标记已复核';
+        btn.textContent = d.reviewed ? '已审核 ✓' : '标记已审核';
         btn.classList.toggle('reviewed-on', !!d.reviewed);
       }
       showHint(card, '✓ 已自动保存');
@@ -361,14 +382,21 @@
       }
     });
 
-    // 「已复核」按钮：切换复核状态并保存
+    // 「已审核」按钮：切换审核状态并保存；标记已审核后折叠并跳到下一道未审核题
     var toggleBtn = card.querySelector('.reviewed-toggle');
     if (toggleBtn) {
       toggleBtn.addEventListener('click', function () {
         var next = toggleBtn.dataset.reviewed === '1' ? 0 : 1;
         toggleBtn.disabled = true;
-        autoSave(card, next).then(function () {
+        autoSave(card, next).then(function (saved) {
           toggleBtn.disabled = false;
+          if (!saved || next !== 1) return;
+          card.open = false;
+          var target = nextUnreviewed(card);
+          if (target) {
+            target.open = true;
+            target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }
         });
       });
     }
@@ -434,6 +462,58 @@
     });
   }
   syncProgress();
+})();
+
+// 学生作答/标准答案：未聚焦时渲染 LaTeX 预览，点击后切回源码编辑
+(function () {
+  function render(el) {
+    clearInterval(el._katexTimer);
+    if (window.renderKatexIn && window.renderKatexIn(el)) return;
+    var tries = 0;
+    el._katexTimer = setInterval(function () {
+      tries += 1;
+      if ((window.renderKatexIn && window.renderKatexIn(el)) || tries > 100) {
+        clearInterval(el._katexTimer);
+      }
+    }, 50);
+  }
+
+  function showPreview(wrap) {
+    var area = wrap.querySelector('.latex-source');
+    var preview = wrap.querySelector('.latex-preview');
+    if (!area || !preview) return;
+    var text = area.value.trim();
+    preview.textContent = text || '（空，点击编辑）';
+    preview.classList.toggle('is-empty', !text);
+    wrap.classList.add('is-preview');
+    render(preview);
+  }
+
+  document.querySelectorAll('.latex-edit').forEach(function (wrap) {
+    var area = wrap.querySelector('.latex-source');
+    var preview = wrap.querySelector('.latex-preview');
+    if (!area || !preview) return;
+
+    function edit() {
+      wrap.classList.remove('is-preview');
+      area.focus();
+    }
+
+    preview.addEventListener('click', edit);
+    preview.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        edit();
+      }
+    });
+    area.addEventListener('focus', function () {
+      wrap.classList.remove('is-preview');
+    });
+    area.addEventListener('blur', function () {
+      showPreview(wrap);
+    });
+    showPreview(wrap);
+  });
 })();
 
 // 未全部复核时，「生成批阅报告」呈禁用样式；点击只弹提示，不提交

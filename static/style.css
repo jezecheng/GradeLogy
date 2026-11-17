@@ -283,6 +283,21 @@ details summary { cursor: pointer; color: #1456f0; }
 .reviewed-badge[hidden] { display: none; }
 .reviewed-badge.is-pending { background: #fff4e0; color: #b25e09; }
 
+/* 逐题校对：学生作答/标准答案默认渲染 LaTeX 预览，点击后切回源码编辑 */
+.latex-edit { position: relative; }
+.latex-edit .latex-preview { display: none; }
+.latex-edit.is-preview > .latex-source { display: none; }
+.latex-edit.is-preview > .latex-preview {
+  display: block; min-height: 160px; max-height: 380px; overflow: auto;
+  padding: 8px 10px; border: 1px solid #e2e6eb; border-radius: 6px;
+  background: #fbfcfd; font-size: 14px; line-height: 1.55;
+  white-space: pre-wrap; word-break: break-word; cursor: text;
+}
+.latex-edit > .latex-preview:hover { border-color: #c5ccd6; background: #f7f9fc; }
+.latex-edit > .latex-preview:focus-visible { outline: 2px solid #1456f0; outline-offset: 1px; }
+.latex-edit > .latex-preview.is-empty { color: #98a2b3; }
+.latex-edit .katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+
 /* 总评区下方的「生成新的总评」 */
 .overall-actions { display: flex; align-items: center; gap: 10px; margin-top: 6px; flex-wrap: wrap; }
 .overall-actions button[disabled] { opacity: .5; cursor: not-allowed; }
