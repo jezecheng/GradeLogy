@@ -53,6 +53,7 @@ from model_catalog import (EST_TOKENS_INPUT, EST_TOKENS_OUTPUT, MODEL_CATALOG,
                            start_model_sync, tokenhub_suitable_model_ids)
 from model_catalog import sync_models_for_teacher as _sync_models_for_teacher
 from utilities import assistant, course_export, llm, logview, roster, storage
+from utilities import ai_task_queue
 from utilities import knowledge_graph as kg_utils
 from utilities import kg_text
 from utilities import kg_transfer
@@ -1756,9 +1757,10 @@ def _ai_endpoint(teacher_id):
 
 
 def _generate_question_tags(hw, keys):
-    """给作业范围内勾选的题目生成知识点标签，返回 (标签数, 错误提示)。
+    """异步给作业范围内勾选的题目生成知识点标签。
 
-    失败只返回原因，不影响已保存的作业范围；调用方决定如何提示。
+    返回 (标签数或 None, 错误提示)；入队成功时返回 (None, None)，
+    调用方只需提示「已加入后台队列」。
     """
     db = get_db()
     try:
@@ -1774,71 +1776,52 @@ def _generate_question_tags(hw, keys):
     api_url, api_key, model, err = _ai_endpoint(g.user["id"])
     if err:
         return 0, err
-    operation = _start_ai_operation(
-        g.user["id"], "question_tagging", model,
-        course_id=hw["course_id"], lecture_id=hw["id"])
-    try:
-        rows, err = analyze_question_tags(
-            os.path.join(UPLOAD_DIR, hw["answer_pdf"]), picked,
-            api_url, api_key, model, pages=_page_list(hw["answer_pages"]),
-            usage_hook=operation["usage_hook"],
-            max_tokens=_get_max_tokens(g.user["id"], "max_tokens_tagging"))
-    except Exception as e:  # noqa: BLE001 标签失败不影响作业范围本身
-        _finish_ai_operation(operation, "failed", str(e))
-        log.exception("生成知识点标签失败 lecture=%s", hw["id"])
-        return 0, f"生成失败：{e}"
-    _finish_ai_operation(operation, "failed" if err else "success", err)
-    if err:
-        return 0, err
-    db.execute("DELETE FROM question_tags WHERE lecture_id=? AND source='ai'", (hw["id"],))
-    count = 0
-    for row in rows:
-        for tag in row["tags"]:
-            db.execute(
-                "INSERT INTO question_tags(lecture_id,question_key,question_no,tag,"
-                "category,source) VALUES(?,?,?,?,?,'ai')",
-                (hw["id"], row["key"], row["no"], tag, row["category"]))
-            count += 1
-    db.commit()
-    log.info("生成知识点标签 lecture=%s 题数=%s 标签数=%s", hw["id"], len(rows), count)
-    return count, ""
-
-
-def _analyze_scope(hw, pages):
-    """调用 AI 读取教师版答案并识别题目清单，返回 (题目, 错误, 用量文本)。"""
+    max_tokens = _get_max_tokens(g.user["id"], "max_tokens_tagging")
+    answer_pdf = hw["answer_pdf"]
+    answer_pages = hw["answer_pages"]
+    lecture_id = hw["id"]
+    course_id = hw["course_id"]
     teacher_id = g.user["id"]
-    if get_setting(teacher_id, "ai_demo") == "1":
-        return [], "演示模式不会调用 AI，无法生成题目清单；请到「AI 设置」关闭演示模式。", ""
-    block = _offpeak_block_if_enabled(teacher_id)
-    if block:
-        return [], block, ""
-    api_url = get_setting(teacher_id, "ai_api_url").rstrip("/")
-    api_key = get_setting(teacher_id, "ai_api_key")
-    model = get_setting(teacher_id, "ai_model")
-    if not api_url or not api_key or not model:
-        return [], "尚未配置 AI 接口，无法生成题目清单。", ""
 
-    log.info("分析作业范围 lecture=%s answer_pdf=%s pages=%s",
-             hw["id"], hw["answer_pdf"], pages)
-    operation = _start_ai_operation(
-        teacher_id, "scope_analyze", model, course_id=hw["course_id"], lecture_id=hw["id"])
-    try:
-        questions, err = analyze_answer_pdf(
-            os.path.join(UPLOAD_DIR, hw["answer_pdf"]), api_url, api_key, model,
-            pages=pages, usage_hook=operation["usage_hook"],
-            max_tokens=_get_max_tokens(teacher_id, "max_tokens_answer_pdf"))
-    except Exception as e:
-        _finish_ai_operation(operation, "failed", str(e))
-        raise
-    _finish_ai_operation(operation, "failed" if err else "success", err)
-    usage_text = _ai_usage_text(_ai_operation_history(operation_id=operation["id"], limit=1)[0])
-    return questions, err, usage_text
+    def runner(database, operation):
+        try:
+            rows, run_err = analyze_question_tags(
+                os.path.join(UPLOAD_DIR, answer_pdf), picked,
+                api_url, api_key, model, pages=_page_list(answer_pages),
+                usage_hook=operation["usage_hook"], max_tokens=max_tokens)
+        except Exception as e:  # noqa: BLE001
+            _finish_ai_operation(operation, "failed", str(e))
+            log.exception("生成知识点标签失败 lecture=%s", lecture_id)
+            return
+        _finish_ai_operation(operation, "failed" if run_err else "success", run_err)
+        if run_err:
+            return
+        database.execute("DELETE FROM question_tags WHERE lecture_id=? AND source='ai'",
+                         (lecture_id,))
+        count = 0
+        for row in rows:
+            for tag in row["tags"]:
+                database.execute(
+                    "INSERT INTO question_tags(lecture_id,question_key,question_no,tag,"
+                    "category,source) VALUES(?,?,?,?,?,'ai')",
+                    (lecture_id, row["key"], row["no"], tag, row["category"]))
+                count += 1
+        database.commit()
+        log.info("生成知识点标签 lecture=%s 题数=%s 标签数=%s", lecture_id, len(rows), count)
+
+    operation, queue_err = _ai_task_queue.submit(
+        teacher_id, "question_tagging", model=model, runner=runner,
+        course_id=course_id, lecture_id=lecture_id,
+        dedup_key=f"question_tagging|{lecture_id}")
+    if queue_err:
+        return 0, queue_err
+    return None, None
 
 
 @_routes.route("/lecture/<oid:hid>/answer/pages", methods=["POST"])
 @role_required("teacher")
 def lecture_answer_pages(hid):
-    """保存教师要发送给模型的页码，并立即用这些页生成题目清单。"""
+    """保存教师要发送给模型的页码，并异步用这些页生成题目清单。"""
     db = get_db()
     hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
     if not hw:
@@ -1854,19 +1837,48 @@ def lecture_answer_pages(hid):
                (",".join(str(p) for p in picked), hid))
     db.commit()
     note = _answer_pages_note(picked, total)
-    try:
-        questions, err, usage_text = _analyze_scope(hw, picked)
-    except Exception as e:  # noqa: BLE001 页码已保存，分析失败只提示不回滚
-        log.exception("生成题目清单失败 lecture=%s", hid)
-        flash(f"{note} 生成题目清单失败：{e}")
+    teacher_id = g.user["id"]
+    if get_setting(teacher_id, "ai_demo") == "1":
+        flash(f"{note} 演示模式不会调用 AI，无法生成题目清单。")
         return redirect(url_for("lecture_detail", hid=hid))
-    if err:
-        flash(f"{note} {err}{'；' + usage_text if usage_text else ''}")
+    block = _offpeak_block_if_enabled(teacher_id)
+    if block:
+        flash(f"{note} {block}")
         return redirect(url_for("lecture_detail", hid=hid))
-    db.execute("UPDATE lectures SET scope_candidates=?, scope_selected='' WHERE id=?",
-               (json.dumps(questions, ensure_ascii=False), hid))
-    db.commit()
-    flash(f"{note} 已识别 {len(questions)} 道题，请勾选本讲需要批阅的题目。{usage_text}")
+    api_url = get_setting(teacher_id, "ai_api_url").rstrip("/")
+    api_key = get_setting(teacher_id, "ai_api_key")
+    model = get_setting(teacher_id, "ai_model")
+    if not api_url or not api_key or not model:
+        flash(f"{note} 尚未配置 AI 接口，无法生成题目清单。")
+        return redirect(url_for("lecture_detail", hid=hid))
+    max_tokens = _get_max_tokens(teacher_id, "max_tokens_answer_pdf")
+    answer_pdf = hw["answer_pdf"]
+    course_id = hw["course_id"]
+
+    def runner(database, operation):
+        try:
+            questions, err = analyze_answer_pdf(
+                os.path.join(UPLOAD_DIR, answer_pdf), api_url, api_key, model,
+                pages=picked, usage_hook=operation["usage_hook"], max_tokens=max_tokens)
+        except Exception as e:  # noqa: BLE001
+            _finish_ai_operation(operation, "failed", str(e))
+            log.exception("生成题目清单失败 lecture=%s", hid)
+            return
+        _finish_ai_operation(operation, "failed" if err else "success", err)
+        if not err:
+            database.execute("UPDATE lectures SET scope_candidates=?, scope_selected='' WHERE id=?",
+                             (json.dumps(questions, ensure_ascii=False), hid))
+            database.commit()
+            log.info("作业范围题目清单生成成功 lecture=%s 题目=%s", hid, len(questions))
+
+    log.info("分析作业范围 lecture=%s answer_pdf=%s pages=%s", hid, answer_pdf, picked)
+    operation, queue_err = _ai_task_queue.submit(
+        teacher_id, "scope_analyze", model=model, runner=runner,
+        course_id=course_id, lecture_id=hid, dedup_key=f"scope_analyze|{hid}")
+    if queue_err:
+        flash(f"{note} {queue_err}")
+    else:
+        flash(f"{note} 题目清单生成已加入后台队列，可离开当前页面。")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
@@ -1929,6 +1941,8 @@ def lecture_scope_save(hid):
     count, err = _generate_question_tags(hw, keys)
     if err:
         flash(f"已保存作业范围：{len(keys)} 道题；知识点标签未生成：{err}")
+    elif count is None:
+        flash(f"已保存作业范围：{len(keys)} 道题；知识点标签已加入后台队列。")
     else:
         flash(f"已保存作业范围：{len(keys)} 道题，已生成 {count} 个知识点标签")
     return redirect(url_for("lecture_detail", hid=hid))
@@ -1953,6 +1967,8 @@ def lecture_tags_generate(hid):
     count, err = _generate_question_tags(hw, keys)
     if err:
         flash(f"知识点标签未生成：{err}")
+    elif count is None:
+        flash("知识点标签已加入后台队列，可离开当前页面。")
     else:
         flash(f"已重新生成 {count} 个知识点标签")
     return redirect(url_for("lecture_detail", hid=hid))
@@ -1961,7 +1977,7 @@ def lecture_tags_generate(hid):
 @_routes.route("/lecture/<oid:hid>/tag-analysis", methods=["POST"])
 @role_required("teacher")
 def lecture_tag_analysis(hid):
-    """横向分析：把本讲各知识点标签与全班逐题判定结合，找共性问题。"""
+    """横向分析：把本讲各知识点标签与全班逐题判定结合，找共性问题。异步执行。"""
     db = get_db()
     hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
     if not hw:
@@ -1979,7 +1995,6 @@ def lecture_tag_analysis(hid):
         "SELECT COUNT(DISTINCT q.submission_id) FROM questions q "
         "JOIN submissions s ON s.id=q.submission_id "
         "WHERE s.lecture_id=? AND q.verdict<>''", (hid,)).fetchone()[0]
-    # 提取全班共性薄弱标签，用课程 KG 生成「前置 -> 薄弱」知识链注入 prompt
     weak_tag_names = [s["tag"] for s in stats if s["n_wrong"] or s["n_partial"]]
     kg_chains = _kg_weakness_chains(db, hw["course_id"], weak_tag_names)
     context = {
@@ -1994,45 +2009,53 @@ def lecture_tag_analysis(hid):
     if err:
         flash(f"知识点分析未生成：{err}")
         return redirect(url_for("lecture_detail", hid=hid))
-    operation = _start_ai_operation(
-        g.user["id"], "tag_horizontal", model,
-        course_id=hw["course_id"], lecture_id=hid)
-    try:
-        result = ai_horizontal_analysis(context, api_url, api_key, model,
-                                        prompt=prompt,
-                                        usage_hook=operation["usage_hook"],
-                                        max_tokens=_get_max_tokens(g.user["id"], "max_tokens_horizontal"))
-    except Exception as e:
-        _finish_ai_operation(operation, "failed", str(e))
-        log.exception("横向知识点分析异常 lecture=%s by=%s", hid, g.user["username"])
-        flash(f"知识点分析失败：{e}")
-        return redirect(url_for("lecture_detail", hid=hid))
-    error = "" if result else "AI 未返回可用的分析结果，请稍后重试"
-    _finish_ai_operation(operation, "success" if result else "failed", error)
-    if not result:
-        flash(error)
-        return redirect(url_for("lecture_detail", hid=hid))
-    md = tag_utils.render_horizontal_md(result)
-    db.execute("INSERT INTO tag_analyses(teacher_id,course_id,lecture_id,kind,"
-               "content_md,stats_json) VALUES(?,?,?,'horizontal',?,?)",
-               (g.user["id"], hw["course_id"], hid, md,
-                json.dumps(question_stats, ensure_ascii=False)))
-    db.commit()
-    log.info("横向知识点分析完成 lecture=%s by=%s", hid, g.user["username"])
-    flash("全班知识点分析已生成")
+    max_tokens = _get_max_tokens(g.user["id"], "max_tokens_horizontal")
+    teacher_id = g.user["id"]
+    course_id = hw["course_id"]
+    question_stats_json = json.dumps(question_stats, ensure_ascii=False)
+
+    def runner(database, operation):
+        try:
+            result = ai_horizontal_analysis(context, api_url, api_key, model,
+                                            prompt=prompt,
+                                            usage_hook=operation["usage_hook"],
+                                            max_tokens=max_tokens)
+        except Exception as e:  # noqa: BLE001
+            _finish_ai_operation(operation, "failed", str(e))
+            log.exception("横向知识点分析异常 lecture=%s", hid)
+            return
+        error = "" if result else "AI 未返回可用的分析结果，请稍后重试"
+        if not result:
+            _finish_ai_operation(operation, "failed", error)
+            return
+        md = tag_utils.render_horizontal_md(result)
+        database.execute("INSERT INTO tag_analyses(teacher_id,course_id,lecture_id,kind,"
+                         "content_md,stats_json) VALUES(?,?,?,'horizontal',?,?)",
+                         (teacher_id, course_id, hid, md, question_stats_json))
+        database.commit()
+        _finish_ai_operation(operation, "success")
+        log.info("横向知识点分析完成 lecture=%s", hid)
+
+    operation, queue_err = _ai_task_queue.submit(
+        g.user["id"], "tag_horizontal", model=model, runner=runner,
+        course_id=course_id, lecture_id=hid,
+        dedup_key=f"tag_horizontal|{hid}")
+    if queue_err:
+        flash(queue_err)
+    else:
+        flash("全班知识点分析已加入后台队列，可离开当前页面。")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
 @_routes.route("/lecture/<oid:hid>/summary/generate", methods=["POST"])
 @role_required("teacher")
 def lecture_summary_generate(hid):
-    """AI 聚合全班逐题判定与评语，生成讲次 summary（每题要点 + 整体总结）。"""
+    """AI 聚合全班逐题判定与评语，生成讲次 summary（每题要点 + 整体总结）。异步执行。"""
     db = get_db()
     hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
     if not hw:
         abort(404)
     own_course(hw["course_id"])
-    # 必须至少有一份 AI 批阅结果才有意义
     qcheck = db.execute("""
         SELECT COUNT(*) FROM questions q
         JOIN submissions s ON s.id=q.submission_id
@@ -2040,7 +2063,6 @@ def lecture_summary_generate(hid):
     if qcheck == 0:
         flash("还没有批改完成的作业，无法生成讲次汇总")
         return redirect(url_for("lecture_detail", hid=hid))
-    # 聚合统计（与 lecture_detail 里一致）
     qstats = db.execute("""
         SELECT q.no,
           SUM(CASE WHEN q.verdict='对' THEN 1 ELSE 0 END) AS n_right,
@@ -2053,6 +2075,8 @@ def lecture_summary_generate(hid):
         WHERE s.lecture_id=?
         GROUP BY q.no""", (hid,)).fetchall()
     qstats.sort(key=lambda row: _question_no_key(row["no"]))
+    # 序列化成普通 dict 列表，供后台线程使用
+    qstats_plain = [dict(r) for r in qstats]
 
     if get_setting(g.user["id"], "ai_demo") == "1":
         flash("演示模式不会调用 AI，无法生成讲次汇总。")
@@ -2065,63 +2089,62 @@ def lecture_summary_generate(hid):
     api_url = get_setting(g.user["id"], "ai_api_url")
     api_key = get_setting(g.user["id"], "ai_api_key")
     model = get_setting(g.user["id"], "ai_model")
-    operation = _start_ai_operation(
-        g.user["id"], "lecture_summary", model, course_id=hw["course_id"], lecture_id=hid)
-    # 提取全班共性薄弱标签，用课程 KG 生成前置知识链，让汇总能指出根因
+    max_tokens = _get_max_tokens(g.user["id"], "max_tokens_summary")
     lec_stats = tag_utils.lecture_stats(db, hid)
     weak_tag_names = [s["tag"] for s in lec_stats if s["n_wrong"] or s["n_partial"]]
     kg_chains = _kg_weakness_chains(db, hw["course_id"], weak_tag_names)
-    try:
-        result = ai_lecture_summary(qstats, api_url, api_key, model,
-                                    max_tokens=_get_max_tokens(g.user["id"], "max_tokens_summary"),
-                                    kg_chains=kg_chains,
-                                    usage_hook=operation["usage_hook"])
-    except Exception as e:
-        _finish_ai_operation(operation, "failed", str(e))
+    course_id = hw["course_id"]
+
+    def runner(database, operation):
+        try:
+            result = ai_lecture_summary(qstats_plain, api_url, api_key, model,
+                                        max_tokens=max_tokens, kg_chains=kg_chains,
+                                        usage_hook=operation["usage_hook"])
+        except Exception as e:  # noqa: BLE001
+            _finish_ai_operation(operation, "failed", f"生成异常：{e}")
+            log.exception("讲次汇总异常 lecture=%s", hid)
+            return
+        ai_error = result.get("error", "") if result else ""
+        if ai_error:
+            error_type = result.get("error_type", "")
+            hint = ""
+            if error_type == "truncated":
+                hint = "请到 AI 设置 → 「讲次汇总」max_tokens 调大（如 8192 或 16384）后重试"
+            elif error_type == "network":
+                hint = "请检查 AI 设置中的 API 地址和密钥是否正确，网络是否通畅"
+            else:
+                hint = "请重试，或检查 AI 设置"
+            _finish_ai_operation(operation, "failed", f"{ai_error}。{hint}")
+            return
+        if not result or not result.get("overall"):
+            _finish_ai_operation(operation, "failed", "AI 返回内容为空")
+            return
+        per_q = result.get("per_question") or {}
+        lines = ["## 每题要点\n"]
+        for no in sorted(per_q.keys(), key=lambda x: (0 if str(x).replace(".", "").isdigit() else 1, str(x))):
+            lines.append(f"- **第 {no} 题**：{per_q[no]}")
+        lines.append("\n## 整体总结\n")
+        lines.append(result.get("overall", ""))
+        md = "\n".join(lines)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        database.execute("UPDATE lectures SET summary_md=?, summary_at=? WHERE id=?",
+                         (md, now, hid))
+        database.commit()
+        _finish_ai_operation(operation, "success")
+        log.info("讲次 summary 生成成功 lecture=%s", hid)
+
+    operation, queue_err = _ai_task_queue.submit(
+        g.user["id"], "lecture_summary", model=model, runner=runner,
+        course_id=course_id, lecture_id=hid,
+        dedup_key=f"lecture_summary|{hid}")
+    if queue_err:
         if request.headers.get("Accept") == "application/json":
-            return jsonify(ok=False, error=f"生成异常：{e}")
-        flash(f"讲次汇总生成异常：{e}")
-        return redirect(url_for("lecture_detail", hid=hid))
-    # 检查 AI 返回的具体错误
-    ai_error = result.get("error", "") if result else ""
-    if ai_error:
-        error_type = result.get("error_type", "")
-        hint = ""
-        if error_type == "truncated":
-            hint = "请到 AI 设置 → 「讲次汇总」max_tokens 调大（如 8192 或 16384）后重试"
-        elif error_type == "network":
-            hint = "请检查 AI 设置中的 API 地址和密钥是否正确，网络是否通畅"
-        else:
-            hint = "请重试，或检查 AI 设置"
-        full_error = f"{ai_error}。{hint}"
-        _finish_ai_operation(operation, "failed", full_error)
+            return jsonify(ok=False, error=queue_err)
+        flash(queue_err)
+    else:
         if request.headers.get("Accept") == "application/json":
-            return jsonify(ok=False, error=full_error, error_type=error_type)
-        flash(full_error)
-        return redirect(url_for("lecture_detail", hid=hid))
-    if not result or not result.get("overall"):
-        _finish_ai_operation(operation, "failed", "AI 返回内容为空")
-        if request.headers.get("Accept") == "application/json":
-            return jsonify(ok=False, error="AI 返回内容为空，请重试")
-        flash("讲次汇总生成失败，AI 返回内容为空，请重试")
-        return redirect(url_for("lecture_detail", hid=hid))
-    _finish_ai_operation(operation, "success")
-    usage_text = _ai_usage_text(_ai_operation_history(operation_id=operation["id"], limit=1)[0])
-    # 渲染成 Markdown 存库（per_question 字典按题号展开 + overall）
-    per_q = result.get("per_question") or {}
-    lines = ["## 每题要点\n"]
-    for no in sorted(per_q.keys(), key=lambda x: (0 if x.replace(".", "").isdigit() else 1, str(x))):
-        lines.append(f"- **第 {no} 题**：{per_q[no]}")
-    lines.append("\n## 整体总结\n")
-    lines.append(result.get("overall", ""))
-    md = "\n".join(lines)
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    db.execute("UPDATE lectures SET summary_md=?, summary_at=? WHERE id=?", (md, now, hid))
-    db.commit()
-    log.info("讲次 summary 生成成功 lecture=%s by=%s", hid, g.user["username"])
-    if request.headers.get("Accept") == "application/json":
-        return jsonify(ok=True, usage=usage_text)
-    flash(f"讲次汇总已更新。{usage_text}")
+            return jsonify(ok=True, queued=True)
+        flash("讲次汇总已加入后台队列，可离开当前页面。")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
@@ -2182,7 +2205,7 @@ def student_detail(cid, sid):
 @_routes.route("/course/<oid:cid>/student/<oid:sid>/tag-analysis", methods=["POST"])
 @role_required("teacher")
 def student_tag_analysis(cid, sid):
-    """纵向分析：把该生跨讲次的错题按知识点标签聚合，找反复出错的知识点。"""
+    """纵向分析：把该生跨讲次的错题按知识点标签聚合，找反复出错的知识点。异步执行。"""
     db = get_db()
     student = own_student(cid, sid)
     course = own_course(cid)
@@ -2195,12 +2218,12 @@ def student_tag_analysis(cid, sid):
     titles = [row["lecture"] for row in trend]
     lecture_range = (f"{titles[0]} ~ {titles[-1]}（共 {len(titles)} 讲）"
                      if len(titles) > 1 else (titles[0] if titles else ""))
-    # 用课程挂载的 KG 生成真实的「前置 -> 薄弱」知识链；未挂载时给出提示
     kg_chains = _kg_weakness_chains(db, cid, [row["tag"] for row in weak])
     if not kg_chains:
         kg_chains = ("本课程未挂载知识图谱，或薄弱标签未能匹配图谱节点；"
                      "请仅依据同一或相近标签在不同讲次的重复出错推断前置基础，"
                      "不要编造数据中不存在的依赖关系。")
+    habit_stats = tag_utils.habit_stats(db, cid, sid)
     context = {
         "lecture_count": len(trend),
         "subject_and_course": _course_label(course),
@@ -2208,7 +2231,7 @@ def student_tag_analysis(cid, sid):
         "lecture_range": lecture_range,
         "module_mastery_stats": mastery,
         "kg_weakness_chains": kg_chains,
-        "error_habit_stats": tag_utils.habit_stats(db, cid, sid),
+        "error_habit_stats": habit_stats,
         "trend_data": trend,
     }
     prompt = _prompt_content("tag_vertical", course["tag_vertical_prompt_id"])
@@ -2216,34 +2239,40 @@ def student_tag_analysis(cid, sid):
     if err:
         flash(f"纵向分析未生成：{err}")
         return redirect(url_for("student_detail", cid=cid, sid=sid))
-    operation = _start_ai_operation(
-        g.user["id"], "tag_vertical", model, course_id=cid)
-    try:
-        result = ai_vertical_analysis(context, api_url, api_key, model,
-                                      prompt=prompt,
-                                      usage_hook=operation["usage_hook"],
-                                      max_tokens=_get_max_tokens(g.user["id"], "max_tokens_vertical"))
-    except Exception as e:
-        _finish_ai_operation(operation, "failed", str(e))
-        log.exception("纵向知识点分析异常 course=%s student=%s by=%s", cid, sid, g.user["username"])
-        flash(f"纵向知识点分析失败：{e}")
-        return redirect(url_for("student_detail", cid=cid, sid=sid))
-    error = "" if result else "AI 未返回可用的分析结果，请稍后重试"
-    _finish_ai_operation(operation, "success" if result else "failed", error)
-    if not result:
-        flash(error)
-        return redirect(url_for("student_detail", cid=cid, sid=sid))
-    md = tag_utils.render_vertical_md(result)
-    db.execute("INSERT INTO tag_analyses(teacher_id,course_id,lecture_id,student_id,"
-               "kind,content_md,stats_json) VALUES(?,?,0,?,'vertical',?,?)",
-               (g.user["id"], cid, sid, md,
-                json.dumps({"mastery": mastery, "trend": trend,
-                            "habits": context["error_habit_stats"]},
-                           ensure_ascii=False)))
-    db.commit()
-    log.info("纵向知识点分析完成 course=%s student=%s by=%s",
-             cid, sid, g.user["username"])
-    flash("该生的纵向知识点分析已生成")
+    max_tokens = _get_max_tokens(g.user["id"], "max_tokens_vertical")
+    teacher_id = g.user["id"]
+    stats_json = json.dumps({"mastery": mastery, "trend": trend, "habits": habit_stats},
+                            ensure_ascii=False)
+
+    def runner(database, operation):
+        try:
+            result = ai_vertical_analysis(context, api_url, api_key, model,
+                                          prompt=prompt,
+                                          usage_hook=operation["usage_hook"],
+                                          max_tokens=max_tokens)
+        except Exception as e:  # noqa: BLE001
+            _finish_ai_operation(operation, "failed", str(e))
+            log.exception("纵向知识点分析异常 course=%s student=%s", cid, sid)
+            return
+        error = "" if result else "AI 未返回可用的分析结果，请稍后重试"
+        if not result:
+            _finish_ai_operation(operation, "failed", error)
+            return
+        md = tag_utils.render_vertical_md(result)
+        database.execute("INSERT INTO tag_analyses(teacher_id,course_id,lecture_id,student_id,"
+                         "kind,content_md,stats_json) VALUES(?,?,0,?,'vertical',?,?)",
+                         (teacher_id, cid, sid, md, stats_json))
+        database.commit()
+        _finish_ai_operation(operation, "success")
+        log.info("纵向知识点分析完成 course=%s student=%s", cid, sid)
+
+    operation, queue_err = _ai_task_queue.submit(
+        g.user["id"], "tag_vertical", model=model, runner=runner,
+        course_id=cid, dedup_key=f"tag_vertical|{cid}|{sid}")
+    if queue_err:
+        flash(queue_err)
+    else:
+        flash("纵向知识点分析已加入后台队列，可离开当前页面。")
     return redirect(url_for("student_detail", cid=cid, sid=sid))
 
 
@@ -2417,6 +2446,16 @@ _grading_queue = GradingQueue(
 )
 
 
+# 通用 AI 异步任务队列：讲次汇总、知识点分析、图谱体检、总评生成等长耗时操作
+_ai_task_queue = ai_task_queue.AiTaskQueue(
+    get_db=get_db,
+    close_db=close_db,
+    start_operation=_start_ai_operation,
+    finish_operation=_finish_ai_operation,
+    app_context=_service_app_context,
+)
+
+
 def _enqueue_grading(teacher_id, sid, course_id, lecture_id):
     """统一入队入口：手动点击和定时扫描共用，返回 (operation, 错误提示)。"""
     return _grading_queue.enqueue(teacher_id, sid, course_id, lecture_id)
@@ -2523,35 +2562,100 @@ def submission_grading_status(sid):
     })
 
 
+@_routes.route("/ai-queue")
 @_routes.route("/grading-queue")
 @role_required("teacher")
 def grading_queue():
-    """教师导航栏的后台批改队列：只返回自己名下排队中/进行中的任务。"""
-    rows = get_db().execute(
-        "SELECT o.id,o.status,s.id AS submission_id,s.lecture_id,"
+    """教师导航栏的后台任务队列：返回自己名下所有排队中/进行中的 AI 任务，
+    以及最近 60 秒内完成的任务（供前端弹出完成提示）。"""
+    db = get_db()
+    rows = db.execute(
+        "SELECT o.id,o.operation_type,o.status,o.started_at,o.finished_at,o.error,"
+        "o.course_id,COALESCE(o.lecture_id, s.lecture_id) AS lecture_id,o.submission_id,o.material_id,"
         "COALESCE(u.display_name,'未知学生') AS student_name,"
         "COALESCE(l.title,'未知讲次') AS lecture_title,"
-        "COALESCE(c.name,'') AS course_name "
-        "FROM ai_operations o LEFT JOIN submissions s ON s.id=o.submission_id "
+        "COALESCE(c.name,'') AS course_name,"
+        "COALESCE(g.name,'') AS graph_name "
+        "FROM ai_operations o "
+        "LEFT JOIN submissions s ON s.id=o.submission_id "
         "LEFT JOIN users u ON u.id=s.student_id "
-        "LEFT JOIN lectures l ON l.id=s.lecture_id "
-        "LEFT JOIN courses c ON c.id=l.course_id "
-        "WHERE o.teacher_id=? AND o.operation_type='grade' "
-        "AND o.status IN ('queued','running') ORDER BY o.id", (g.user["id"],)).fetchall()
-    jobs = [{
-        "id": r["id"],
-        "status": r["status"],
-        "student": r["student_name"],
-        "lecture": r["lecture_title"],
-        "course": r["course_name"],
-        "url": url_for("lecture_detail", hid=r["lecture_id"]) if r["lecture_id"] else "",
-    } for r in rows]
+        "LEFT JOIN lectures l ON l.id=COALESCE(o.lecture_id, s.lecture_id) "
+        "LEFT JOIN courses c ON c.id=COALESCE(o.course_id, l.course_id) "
+        "LEFT JOIN kg_materials m ON m.id=o.material_id "
+        "LEFT JOIN knowledge_graphs g ON g.id=m.graph_id "
+        "WHERE o.teacher_id=? AND o.status IN ('queued','running') "
+        "ORDER BY o.id", (g.user["id"],)).fetchall()
+
+    jobs = [_queue_job(r) for r in rows]
+
+    # 最近 60 秒内完成的任务，用于前端 toast
+    finished = db.execute(
+        "SELECT o.id,o.operation_type,o.status,o.error,o.course_id,"
+        "COALESCE(o.lecture_id, s.lecture_id) AS lecture_id,"
+        "o.submission_id,o.material_id,"
+        "COALESCE(u.display_name,'未知学生') AS student_name,"
+        "COALESCE(l.title,'未知讲次') AS lecture_title,"
+        "COALESCE(c.name,'') AS course_name,"
+        "COALESCE(g.name,'') AS graph_name "
+        "FROM ai_operations o "
+        "LEFT JOIN submissions s ON s.id=o.submission_id "
+        "LEFT JOIN users u ON u.id=s.student_id "
+        "LEFT JOIN lectures l ON l.id=COALESCE(o.lecture_id, s.lecture_id) "
+        "LEFT JOIN courses c ON c.id=COALESCE(o.course_id, l.course_id) "
+        "LEFT JOIN kg_materials m ON m.id=o.material_id "
+        "LEFT JOIN knowledge_graphs g ON g.id=m.graph_id "
+        "WHERE o.teacher_id=? AND o.status IN ('success','failed') "
+        "AND o.finished_at IS NOT NULL "
+        "AND julianday('now') - julianday(o.finished_at) < 60/86400.0 "
+        "ORDER BY o.id DESC LIMIT 20", (g.user["id"],)).fetchall()
+    finished_jobs = [_queue_job(r, finished=True) for r in finished]
+
     return jsonify({
         "jobs": jobs,
+        "finished": finished_jobs,
         "active": bool(jobs),
         "queued": sum(1 for j in jobs if j["status"] == "queued"),
         "running": sum(1 for j in jobs if j["status"] == "running"),
     })
+
+
+def _queue_job(r, finished=False):
+    """把 ai_operations 行（含关联字段）转成队列项字典。"""
+    op_type = r["operation_type"]
+    label = AI_OPERATION_LABEL.get(op_type, op_type)
+    title_parts = []
+    if r["lecture_title"]:
+        title_parts.append(r["lecture_title"])
+    if r["student_name"] and op_type in ("grade", "report_generate", "report_comment"):
+        title_parts.append(r["student_name"])
+    if r["graph_name"]:
+        title_parts.append(r["graph_name"])
+    if r["course_name"] and not r["lecture_title"]:
+        title_parts.append(r["course_name"])
+    title = " · ".join(title_parts) or label
+
+    url = ""
+    if r["lecture_id"]:
+        url = url_for("lecture_detail", hid=r["lecture_id"])
+    elif op_type == "tag_vertical" and r["course_id"]:
+        url = url_for("course_detail", cid=r["course_id"])
+    elif r["submission_id"] and op_type in ("report_generate", "report_comment"):
+        url = url_for("submission_report", sid=r["submission_id"])
+    elif r["material_id"]:
+        # kg_build：跳到图谱列表，具体图谱由前端 toast 文字说明
+        url = url_for("knowledge_graphs")
+
+    item = {
+        "id": r["id"],
+        "type": op_type,
+        "label": label,
+        "status": r["status"],
+        "title": title,
+        "url": url,
+    }
+    if finished:
+        item["error"] = r["error"] or ""
+    return item
 
 
 def _auto_grade_scan():
@@ -3603,7 +3707,7 @@ def knowledge_graph_edge_reverse(gid, eid):
 @_routes.route("/knowledge-graphs/<oid:gid>/audit", methods=["POST"])
 @role_required("teacher", "admin")
 def knowledge_graph_audit_run(gid):
-    """让模型给出结构化治理建议；服务端校验后只保存待确认的 diff。"""
+    """让模型给出结构化治理建议：异步执行，结果保存在 kg_audits。"""
     _kg_graph(gid, edit=True)
     db = get_db()
     api_url, api_key, model, err = _ai_endpoint(g.user["id"])
@@ -3615,41 +3719,45 @@ def knowledge_graph_audit_run(gid):
         db.commit()
         flash(f"图谱体检未执行：{err}")
         return redirect(url_for("knowledge_graph_detail", gid=gid))
-    operation = _start_ai_operation(g.user["id"], "kg_audit", model)
-    suggestions, rejected = [], []
-    try:
-        suggestions, rejected, err = kg_utils.analyze_graph(
-            db, gid, api_url, api_key, model, usage_hook=operation["usage_hook"],
-            max_tokens=_get_max_tokens(g.user["id"], "max_tokens_kg_audit"))
-    except Exception as e:  # noqa: BLE001 体检失败要落状态，便于老师重试
-        err = str(e)
-        kg_log.exception("知识图谱体检失败 graph=%s", gid)
-    finally:
-        _finish_ai_operation(operation, "failed" if err else "success", err)
-    if err:
-        status = kg_utils.AUDIT_FAILED
-        flash(f"图谱体检失败：{err}")
-    elif suggestions:
-        status = kg_utils.AUDIT_PENDING
-        note = f"体检完成：{len(suggestions)} 条建议待确认"
-        if rejected:
-            note += f"，{len(rejected)} 条未通过校验"
-        flash(note)
+    max_tokens = _get_max_tokens(g.user["id"], "max_tokens_kg_audit")
+    created_by = g.user["id"]
+
+    def runner(database, operation):
+        try:
+            suggestions, rejected, run_err = kg_utils.analyze_graph(
+                database, gid, api_url, api_key, model,
+                usage_hook=operation["usage_hook"], max_tokens=max_tokens)
+        except Exception as e:  # noqa: BLE001
+            run_err = str(e)
+            kg_log.exception("知识图谱体检失败 graph=%s", gid)
+            suggestions, rejected = [], []
+        if run_err:
+            status = kg_utils.AUDIT_FAILED
+        elif suggestions:
+            status = kg_utils.AUDIT_PENDING
+        elif rejected:
+            status = kg_utils.AUDIT_CLEAN
+        else:
+            status = kg_utils.AUDIT_CLEAN
+        database.execute(
+            "INSERT INTO kg_audits(graph_id,status,model,error,suggestions,"
+            "rejected,operation_id,created_by) VALUES(?,?,?,?,?,?,?,?)",
+            (gid, status, model, (run_err or "")[:500],
+             json.dumps(suggestions, ensure_ascii=False),
+             json.dumps(rejected, ensure_ascii=False), operation["id"],
+             created_by))
+        database.commit()
+        kg_log.info("知识图谱体检 user=#%s graph=%s status=%s 建议=%s 拦截=%s",
+                    created_by, gid, status, len(suggestions), len(rejected))
+        _finish_ai_operation(operation, "failed" if run_err else "success", run_err)
+
+    operation, queue_err = _ai_task_queue.submit(
+        g.user["id"], "kg_audit", model=model, runner=runner,
+        material_id=None, dedup_key=f"kg_audit|{gid}")
+    if queue_err:
+        flash(queue_err)
     else:
-        status = kg_utils.AUDIT_CLEAN
-        flash("体检完成：未发现需要调整的关系" if not rejected
-              else f"体检完成：{len(rejected)} 条建议未通过校验")
-    db.execute(
-        "INSERT INTO kg_audits(graph_id,status,model,error,suggestions,rejected,"
-        "operation_id,created_by) VALUES(?,?,?,?,?,?,?,?)",
-        (gid, status, model, err[:500],
-         json.dumps(suggestions, ensure_ascii=False),
-         json.dumps(rejected, ensure_ascii=False), operation["id"],
-         g.user["id"]))
-    db.commit()
-    kg_log.info("知识图谱体检 user=%s#%s graph=%s status=%s 建议=%s 拦截=%s",
-             g.user["username"], g.user["id"], gid, status,
-             len(suggestions), len(rejected))
+        flash("图谱体检已加入后台队列，可离开当前页面。")
     return redirect(url_for("knowledge_graph_detail", gid=gid))
 
 
@@ -4043,10 +4151,11 @@ def _scope_instruction(hw):
 
 # ---------- 批改报告（Markdown） ----------
 
-def generate_report(db, sub_id, teacher_id, reuse=False):
+def generate_report(db, sub_id, teacher_id, reuse=False, operation=None):
     """按当前逐题结果生成/刷新一份 Markdown 批改报告，返回报告文本。
 
     reuse=True 时沿用上次由 AI 生成的评价段落，只重算表格与统计（保存批改时不额外调模型）。
+    operation 由调用方的任务队列传入时，复用其 usage_hook 且不再自行创建 ai_operation。
     """
     sub = db.execute("""
         SELECT s.*, u.display_name, l.title AS lecture_title, l.course_id
@@ -4069,9 +4178,10 @@ def generate_report(db, sub_id, teacher_id, reuse=False):
                                 "JOIN lectures l ON l.id=c.id WHERE l.id=?",
                                 (sub["lecture_id"],)).fetchone()
             if api_url and api_key and model:
-                operation = _start_ai_operation(
-                    teacher_id, "report_generate", model, course_id=sub["course_id"],
-                    lecture_id=sub["lecture_id"], submission_id=sub_id)
+                if operation is None:
+                    operation = _start_ai_operation(
+                        teacher_id, "report_generate", model, course_id=sub["course_id"],
+                        lecture_id=sub["lecture_id"], submission_id=sub_id)
                 try:
                     kg_diag = _kg_diagnosis(db, sub)
                     kg_context = _kg_diagnosis_text(kg_diag) if kg_diag else ""
@@ -4310,9 +4420,35 @@ def submission_report(sid):
 @_routes.route("/submission/<oid:sid>/report/build", methods=["POST"])
 @role_required("teacher")
 def submission_report_build(sid):
-    sub, hw, _ = own_submission(sid)
-    generate_report(get_db(), sid, g.user["id"])
-    flash("批改报告已生成，确认无误后发布给学生。")
+    sub, hw, course = own_submission(sid)
+    teacher_id = g.user["id"]
+    model = get_setting(teacher_id, "ai_model") or "report"
+
+    def runner(database, operation):
+        try:
+            generate_report(database, sid, teacher_id, operation=operation)
+        except Exception as e:  # noqa: BLE001
+            log.exception("生成批改报告失败 submission=%s", sid)
+            try:
+                _finish_ai_operation(operation, "failed", str(e))
+            except Exception:
+                pass
+            return
+        # generate_report 只在真正调用 AI 时自行 finish；若被闲时/演示拦截，
+        # 队列已把状态置为 running，这里兜底标记 success。
+        cur = database.execute(
+            "SELECT status FROM ai_operations WHERE id=?", (operation["id"],)).fetchone()
+        if cur and cur["status"] in ("queued", "running"):
+            _finish_ai_operation(operation, "success")
+
+    operation, queue_err = _ai_task_queue.submit(
+        teacher_id, "report_generate", model=model, runner=runner,
+        course_id=course["id"], lecture_id=hw["id"], submission_id=sid,
+        dedup_key=f"report_generate|{sid}")
+    if queue_err:
+        flash(queue_err)
+    else:
+        flash("批改报告生成已加入后台队列，可离开当前页面。")
     return redirect(url_for("submission_report", sid=sid))
 
 
@@ -4333,7 +4469,7 @@ def submission_report_publish(sid):
 @_routes.route("/submission/<oid:sid>/report/comment", methods=["POST"])
 @role_required("teacher")
 def submission_report_comment(sid):
-    """全部题目复核完成后，用 AI 重写一份总评，回填到逐题核对页的文本框继续人工修改。"""
+    """全部题目复核完成后，用 AI 重写一份总评（异步），结果写入 report_detail。"""
     db = get_db()
     sub, hw, course = own_submission(sid)
     questions = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
@@ -4351,32 +4487,67 @@ def submission_report_comment(sid):
     if get_setting(g.user["id"], "ai_demo") == "1":
         return {"ok": False, "error": "演示模式不会调用 AI，无法生成总评"}, 400
     summary = _json_or_none(sub["ai_summary"]) or {}
-    operation = _start_ai_operation(
-        g.user["id"], "report_comment", model, course_id=course["id"],
-        lecture_id=hw["id"], submission_id=sid)
-    try:
-        kg_diag = _kg_diagnosis(db, sub)
-        kg_context = _kg_diagnosis_text(kg_diag) if kg_diag else ""
-        detail = ai_report_comment(questions, summary.get("weak_points") or [],
-                                   summary.get("evaluation", ""), api_url, api_key, model,
-                                   prompt=_prompt_content("report", course["report_prompt_id"]),
-                                   usage_hook=operation["usage_hook"],
-                                   max_tokens=_get_max_tokens(g.user["id"], "max_tokens_report"),
-                                   kg_context=kg_context)
-    except Exception as e:
-        _finish_ai_operation(operation, "failed", str(e))
-        log.exception("生成总评异常 submission=%s by=%s", sid, g.user["username"])
-        return {"ok": False, "error": f"生成总评异常：{e}"}, 500
-    error = "" if detail else "AI 生成总评失败，请稍后重试"
-    _finish_ai_operation(operation, "success" if detail else "failed", error)
-    usage_text = _ai_usage_text(_ai_operation_history(operation_id=operation["id"], limit=1)[0])
-    if not detail:
-        return {"ok": False, "error": error, "usage": usage_text}, 502
-    db.execute("UPDATE submissions SET report_detail=? WHERE id=?",
-               (json.dumps(detail, ensure_ascii=False), sid))
-    db.commit()
-    return {"ok": True, "text": _overall_text(detail, summary.get("evaluation", "")),
-            "usage": usage_text}
+    teacher_id = g.user["id"]
+    course_id = course["id"]
+    lecture_id = hw["id"]
+    max_tokens = _get_max_tokens(teacher_id, "max_tokens_report")
+    prompt = _prompt_content("report", course["report_prompt_id"])
+    # 在线程序列化 questions（sqlite3.Row 不可跨线程）
+    questions_plain = [dict(q) for q in questions]
+    kg_diag = _kg_diagnosis(db, sub)
+    kg_context = _kg_diagnosis_text(kg_diag) if kg_diag else ""
+
+    def runner(database, operation):
+        try:
+            detail = ai_report_comment(
+                questions_plain, summary.get("weak_points") or [],
+                summary.get("evaluation", ""), api_url, api_key, model,
+                prompt=prompt, usage_hook=operation["usage_hook"],
+                max_tokens=max_tokens, kg_context=kg_context)
+        except Exception as e:  # noqa: BLE001
+            _finish_ai_operation(operation, "failed", str(e))
+            log.exception("生成总评异常 submission=%s", sid)
+            return
+        error = "" if detail else "AI 生成总评失败，请稍后重试"
+        _finish_ai_operation(operation, "success" if detail else "failed", error)
+        if detail:
+            database.execute("UPDATE submissions SET report_detail=? WHERE id=?",
+                             (json.dumps(detail, ensure_ascii=False), sid))
+            database.commit()
+            log.info("总评生成成功 submission=%s", sid)
+
+    operation, queue_err = _ai_task_queue.submit(
+        teacher_id, "report_comment", model=model, runner=runner,
+        course_id=course_id, lecture_id=lecture_id, submission_id=sid,
+        dedup_key=f"report_comment|{sid}")
+    if queue_err:
+        return {"ok": False, "error": queue_err}, 409
+    return {"ok": True, "queued": True, "operation_id": operation["id"]}
+
+
+@_routes.route("/submission/<oid:sid>/report/comment/status")
+@role_required("teacher")
+def submission_report_comment_status(sid):
+    """前端轮询异步总评生成状态；完成时返回可回填的总评文本。"""
+    own_submission(sid)
+    op_id = request.args.get("operation_id", type=int)
+    if not op_id:
+        return {"ok": False, "error": "缺少 operation_id"}, 400
+    op = get_db().execute(
+        "SELECT status,error FROM ai_operations WHERE id=? AND teacher_id=?",
+        (op_id, g.user["id"])).fetchone()
+    if not op:
+        return {"ok": False, "error": "任务不存在"}, 404
+    if op["status"] in ("queued", "running"):
+        return {"ok": True, "status": op["status"]}
+    if op["status"] == "failed":
+        return {"ok": True, "status": "failed", "error": op["error"] or "生成失败"}
+    sub = get_db().execute("SELECT ai_summary,report_detail FROM submissions WHERE id=?",
+                           (sid,)).fetchone()
+    summary = _json_or_none(sub["ai_summary"]) or {}
+    detail = _json_or_none(sub["report_detail"]) or {}
+    return {"ok": True, "status": "success",
+            "text": _overall_text(detail, summary.get("evaluation", ""))}
 
 
 @_routes.route("/submission/<oid:sid>/report/save", methods=["POST"])

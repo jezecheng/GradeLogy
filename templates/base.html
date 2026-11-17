@@ -26,13 +26,13 @@
     <span class="grading-queue" id="grading-queue" hidden>
       <button type="button" class="grading-queue-btn" aria-describedby="grading-queue-pop">
         <span class="grading-queue-dot" aria-hidden="true"></span>
-        <span>后台批改中</span>
+        <span>后台任务</span>
         <span class="grading-queue-count" data-grading-count hidden>0</span>
       </button>
       <div class="grading-queue-pop" id="grading-queue-pop" role="tooltip">
-        <p class="grading-queue-title">后台批改队列</p>
+        <p class="grading-queue-title">后台任务队列</p>
         <ul class="grading-queue-list" data-grading-list></ul>
-        <p class="muted small">关闭浏览器不会中断；完成后讲次页会自动更新。</p>
+        <p class="muted small">关闭浏览器不会中断；完成后会在右上角提示。</p>
       </div>
     </span>
   {% else %}
@@ -116,18 +116,43 @@
 </script>
 {% if g.user and g.user.role == 'teacher' %}
 <script>
-// 后台批改队列：顶部图标 + 悬停/点按查看排队中与批改中的作业
+// 后台任务队列：顶部图标 + 悬停/点按查看排队中与进行中的所有 AI 任务，
+// 并在任务完成时弹出右上角提示。
 (function () {
   var box = document.getElementById('grading-queue');
   if (!box) return;
   var list = box.querySelector('[data-grading-list]');
   var count = box.querySelector('[data-grading-count]');
+  var seenFinished = {};
+
+  function showToast(job) {
+    var container = document.getElementById('ai-toast-container');
+    if (!container) return;
+    var toast = document.createElement('div');
+    toast.className = 'ai-toast ai-toast-' + (job.status === 'success' ? 'ok' : 'err');
+    var title = document.createElement('div');
+    title.className = 'ai-toast-title';
+    title.textContent = job.label + (job.status === 'success' ? ' 已完成' : ' 失败');
+    var body = document.createElement('div');
+    body.className = 'ai-toast-body';
+    body.textContent = job.title + (job.error ? '：' + job.error : '');
+    toast.appendChild(title);
+    toast.appendChild(body);
+    if (job.url) {
+      toast.style.cursor = 'pointer';
+      toast.addEventListener('click', function () { window.location.href = job.url; });
+    }
+    container.appendChild(toast);
+    setTimeout(function () {
+      toast.classList.add('ai-toast-out');
+      setTimeout(function () { toast.remove(); }, 400);
+    }, 4200);
+  }
 
   function render(data) {
     box.hidden = !data.active;
-    if (!data.active) return;
-    count.hidden = false;
-    count.textContent = data.jobs.length;
+    if (!data.active) { count.hidden = true; }
+    else { count.hidden = false; count.textContent = data.jobs.length; }
     list.textContent = '';
     data.jobs.forEach(function (job) {
       var li = document.createElement('li');
@@ -136,17 +161,23 @@
       if (job.url) item.href = job.url;
       var state = document.createElement('span');
       state.className = 'grading-queue-state ' + job.status;
-      state.textContent = job.status === 'running' ? '批改中' : '待批改';
-      var who = document.createElement('strong');
-      who.textContent = job.student;
+      state.textContent = job.status === 'running' ? '进行中' : '排队中';
+      var label = document.createElement('strong');
+      label.textContent = job.label;
       var where = document.createElement('span');
       where.className = 'muted small';
-      where.textContent = ' · ' + job.lecture + (job.course ? ' · ' + job.course : '');
+      where.textContent = ' · ' + job.title;
       item.appendChild(state);
-      item.appendChild(who);
+      item.appendChild(label);
       item.appendChild(where);
       li.appendChild(item);
       list.appendChild(li);
+    });
+    (data.finished || []).forEach(function (job) {
+      if (!seenFinished[job.id]) {
+        seenFinished[job.id] = true;
+        showToast(job);
+      }
     });
   }
 
@@ -169,6 +200,7 @@
 })();
 </script>
 {% endif %}
+<div id="ai-toast-container" class="ai-toast-container"></div>
 {% include "_assistant.html" %}
 {% block scripts %}{% endblock %}
 </body>

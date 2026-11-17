@@ -625,6 +625,8 @@ class LectureScopeTest(unittest.TestCase):
 
     def setUp(self):
         app_module.app.config.update(TESTING=True)
+        from tests import patch_sync_queue
+        patch_sync_queue(self)
         con = sqlite3.connect(app_module.DB_PATH)
         for table in ("ai_usage_events", "ai_operations", "questions", "submissions",
                       "lectures", "enrollments", "course_teachers", "courses", "users"):
@@ -1036,12 +1038,12 @@ class AsyncGradingTest(unittest.TestCase):
         self.assertEqual(len(data["jobs"]), 1)
         job = data["jobs"][0]
         self.assertEqual(job["status"], "queued")
-        self.assertEqual(job["student"], "学生一")
-        self.assertEqual(job["lecture"], "第1讲")
+        self.assertIn("学生一", job["title"])
+        self.assertIn("第1讲", job["title"])
         self.assertTrue(job["url"].startswith("/lecture/"))
 
         page = self.client.get(f"/lecture/{self.hid_url}").get_data(as_text=True)
-        self.assertIn("后台批改中", page)
+        self.assertIn("后台任务", page)
 
     def test_repeat_click_while_running_does_not_queue_twice(self):
         started = threading.Event()
@@ -1089,7 +1091,7 @@ class AsyncGradingTest(unittest.TestCase):
         app_module.init_db()
         row = self.operation()
         self.assertEqual(row[0], "failed")
-        self.assertIn("批阅任务", row[1])
+        self.assertIn("后台 AI 任务", row[1])
         self.assertIn("重新提交", row[1])
 
         con = sqlite3.connect(app_module.DB_PATH)

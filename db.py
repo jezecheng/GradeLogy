@@ -527,7 +527,7 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=()):
     con.execute("UPDATE ai_operations SET status='failed', error=?, "
                 "finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running') "
                 "AND operation_type<>'kg_build'",
-                ("服务重启，批阅任务已中断，请重新提交",))
+                ("服务重启，后台 AI 任务已中断，请重新提交",))
     con.execute("""
         UPDATE ai_usage_events SET status='error',
           error=CASE WHEN EXISTS(

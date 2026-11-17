@@ -13,6 +13,7 @@ except ImportError:
     from tests import _env_bootstrap  # noqa: F401
 
 import app as app_module  # noqa: E402
+from tests import patch_sync_queue  # noqa: E402
 
 _TABLES = ("tag_analyses", "question_tags", "questions", "submissions", "lectures",
            "exams", "exam_scores", "enrollments", "course_teachers",
@@ -23,6 +24,7 @@ _TABLES = ("tag_analyses", "question_tags", "questions", "submissions", "lecture
 class TagRouteTest(unittest.TestCase):
     def setUp(self):
         app_module.app.config.update(TESTING=True)
+        patch_sync_queue(self)
         self._clear()
         self._seed()
         self.client = self.login(2)

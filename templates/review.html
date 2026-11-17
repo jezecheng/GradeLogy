@@ -352,9 +352,31 @@
 
   // 全部复核完成后，用 AI 生成一份新总评回填文本框，教师可继续修改
   if (genBtn) {
+    var statusUrlBase = '{{ url_for("submission_report_comment_status", sid=sub.id) }}';
+    var pollComment = function (opId) {
+      fetch(statusUrlBase + '?operation_id=' + opId)
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (!d.ok) { alert(d.error || '查询总评状态失败'); busyOff(genBtn); syncProgress(); return; }
+          if (d.status === 'queued' || d.status === 'running') {
+            genHint.textContent = (d.status === 'queued' ? '排队中…' : '生成中…') + ' 可离开本页，完成后会在右上角提示。';
+            setTimeout(function () { pollComment(opId); }, 3000);
+            return;
+          }
+          if (d.status === 'failed') {
+            alert('生成总评失败：' + (d.error || ''));
+          } else if (d.text) {
+            document.getElementById('overall').value = d.text;
+            genBtn.dataset.hasResult = '1';
+            genHint.textContent = '已生成新的总评，可继续修改后保存';
+          }
+          busyOff(genBtn);
+          syncProgress();
+        });
+    };
     genBtn.addEventListener('click', function () {
       var run = function () {
-        busyOn(genBtn, '生成中…');
+        busyOn(genBtn, '排队中…');
         fetch('{{ url_for("submission_report_comment", sid=sub.id) }}', {
           method: 'POST', headers: { 'X-CSRF-Token': csrf }
         }).then(function (r) {
@@ -362,28 +384,22 @@
           if (!ct.includes('json')) {
             throw new Error('服务器内部错误（HTTP ' + r.status + '），请稍后重试');
           }
-          return r.json().then(function (d) { return [r.ok, d]; });
-        })
-          .then(function (res) {
-            var ok = res[0], data = res[1];
-            if (!ok || !data.ok) throw new Error((data.error || '生成失败') + (data.usage ? '\n' + data.usage : ''));
-            document.getElementById('overall').value = data.text;
-            genBtn.dataset.hasResult = '1';
-            genHint.textContent = '已生成新的总评，可继续修改后保存' + (data.usage ? '；' + data.usage : '');
-          }).catch(function (e) {
-            var msg = e.message || '生成总评失败，请稍后重试';
-            if (msg === 'Failed to fetch') {
-              msg = '网络请求失败：可能是 AI 接口响应超时或网络中断。\n\n'
-                  + '建议：\n'
-                  + '1. 检查网络连接是否正常\n'
-                  + '2. 到 AI 设置确认 API 地址和密钥正确\n'
-                  + '3. 稍后重试（AI 生成可能需要 1-2 分钟）';
-            }
-            alert(msg);
-          }).then(function () {
-            busyOff(genBtn);
-            syncProgress();
-          });
+          return r.json();
+        }).then(function (data) {
+          if (!data.ok) throw new Error(data.error || '生成失败');
+          if (data.queued) {
+            genHint.textContent = '已加入后台队列，正在生成总评…';
+            pollComment(data.operation_id);
+          }
+        }).catch(function (e) {
+          var msg = e.message || '生成总评失败，请稍后重试';
+          if (msg === 'Failed to fetch') {
+            msg = '网络请求失败，请检查网络连接或稍后重试。';
+          }
+          alert(msg);
+          busyOff(genBtn);
+          syncProgress();
+        });
       };
       if (genBtn.dataset.hasResult === '1') {
         confirmDialog('重新生成会用 AI 新写的总评覆盖当前总评内容（含手工修改的部分），确定继续吗？',

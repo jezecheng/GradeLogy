@@ -48,6 +48,16 @@ a:hover { text-decoration: underline; }
 .grading-queue-state.running { background: #e8f1ff; color: #1456f0; }
 .grading-queue-state.queued { background: #fff3e2; color: #a35a00; }
 .grading-queue-pop .small { margin: 8px 0 0; }
+.ai-toast-container { position: fixed; top: 64px; right: 16px; z-index: 9999;
+  display: flex; flex-direction: column; gap: 8px; max-width: 360px; }
+.ai-toast { padding: 12px 14px; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.18);
+  color: #fff; font-size: 13px; line-height: 1.45; animation: ai-toast-in .35s ease; }
+.ai-toast.ai-toast-ok { background: linear-gradient(135deg, #1f9d55, #157a43); }
+.ai-toast.ai-toast-err { background: linear-gradient(135deg, #d23b3b, #a51f1f); }
+.ai-toast-title { font-weight: 600; margin-bottom: 2px; }
+.ai-toast-out { opacity: 0; transform: translateX(20px); transition: all .4s ease; }
+@keyframes ai-toast-in { from { opacity: 0; transform: translateX(20px); }
+  to { opacity: 1; transform: translateX(0); } }
 @media (max-width: 600px) {
   .grading-queue-pop { left: auto; right: 0; }
 }
