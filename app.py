@@ -4699,23 +4699,26 @@ def _update_student_weak_points(db, submission):
             (student_id, course_id, tag)).fetchone()
         if existing:
             new_status = existing["status"]
-            if new_status == "mastered" and (wrong > 0 or partial > 0):
+            # 同一讲反复重批保留学生设定的状态；后续讲次再次做错则回退为薄弱
+            if (wrong or partial) and new_status in ("reviewed", "mastered", "removed") \
+                    and (existing["status_lecture_id"] or 0) != lecture_id:
                 new_status = "weak"
+            anchor = lecture_id if new_status == "weak" else (existing["status_lecture_id"] or 0)
             db.execute(
                 "UPDATE student_weak_points SET graph_id=?, node_id=?, node_name=?, "
                 "definition=?, source_submission_id=?, status=?, wrong_count=?, "
                 "partial_count=?, right_count=?, total_count=?, last_seen_at=?, "
-                "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                "status_lecture_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
                 (graph_id, node_id, node_name, definition, sub_id, new_status,
-                 wrong, partial, right, total, now, existing["id"]))
+                 wrong, partial, right, total, now, anchor, existing["id"]))
         else:
             db.execute(
                 "INSERT INTO student_weak_points(student_id,course_id,graph_id,node_id,"
                 "tag,node_name,definition,source_submission_id,status,wrong_count,"
-                "partial_count,right_count,total_count,last_seen_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "partial_count,right_count,total_count,last_seen_at,status_lecture_id) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (student_id, course_id, graph_id, node_id, tag, node_name, definition,
-                 sub_id, "weak", wrong, partial, right, total, now))
+                 sub_id, "weak", wrong, partial, right, total, now, lecture_id))
     db.commit()
 
 
@@ -5077,53 +5080,376 @@ def student_report(sid):
                            kg_diagnosis=kg_diag)
 
 
-@_routes.route("/student/weak-points")
-@role_required("student")
-def student_weak_points():
-    """学生查看自己的薄弱点知识图谱子图，可标记已复习/已掌握。"""
-    db = get_db()
+WEAK_STATUS_RANK = {"weak": 0, "reviewed": 1, "mastered": 2}
+
+
+def _weak_group_key(row):
+    """同一 KG 节点合并展示；没匹配到节点的按标签单独成组。"""
+    if row["node_id"]:
+        return f"n:{row['graph_id']}:{row['node_id']}"
+    return f"t:{row['tag']}"
+
+
+def _weak_point_groups(db, student_id):
+    """按 KG 节点聚合薄弱点：多个标签命中同一节点只算一组，累计统计各讲最近一次判定。"""
     rows = db.execute(
         "SELECT w.*, c.name AS course_name FROM student_weak_points w "
         "JOIN courses c ON c.id=w.course_id "
-        "WHERE w.student_id=? ORDER BY c.name, w.status, w.tag",
-        (g.user["id"],)).fetchall()
-    by_course = {}
+        "WHERE w.student_id=? AND w.status<>'removed' ORDER BY c.name, w.tag",
+        (student_id,)).fetchall()
+    groups = {}
+    tag_meta = {}
     for r in rows:
-        item = dict(r)
-        # 关联 KG 前置知识链
-        prereqs = []
-        if r["graph_id"] and r["node_id"]:
-            nb = kg_utils.concept_neighbors(db, r["graph_id"], r["node_id"])
-            if nb:
-                prereqs = nb.get("prerequisites", [])
-        item["prerequisites"] = prereqs
-        by_course.setdefault(r["course_id"], {"name": r["course_name"], "weak_points": []})
-        by_course[r["course_id"]]["weak_points"].append(item)
-    return render_template("student_weak_points.html", by_course=by_course)
+        key = _weak_group_key(r)
+        item = groups.get(key)
+        if item is None:
+            item = groups[key] = {
+                "key": key, "course_id": r["course_id"],
+                "course_name": r["course_name"],
+                "title": r["node_name"] or r["tag"],
+                "definition": r["definition"] or "",
+                "status": r["status"], "graph_id": r["graph_id"],
+                "node_id": r["node_id"], "tags": [], "note": "", "note_at": "",
+                "last_seen_at": r["last_seen_at"] or "",
+                "right_count": 0, "partial_count": 0, "wrong_count": 0,
+                "total_count": 0, "stored": (0, 0, 0, 0), "prerequisites": [],
+            }
+        item["tags"].append(r["tag"])
+        if (r["last_seen_at"] or "") > item["last_seen_at"]:
+            item["last_seen_at"] = r["last_seen_at"]
+        if WEAK_STATUS_RANK.get(r["status"], 0) < WEAK_STATUS_RANK.get(item["status"], 0):
+            item["status"] = r["status"]
+        if r["student_note"] and (r["updated_at"] or "") >= item["note_at"]:
+            item["note"] = r["student_note"]
+            item["note_at"] = r["updated_at"] or ""
+        stored = (r["right_count"], r["partial_count"],
+                  r["wrong_count"], r["total_count"])
+        if stored[3] > item["stored"][3]:
+            item["stored"] = stored
+        tag_meta[(r["course_id"], r["tag"])] = key
+
+    # 累计判定：同一讲同一题只取最近一次提交，避免重复提交放大计数
+    latest = {}
+    for h in db.execute(
+            "SELECT s.lecture_id, l.course_id, qt.tag, q.no, q.verdict "
+            "FROM submissions s JOIN lectures l ON l.id=s.lecture_id "
+            "JOIN question_tags qt ON qt.lecture_id=l.id "
+            "JOIN questions q ON q.submission_id=s.id AND q.no=qt.question_no "
+            "WHERE s.student_id=? AND q.verdict<>'' ORDER BY s.id",
+            (student_id,)):
+        item = latest.setdefault(
+            (h["lecture_id"], h["no"]),
+            {"course_id": h["course_id"], "verdict": h["verdict"], "tags": set()})
+        item["verdict"] = h["verdict"]
+        item["tags"].add(h["tag"])
+    for attempt in latest.values():
+        keys = {tag_meta.get((attempt["course_id"], tag))
+                for tag in attempt["tags"]}
+        for key in keys:
+            item = groups.get(key) if key else None
+            if item is None:
+                continue
+            item["total_count"] += 1
+            if attempt["verdict"] == "对":
+                item["right_count"] += 1
+            elif attempt["verdict"] == "半对":
+                item["partial_count"] += 1
+            elif attempt["verdict"] == "错":
+                item["wrong_count"] += 1
+
+    for item in groups.values():
+        if not item["total_count"]:
+            (item["right_count"], item["partial_count"],
+             item["wrong_count"], item["total_count"]) = item["stored"]
+    return groups
 
 
-@_routes.route("/student/weak-point/<int:wid>/status", methods=["POST"])
+@_routes.route("/student/weak-points")
 @role_required("student")
-def student_weak_point_status(wid):
-    """学生标记薄弱点状态（weak/reviewed/mastered）与备注。"""
+def student_weak_points():
+    """学生查看薄弱点：按 KG 节点聚合去重，统计各讲最近一次判定。"""
+    db = get_db()
+    groups = _weak_point_groups(db, g.user["id"])
+    by_course = {}
+    counts = {"all": 0, "weak": 0, "reviewed": 0, "mastered": 0}
+    for item in groups.values():
+        if item["node_id"]:
+            nb = kg_utils.concept_neighbors(db, item["graph_id"], item["node_id"])
+            if nb:
+                item["prerequisites"] = nb.get("prerequisites", [])
+        by_course.setdefault(item["course_id"], {
+            "name": item["course_name"], "weak_points": []})
+        by_course[item["course_id"]]["weak_points"].append(item)
+        counts["all"] += 1
+        counts[item["status"]] = counts.get(item["status"], 0) + 1
+    for group in by_course.values():
+        group["weak_points"].sort(key=lambda w: (
+            WEAK_STATUS_RANK.get(w["status"], 0), -w["wrong_count"],
+            -w["partial_count"], -w["total_count"], w["title"]))
+    return render_template("student_weak_points.html", by_course=by_course,
+                           counts=counts)
+
+
+@_routes.route("/student/weak-points/galaxy.json")
+@role_required("student")
+def student_weak_points_galaxy():
+    """薄弱点星图：只下发薄弱知识点及其一跳邻居，前端据此点亮。"""
+    db = get_db()
+    groups = _weak_point_groups(db, g.user["id"])
+    courses = {}
+    for item in groups.values():
+        course = courses.setdefault(item["course_id"], {
+            "id": item["course_id"], "name": item["course_name"],
+            "weak_total": 0, "unmatched": 0, "nodes": [], "edges": [],
+        })
+        course["weak_total"] += 1
+        if not item["node_id"]:
+            course["unmatched"] += 1
+    for course_id, course in courses.items():
+        nodes = {}
+        weak_map = {}
+        edges = {}
+        for item in groups.values():
+            if item["course_id"] != course_id or not item["node_id"]:
+                continue
+            node = db.execute(
+                "SELECT * FROM kg_nodes WHERE id=? AND graph_id=?",
+                (item["node_id"], item["graph_id"])).fetchone()
+            if node is None:
+                course["unmatched"] += 1
+                continue
+            nodes[node["id"]] = node
+            weak_map[node["id"]] = item
+            for edge in db.execute(
+                    "SELECT * FROM kg_edges WHERE graph_id=? AND (src_id=? OR dst_id=?)",
+                    (item["graph_id"], node["id"], node["id"])).fetchall():
+                edges[edge["id"]] = edge
+                other_id = (edge["dst_id"] if edge["src_id"] == node["id"]
+                            else edge["src_id"])
+                if other_id not in nodes:
+                    other = db.execute(
+                        "SELECT * FROM kg_nodes WHERE id=? AND graph_id=?",
+                        (other_id, item["graph_id"])).fetchone()
+                    if other is not None:
+                        nodes[other["id"]] = other
+        degree = {}
+        for edge in edges.values():
+            degree[edge["src_id"]] = degree.get(edge["src_id"], 0) + 1
+            degree[edge["dst_id"]] = degree.get(edge["dst_id"], 0) + 1
+        course["nodes"] = [{
+            "id": node["id"], "name": node["name"],
+            "category": node["category"] or "",
+            "definition": node["definition"] or "",
+            "degree": degree.get(node["id"], 0),
+            "weak": node["id"] in weak_map,
+            "key": weak_map[node["id"]]["key"] if node["id"] in weak_map else "",
+            "status": weak_map[node["id"]]["status"] if node["id"] in weak_map else "",
+            "right_count": weak_map[node["id"]]["right_count"] if node["id"] in weak_map else 0,
+            "partial_count": weak_map[node["id"]]["partial_count"] if node["id"] in weak_map else 0,
+            "wrong_count": weak_map[node["id"]]["wrong_count"] if node["id"] in weak_map else 0,
+            "total_count": weak_map[node["id"]]["total_count"] if node["id"] in weak_map else 0,
+            "tags": weak_map[node["id"]]["tags"] if node["id"] in weak_map else [],
+        } for node in nodes.values()]
+        course["edges"] = [{
+            "src": edge["src_id"], "dst": edge["dst_id"],
+            "relation": edge["relation"],
+        } for edge in edges.values()]
+    payload = [course for course in courses.values() if course["nodes"]]
+    payload.sort(key=lambda course: (-course["weak_total"], course["name"]))
+    return jsonify({"courses": payload})
+
+
+def _weak_group_filter(group):
+    """解析页面传来的组标识（节点组 n:图id:节点id / 标签组 t:标签）。"""
+    if group.startswith("n:") and group.count(":") == 2:
+        _, graph_id, node_id = group.split(":")
+        try:
+            return "graph_id=? AND node_id=?", (int(graph_id), int(node_id))
+        except ValueError:
+            abort(404)
+    if group.startswith("t:") and len(group) > 2:
+        return "tag=?", (group[2:],)
+    abort(404)
+
+
+def _weak_group_ids(db, student_id, course_id, group):
+    """取一组未移除的薄弱点记录 id；组不存在或已全部移除时 404。"""
+    condition, params = _weak_group_filter(group)
+    ids = [r["id"] for r in db.execute(
+        f"SELECT id FROM student_weak_points WHERE student_id=? AND course_id=?"
+        f" AND status<>'removed' AND {condition}",
+        (student_id, course_id, *params))]
+    if not ids:
+        abort(404)
+    return ids
+
+
+@_routes.route("/student/weak-points/status", methods=["POST"])
+@role_required("student")
+def student_weak_point_status():
+    """学生标记一组薄弱点（同一 KG 节点）的状态与备注。"""
     status = (request.form.get("status") or "").strip()
-    if status not in ("weak", "reviewed", "mastered"):
+    if status not in WEAK_STATUS_RANK:
         flash("状态不合法")
         return redirect(url_for("student_weak_points"))
     note = (request.form.get("note") or "").strip()
+    course_id = request.form.get("course_id", type=int) or 0
+    group = (request.form.get("group") or "").strip()
     db = get_db()
-    rec = db.execute(
-        "SELECT id FROM student_weak_points WHERE id=? AND student_id=?",
-        (wid, g.user["id"])).fetchone()
-    if not rec:
-        abort(404)
+    ids = _weak_group_ids(db, g.user["id"], course_id, group)
     db.execute(
         "UPDATE student_weak_points SET status=?, student_note=?, "
-        "updated_at=CURRENT_TIMESTAMP WHERE id=?",
-        (status, note, wid))
+        "status_lecture_id=COALESCE((SELECT lecture_id FROM submissions "
+        "WHERE id=student_weak_points.source_submission_id), 0), "
+        f"updated_at=CURRENT_TIMESTAMP WHERE id IN ({','.join('?' * len(ids))})",
+        (status, note, *ids))
     db.commit()
     flash("薄弱点状态已更新")
     return redirect(url_for("student_weak_points"))
+
+
+@_routes.route("/student/weak-points/remove", methods=["POST"])
+@role_required("student")
+def student_weak_point_remove():
+    """学生移除一组薄弱点；同一讲重批不会恢复，后续讲次再次做错会自动回到薄弱。"""
+    course_id = request.form.get("course_id", type=int) or 0
+    group = (request.form.get("group") or "").strip()
+    db = get_db()
+    ids = _weak_group_ids(db, g.user["id"], course_id, group)
+    db.execute(
+        f"UPDATE student_weak_points SET status='removed', "
+        "status_lecture_id=COALESCE((SELECT lecture_id FROM submissions "
+        "WHERE id=student_weak_points.source_submission_id), 0), "
+        f"updated_at=CURRENT_TIMESTAMP WHERE id IN ({','.join('?' * len(ids))})",
+        (*ids,))
+    db.commit()
+    flash("已移除该薄弱点")
+    return redirect(url_for("student_weak_points"))
+
+
+def _tags_for_question(tag_map, no):
+    """按题号取标签：兼容「3.」「第3题」「3(1)」等写法。"""
+    key = str(no or "").strip()
+    tags = tag_map.get(key)
+    if tags:
+        return tags
+    m = re.match(r"\s*(?:第\s*)?(\d+)", key)
+    if not m:
+        return []
+    for tag_no, values in tag_map.items():
+        other = re.match(r"\s*(?:第\s*)?(\d+)", str(tag_no or ""))
+        if other and other.group(1) == m.group(1):
+            return values
+    return []
+
+
+@_routes.route("/student/wrong-questions")
+@role_required("student")
+def student_wrong_questions():
+    """学生错题本：收录老师已公开批改结果中的错题与半对题。"""
+    db = get_db()
+    course_filter = request.args.get("course", type=int) or 0
+    tag_filter = [t.strip() for t in (request.args.get("tags") or "").split(",")
+                  if t.strip()]
+    verdict_filter = (request.args.get("verdict") or "").strip()
+    review_filter = (request.args.get("review") or "").strip()
+    rows = db.execute(
+        "SELECT q.*, s.created_at AS submitted_at, s.lecture_id, "
+        "l.title AS lecture_title, l.course_id, c.name AS course_name, "
+        "CASE WHEN r.status='reviewed' THEN 1 ELSE 0 END AS student_reviewed "
+        "FROM questions q "
+        "JOIN submissions s ON s.id=q.submission_id "
+        "JOIN lectures l ON l.id=s.lecture_id "
+        "JOIN courses c ON c.id=l.course_id "
+        "LEFT JOIN student_question_reviews r "
+        "  ON r.question_id=q.id AND r.student_id=s.student_id "
+        "WHERE s.student_id=? AND q.verdict IN ('错','半对') "
+        "AND s.id=(SELECT MAX(s2.id) FROM submissions s2 "
+        "  WHERE s2.lecture_id=s.lecture_id AND s2.student_id=s.student_id) "
+        "AND (s.status='已批改' OR s.report_published=1) "
+        "ORDER BY c.name, l.id DESC, q.id",
+        (g.user["id"],)).fetchall()
+    # 先按知识点筛选，再按课程汇总可选范围
+    tag_maps = {}
+    tagged = []
+    for row in rows:
+        tag_map = tag_maps.get(row["lecture_id"])
+        if tag_map is None:
+            tag_map = tag_utils.lecture_tags_by_key(db, row["lecture_id"])
+            tag_maps[row["lecture_id"]] = tag_map
+        tags = _tags_for_question(tag_map, row["no"])
+        if tag_filter and not set(tags) & set(tag_filter):
+            continue
+        tagged.append((row, tags))
+    courses = {}
+    for row, _ in tagged:
+        course = courses.setdefault(row["course_id"], {
+            "id": row["course_id"], "name": row["course_name"], "count": 0})
+        course["count"] += 1
+    counts = {"all": 0, "wrong": 0, "partial": 0, "open": 0, "reviewed": 0}
+    by_course = {}
+    for row, tags in tagged:
+        if course_filter and row["course_id"] != course_filter:
+            continue
+        counts["all"] += 1
+        counts["wrong" if row["verdict"] == "错" else "partial"] += 1
+        counts["reviewed" if row["student_reviewed"] else "open"] += 1
+        if verdict_filter and row["verdict"] != verdict_filter:
+            continue
+        if review_filter == "open" and row["student_reviewed"]:
+            continue
+        if review_filter == "reviewed" and not row["student_reviewed"]:
+            continue
+        course = by_course.setdefault(row["course_id"], {
+            "id": row["course_id"], "name": row["course_name"],
+            "lectures": {}, "count": 0})
+        lecture = course["lectures"].setdefault(row["lecture_id"], {
+            "id": row["lecture_id"], "title": row["lecture_title"],
+            "submitted_at": row["submitted_at"], "questions": []})
+        item = {key: row[key] for key in row.keys()}
+        item["tags"] = tags
+        item["reviewed"] = bool(row["student_reviewed"])
+        lecture["questions"].append(item)
+        course["count"] += 1
+    for course in by_course.values():
+        course["lectures"] = list(course["lectures"].values())
+    filters = {key: value for key, value in (
+        ("course", course_filter or ""), ("tags", ",".join(tag_filter)),
+        ("verdict", verdict_filter), ("review", review_filter)) if value}
+    return render_template(
+        "student_wrong_questions.html", by_course=list(by_course.values()),
+        courses=list(courses.values()), counts=counts, filters=filters,
+        tag_filter=tag_filter, verdict_filter=verdict_filter,
+        review_filter=review_filter)
+
+
+@_routes.route("/student/wrong-questions/review", methods=["POST"])
+@role_required("student")
+def student_question_review():
+    """学生标记单道错题是否已复习。"""
+    status = (request.form.get("status") or "").strip()
+    question_id = request.form.get("question_id", type=int) or 0
+    if status not in ("open", "reviewed"):
+        flash("复习状态不合法")
+        return redirect(url_for("student_wrong_questions"))
+    db = get_db()
+    owned = db.execute(
+        "SELECT q.id FROM questions q JOIN submissions s ON s.id=q.submission_id "
+        "WHERE q.id=? AND s.student_id=?",
+        (question_id, g.user["id"])).fetchone()
+    if not owned:
+        abort(404)
+    db.execute(
+        "INSERT INTO student_question_reviews(student_id,question_id,status,updated_at) "
+        "VALUES(?,?,?,CURRENT_TIMESTAMP) "
+        "ON CONFLICT(student_id,question_id) DO UPDATE SET "
+        "status=excluded.status, updated_at=CURRENT_TIMESTAMP",
+        (g.user["id"], question_id, status))
+    db.commit()
+    flash("已标记为已复习" if status == "reviewed" else "已取消复习标记")
+    args = {key: request.form.get(key) for key in
+            ("course", "tags", "verdict", "review") if request.form.get(key)}
+    return redirect(url_for("student_wrong_questions", **args))
 
 
 def _consistency_issues():

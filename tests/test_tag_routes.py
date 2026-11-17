@@ -15,10 +15,12 @@ except ImportError:
 import app as app_module  # noqa: E402
 from tests import patch_sync_queue  # noqa: E402
 
-_TABLES = ("tag_analyses", "question_tags", "questions", "submissions", "lectures",
-           "exams", "exam_scores", "enrollments", "course_teachers",
-           "course_knowledge_graphs", "knowledge_graphs", "courses",
-           "users", "ai_usage_events", "ai_operations")
+_TABLES = ("student_question_reviews", "student_weak_points", "tag_analyses",
+           "question_tags", "questions",
+           "submissions", "lectures", "exams", "exam_scores", "enrollments",
+           "course_teachers", "course_knowledge_graphs", "kg_edges", "kg_nodes",
+           "kg_category_maps", "knowledge_graphs",
+           "courses", "users", "ai_usage_events", "ai_operations")
 
 
 class TagRouteTest(unittest.TestCase):
@@ -443,6 +445,264 @@ class TagRouteTest(unittest.TestCase):
         con = self._db()
         count = con.execute(
             "SELECT COUNT(*) FROM course_knowledge_graphs").fetchone()[0]
+        con.close()
+        self.assertEqual(count, 0)
+
+    def _seed_weak_points(self):
+        """两条标签命中同一 KG 节点，需合并成一张卡；另一条未匹配节点单独成卡。"""
+        con = self._db()
+        con.executemany(
+            "INSERT INTO student_weak_points(student_id,course_id,graph_id,node_id,"
+            "tag,node_name,definition,status,wrong_count,partial_count,right_count,"
+            "total_count,last_seen_at,student_note) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [(4, 10, 5, 100, "氧化还原反应", "氧化还原反应", "电子转移", "weak",
+              1, 0, 0, 1, "2026-01-01 10:00:00", ""),
+             (4, 10, 5, 100, "电子守恒", "氧化还原反应", "电子转移", "reviewed",
+              0, 0, 0, 0, "2026-01-02 10:00:00", "记错电子数"),
+             (4, 10, 0, 0, "未匹配标签", "", "", "weak",
+              0, 0, 0, 0, "2026-01-03 10:00:00", "")])
+        con.commit()
+        con.close()
+
+    def test_weak_points_group_by_kg_node_and_use_history(self):
+        self._seed_weak_points()
+        html = self.login(4).get(
+            self.url("student_weak_points")).get_data(as_text=True)
+        self.assertEqual(html.count('class="weak-point-card"'), 2)
+        self.assertIn("合并标签：氧化还原反应、电子守恒", html)
+        self.assertIn("✗错 1", html)
+        self.assertEqual(html.count("（共 1 题）"), 1)
+        self.assertIn("全部 2", html)
+        self.assertIn("待复习 2", html)
+        self.assertIn("未匹配标签", html)
+
+    def test_weak_point_status_updates_all_rows_in_group(self):
+        self._seed_weak_points()
+        student = self.login(4)
+        resp = self._post("student_weak_point_status",
+                          {"course_id": "10", "group": "n:5:100",
+                           "status": "mastered", "note": "已弄懂"},
+                          client=student)
+        self.assertEqual(resp.status_code, 302)
+        con = self._db()
+        rows = con.execute(
+            "SELECT status,student_note FROM student_weak_points "
+            "WHERE student_id=4 AND graph_id=5 AND node_id=100").fetchall()
+        con.close()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({r["status"] for r in rows}, {"mastered"})
+        self.assertEqual({r["student_note"] for r in rows}, {"已弄懂"})
+
+    def test_weak_point_status_rejects_other_roles(self):
+        self._seed_weak_points()
+        resp = self._post("student_weak_point_status",
+                          {"course_id": "10", "group": "n:5:100",
+                           "status": "mastered"})
+        self.assertEqual(resp.status_code, 403)
+        con = self._db()
+        status = con.execute(
+            "SELECT status FROM student_weak_points WHERE tag='氧化还原反应'"
+        ).fetchone()[0]
+        con.close()
+        self.assertEqual(status, "weak")
+
+    def _review_save(self):
+        return self._post("submission_review_save", {
+            "verdict_40": "错", "ocr_40": "第3题作答", "standard_40": "标准答案",
+            "note_40": "", "overall": "继续加油"}, sid=30)
+
+    def test_regrading_same_submission_keeps_one_weak_point_per_tag(self):
+        self.assertEqual(self._review_save().status_code, 302)
+        self._review_save()
+        con = self._db()
+        rows = con.execute(
+            "SELECT COUNT(*) c, SUM(wrong_count) w, SUM(total_count) t "
+            "FROM student_weak_points WHERE student_id=4 AND tag='氧化还原反应'"
+        ).fetchone()
+        con.close()
+        self.assertEqual((rows["c"], rows["w"], rows["t"]), (1, 1, 1))
+
+    def test_regrading_keeps_student_reviewed_status(self):
+        self._review_save()
+        student = self.login(4)
+        self._post("student_weak_point_status",
+                   {"course_id": "10", "group": "t:氧化还原反应",
+                    "status": "reviewed", "note": "复习过"}, client=student)
+        self._review_save()
+        con = self._db()
+        row = con.execute(
+            "SELECT status, student_note, wrong_count FROM student_weak_points "
+            "WHERE student_id=4 AND tag='氧化还原反应'").fetchone()
+        count = con.execute(
+            "SELECT COUNT(*) FROM student_weak_points "
+            "WHERE student_id=4 AND tag='氧化还原反应'").fetchone()[0]
+        con.close()
+        self.assertEqual(count, 1)
+        self.assertEqual((row["status"], row["student_note"], row["wrong_count"]),
+                         ("reviewed", "复习过", 1))
+
+    def test_weak_point_remove_persists_until_new_lecture_mistake(self):
+        self._review_save()
+        student = self.login(4)
+        self._post("student_weak_point_remove",
+                   {"course_id": "10", "group": "t:氧化还原反应"}, client=student)
+        con = self._db()
+        status = con.execute(
+            "SELECT status FROM student_weak_points "
+            "WHERE student_id=4 AND tag='氧化还原反应'").fetchone()[0]
+        con.close()
+        self.assertEqual(status, "removed")
+        html = student.get(self.url("student_weak_points")).get_data(as_text=True)
+        self.assertIn("还没有薄弱点记录", html)
+
+        # 同一讲反复重批不会恢复
+        self._review_save()
+        con = self._db()
+        status = con.execute(
+            "SELECT status FROM student_weak_points "
+            "WHERE student_id=4 AND tag='氧化还原反应'").fetchone()[0]
+        con.close()
+        self.assertEqual(status, "removed")
+
+        # 新讲次再次做错 → 自动回退为薄弱
+        con = self._db()
+        con.execute("INSERT INTO lectures(id,course_id,title) VALUES(21,10,'第二讲')")
+        con.execute(
+            "INSERT INTO submissions(id,lecture_id,student_id,file_path,status)"
+            " VALUES(31,21,4,'b.pdf','待批改')")
+        con.execute(
+            "INSERT INTO questions(id,submission_id,no,verdict) VALUES(50,31,'1','错')")
+        con.execute(
+            "INSERT INTO question_tags(lecture_id,question_key,question_no,tag,source)"
+            " VALUES(21,'q0','1','氧化还原反应','ai')")
+        con.commit()
+        con.close()
+        self._post("submission_review_save",
+                   {"verdict_50": "错", "overall": "继续加油"}, sid=31)
+        con = self._db()
+        row = con.execute(
+            "SELECT status, wrong_count FROM student_weak_points "
+            "WHERE student_id=4 AND tag='氧化还原反应'").fetchone()
+        con.close()
+        self.assertEqual((row["status"], row["wrong_count"]), ("weak", 1))
+
+    def test_weak_point_galaxy_lights_weak_nodes_with_neighbors(self):
+        con = self._db()
+        con.execute("INSERT INTO knowledge_graphs(id,subject,name,created_by)"
+                    " VALUES(31,'化学','主图谱',2)")
+        con.executemany(
+            "INSERT INTO kg_nodes(id,graph_id,name,normalized,definition,category)"
+            " VALUES(?,31,?,?,?,?)",
+            [(600, "物质的量", "物质的量", "表示微粒集合体的物理量", "基本概念"),
+             (601, "氧化还原反应", "氧化还原反应", "有电子转移的反应", "化学反应"),
+             (602, "电化学", "电化学", "电能与化学能的转化", "化学反应")])
+        con.executemany(
+            "INSERT INTO kg_edges(graph_id,src_id,dst_id,relation) VALUES(31,?,?,?)",
+            [(600, 601, "prerequisite"), (601, 602, "prerequisite")])
+        con.executemany(
+            "INSERT INTO student_weak_points(student_id,course_id,graph_id,node_id,tag,"
+            "node_name,definition,status,wrong_count,partial_count,right_count,"
+            "total_count) VALUES(?,?,?,?,?,?,?,?,0,0,0,0)",
+            [(4, 10, 31, 601, "氧化还原反应", "氧化还原反应", "有电子转移的反应", "weak"),
+             (4, 10, 0, 0, "未匹配标签", "", "", "weak"),
+             (4, 10, 5, 100, "已删除节点", "", "", "weak")])
+        con.commit()
+        con.close()
+        resp = self.login(4).get(self.url("student_weak_points_galaxy"))
+        self.assertEqual(resp.status_code, 200)
+        courses = resp.get_json()["courses"]
+        self.assertEqual(len(courses), 1)
+        course = courses[0]
+        self.assertEqual(course["name"], "化学")
+        self.assertEqual(course["weak_total"], 3)
+        self.assertEqual(course["unmatched"], 2)
+        nodes = {n["name"]: n for n in course["nodes"]}
+        self.assertEqual(set(nodes), {"物质的量", "氧化还原反应", "电化学"})
+        self.assertTrue(nodes["氧化还原反应"]["weak"])
+        self.assertFalse(nodes["物质的量"]["weak"])
+        self.assertEqual(nodes["氧化还原反应"]["wrong_count"], 1)
+        self.assertEqual(nodes["氧化还原反应"]["key"], "n:31:601")
+        self.assertEqual(len(course["edges"]), 2)
+
+    def test_weak_point_galaxy_requires_student(self):
+        resp = self.client.get(self.url("student_weak_points_galaxy"))
+        self.assertEqual(resp.status_code, 403)
+
+    def _reveal_submission(self):
+        """把提交改成已批改，并补一道半对题与一道对题。"""
+        con = self._db()
+        con.execute("UPDATE submissions SET status='已批改' WHERE id=30")
+        con.execute(
+            "INSERT INTO questions(id,submission_id,no,verdict,ocr_text,ai_comment,"
+            "standard_answer,note) VALUES(41,30,'4','半对','第4题作答','条件写错',"
+            "'标准答案','')")
+        con.execute(
+            "INSERT INTO questions(id,submission_id,no,verdict) VALUES(42,30,'5','对')")
+        con.execute(
+            "INSERT INTO question_tags(lecture_id,question_key,question_no,tag,source)"
+            " VALUES(20,'q1','4','化学平衡','ai')")
+        con.commit()
+        con.close()
+
+    def test_wrong_questions_lists_revealed_wrong_and_partial(self):
+        self._reveal_submission()
+        html = self.login(4).get(
+            self.url("student_wrong_questions")).get_data(as_text=True)
+        self.assertIn("第 3 题", html)
+        self.assertIn("第 4 题", html)
+        self.assertNotIn("第 5 题", html)
+        self.assertIn("未配平", html)
+        self.assertIn("条件写错", html)
+        self.assertIn("标准答案", html)
+        self.assertIn("全部 2", html)
+        self.assertIn("错 1", html)
+        self.assertIn("半对 1", html)
+        self.assertIn("未复习 2", html)
+
+    def test_wrong_questions_hides_unpublished_results(self):
+        html = self.login(4).get(
+            self.url("student_wrong_questions")).get_data(as_text=True)
+        self.assertIn("还没有错题", html)
+
+    def test_wrong_questions_filter_by_tag(self):
+        self._reveal_submission()
+        html = self.login(4).get(self.url(
+            "student_wrong_questions", tags="化学平衡")).get_data(as_text=True)
+        self.assertIn("第 4 题", html)
+        self.assertNotIn("第 3 题", html)
+        self.assertIn("全部 1", html)
+
+    def test_wrong_question_review_mark_and_cancel(self):
+        self._reveal_submission()
+        student = self.login(4)
+        resp = self._post("student_question_review",
+                          {"question_id": "40", "status": "reviewed"},
+                          client=student)
+        self.assertEqual(resp.status_code, 302)
+        con = self._db()
+        row = con.execute("SELECT status FROM student_question_reviews "
+                          "WHERE student_id=4 AND question_id=40").fetchone()
+        con.close()
+        self.assertEqual(row["status"], "reviewed")
+        html = student.get(
+            self.url("student_wrong_questions")).get_data(as_text=True)
+        self.assertIn("已复习 1", html)
+        self._post("student_question_review",
+                   {"question_id": "40", "status": "open"}, client=student)
+        con = self._db()
+        row = con.execute("SELECT status FROM student_question_reviews "
+                          "WHERE student_id=4 AND question_id=40").fetchone()
+        con.close()
+        self.assertEqual(row["status"], "open")
+
+    def test_wrong_question_review_rejects_other_roles(self):
+        self._reveal_submission()
+        resp = self._post("student_question_review",
+                          {"question_id": "40", "status": "reviewed"})
+        self.assertEqual(resp.status_code, 403)
+        con = self._db()
+        count = con.execute(
+            "SELECT COUNT(*) FROM student_question_reviews").fetchone()[0]
         con.close()
         self.assertEqual(count, 0)
 

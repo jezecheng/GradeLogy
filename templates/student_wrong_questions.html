@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block title %}错题本 - 我的学习{% endblock %}
+{% block content %}
+<p>
+  <a href="{{ url_for('student_home') }}">← 返回我的学习</a> ·
+  <a href="{{ url_for('student_weak_points') }}">薄弱点图谱 →</a>
+</p>
+<h1>我的错题本</h1>
+<p class="muted">收录老师已公开批改结果中的错题和半对题；按讲次整理，可逐题标记复习状态。</p>
+
+{% set tags_arg = tag_filter | join(',') %}
+{% if tag_filter %}
+<div class="wq-tagbar">
+  正在查看知识点：
+  {% for t in tag_filter %}<span class="chip">{{ t }}</span>{% endfor %}
+  <a class="btn-link" href="{{ url_for('student_wrong_questions', course=filters.get('course'), verdict=verdict_filter or None, review=review_filter or None) }}">清除知识点筛选</a>
+</div>
+{% endif %}
+
+<div class="wp-filter" role="group" aria-label="按判定筛选">
+  <a class="wp-filter-btn {% if not verdict_filter %}is-active{% endif %}"
+     href="{{ url_for('student_wrong_questions', course=filters.get('course'), tags=tags_arg or None, review=review_filter or None) }}">全部 {{ counts.all }}</a>
+  <a class="wp-filter-btn {% if verdict_filter == '错' %}is-active{% endif %}"
+     href="{{ url_for('student_wrong_questions', course=filters.get('course'), tags=tags_arg or None, verdict='错', review=review_filter or None) }}">错 {{ counts.wrong }}</a>
+  <a class="wp-filter-btn {% if verdict_filter == '半对' %}is-active{% endif %}"
+     href="{{ url_for('student_wrong_questions', course=filters.get('course'), tags=tags_arg or None, verdict='半对', review=review_filter or None) }}">半对 {{ counts.partial }}</a>
+</div>
+<div class="wp-filter" role="group" aria-label="按复习状态筛选">
+  <a class="wp-filter-btn {% if review_filter == 'open' %}is-active{% endif %}"
+     href="{{ url_for('student_wrong_questions', course=filters.get('course'), tags=tags_arg or None, verdict=verdict_filter or None, review='open') }}">未复习 {{ counts.open }}</a>
+  <a class="wp-filter-btn {% if review_filter == 'reviewed' %}is-active{% endif %}"
+     href="{{ url_for('student_wrong_questions', course=filters.get('course'), tags=tags_arg or None, verdict=verdict_filter or None, review='reviewed') }}">已复习 {{ counts.reviewed }}</a>
+</div>
+{% if courses | length > 1 %}
+<div class="wp-filter" role="group" aria-label="按课程筛选">
+  <a class="wp-filter-btn {% if not filters.get('course') %}is-active{% endif %}"
+     href="{{ url_for('student_wrong_questions', tags=tags_arg or None, verdict=verdict_filter or None, review=review_filter or None) }}">全部课程</a>
+  {% for c in courses %}
+  <a class="wp-filter-btn {% if filters.get('course') == c.id | string %}is-active{% endif %}"
+     href="{{ url_for('student_wrong_questions', course=c.id, tags=tags_arg or None, verdict=verdict_filter or None, review=review_filter or None) }}">{{ c.name }} {{ c.count }}</a>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if by_course %}
+{% for group in by_course %}
+<details class="card wq-course" open>
+  <summary class="card-head">
+    <h2>{{ group.name }}</h2>
+    <span class="muted small">{{ group.count }} 道</span>
+  </summary>
+  {% for lecture in group.lectures %}
+  <div class="wq-lecture">
+    <div class="wq-lecture-head">
+      <strong>{{ lecture.title }}</strong>
+      <span class="muted small">{{ lecture.submitted_at[:10] if lecture.submitted_at else '' }} · {{ lecture.questions | length }} 道</span>
+      <a class="btn-link" href="{{ url_for('student_lecture_page', hid=lecture.id) }}">回看讲次</a>
+    </div>
+    {% for q in lecture.questions %}
+    <div class="wq-item">
+      <div class="wq-head">
+        <strong>第 {{ q.no }} 题</strong>
+        <span class="verdict verdict-{{ 'wrong' if q.verdict == '错' else 'partial' }}">{{ q.verdict }}</span>
+        {% for t in q.tags %}<span class="chip">{{ t }}</span>{% endfor %}
+        {% if q.reviewed %}<span class="tag tag-已提交">已复习</span>{% endif %}
+      </div>
+      {% if q.ocr_text %}
+      <div class="wq-block">
+        <span class="wq-label">我的作答</span>
+        <pre class="wq-text">{{ q.ocr_text }}</pre>
+      </div>
+      {% endif %}
+      {% if q.ai_comment or q.note %}
+      <div class="wq-block">
+        <span class="wq-label">老师评语</span>
+        <p class="wq-text">{{ q.ai_comment or q.note }}</p>
+      </div>
+      {% endif %}
+      {% if q.standard_answer %}
+      <details class="wq-answer">
+        <summary>查看标准答案</summary>
+        <pre class="wq-text">{{ q.standard_answer }}</pre>
+      </details>
+      {% endif %}
+      <div class="wq-foot">
+        <span class="muted small">提交于 {{ q.submitted_at[:10] if q.submitted_at else '' }}</span>
+        <form method="post" action="{{ url_for('student_question_review') }}" class="wq-review-form">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <input type="hidden" name="question_id" value="{{ q.id }}">
+          <input type="hidden" name="status" value="{{ 'open' if q.reviewed else 'reviewed' }}">
+          {% for key, value in filters.items() %}
+          <input type="hidden" name="{{ key }}" value="{{ value }}">
+          {% endfor %}
+          <button type="submit" class="btn-link">{{ '取消已复习' if q.reviewed else '标记已复习' }}</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+</details>
+{% endfor %}
+{% else %}
+<div class="card">
+  {% if filters %}
+  <p class="muted">当前筛选下没有错题。<a href="{{ url_for('student_wrong_questions') }}">查看全部错题 →</a></p>
+  {% else %}
+  <p class="muted">还没有错题。老师完成批改并公开结果后，错题和半对题会自动收进这里。</p>
+  {% endif %}
+</div>
+{% endif %}
+
+<style>
+.wq-tagbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+             margin: 4px 0 10px; font-size: 13px; }
+.wp-filter { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 12px; }
+.wp-filter-btn { border: 1px solid #d0d5de; background: #fff; border-radius: 999px;
+                 padding: 4px 12px; font-size: 13px; color: #4b5563;
+                 text-decoration: none; }
+.wp-filter-btn.is-active { background: #1456f0; border-color: #1456f0; color: #fff; }
+.wq-course > summary { cursor: pointer; list-style: none; display: flex;
+                       align-items: baseline; gap: 10px; margin-bottom: 6px;
+                       justify-content: flex-start; color: #1f2937; }
+.wq-course > summary::-webkit-details-marker { display: none; }
+.wq-course > summary::before { content: '▸'; color: #8a8f99; font-size: 12px;
+                               transition: transform .15s; }
+.wq-course[open] > summary::before { transform: rotate(90deg); }
+.wq-course > summary .muted { margin-left: auto; }
+.wq-course > summary h2 { margin: 0; }
+.wq-lecture { border-top: 1px solid #eef0f3; padding: 10px 0 2px; }
+.wq-lecture:first-of-type { border-top: 0; }
+.wq-lecture-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.wq-item { border: 1px solid #e3e7ee; border-radius: 8px; padding: 10px 12px;
+           margin: 8px 0 10px; }
+.wq-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.wq-block { margin: 6px 0; }
+.wq-label { display: block; font-size: 12px; color: #8a8f99; margin-bottom: 2px; }
+.wq-text { margin: 0; white-space: pre-wrap; word-break: break-word;
+           font-family: inherit; font-size: 13px; line-height: 1.55;
+           background: #f7f8fa; border-radius: 6px; padding: 6px 8px; }
+.wq-answer { margin: 6px 0; }
+.wq-answer > summary { cursor: pointer; font-size: 13px; color: #1456f0; }
+.wq-foot { display: flex; align-items: center; justify-content: space-between;
+           gap: 10px; margin-top: 6px; }
+</style>
+{% endblock %}

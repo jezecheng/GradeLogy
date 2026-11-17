@@ -230,6 +230,7 @@ CREATE TABLE IF NOT EXISTS student_weak_points(
   definition TEXT DEFAULT '',
   source_submission_id INTEGER DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'weak',
+  status_lecture_id INTEGER DEFAULT 0,
   wrong_count INTEGER DEFAULT 0,
   partial_count INTEGER DEFAULT 0,
   right_count INTEGER DEFAULT 0,
@@ -241,6 +242,16 @@ CREATE TABLE IF NOT EXISTS student_weak_points(
   UNIQUE(student_id, course_id, tag));
 CREATE INDEX IF NOT EXISTS idx_swp_student_course ON student_weak_points(student_id, course_id);
 CREATE INDEX IF NOT EXISTS idx_swp_student_status ON student_weak_points(student_id, status);
+-- 学生错题本的复习标记：按题记录是否已复习，与批改结果分开保存
+CREATE TABLE IF NOT EXISTS student_question_reviews(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  student_id INTEGER NOT NULL,
+  question_id INTEGER NOT NULL REFERENCES questions(id),
+  status TEXT NOT NULL DEFAULT 'open',
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(student_id, question_id));
+CREATE INDEX IF NOT EXISTS idx_sqr_student_status
+  ON student_question_reviews(student_id, status);
 -- 学科知识图谱：图本身、原始资料、切块文本、概念节点与前置/包含/相关边
 -- 全部驻留 data.sqlite；资料文件位于 uploads/kg/<graph_id>/，随备份包一起迁移
 CREATE TABLE IF NOT EXISTS knowledge_graphs(
@@ -458,6 +469,14 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=()):
                 "tag_horizontal_prompt_id", "tag_vertical_prompt_id"):
         if col not in ccols:
             con.execute(f"ALTER TABLE courses ADD COLUMN {col} INTEGER DEFAULT 0")
+    # 轻量迁移：薄弱点记录「状态设定时所在的讲次」，用于区分同一讲重批与后续新讲次
+    wcols = {r[1] for r in con.execute("PRAGMA table_info(student_weak_points)")}
+    if wcols and "status_lecture_id" not in wcols:
+        con.execute("ALTER TABLE student_weak_points "
+                    "ADD COLUMN status_lecture_id INTEGER DEFAULT 0")
+        con.execute(
+            "UPDATE student_weak_points SET status_lecture_id=COALESCE("
+            "(SELECT lecture_id FROM submissions WHERE id=source_submission_id), 0)")
     # 轻量迁移：提示词类型从「批改/报告」扩展到知识点分析，移除旧 CHECK 约束
     prompt_sql = con.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='prompts'").fetchone()

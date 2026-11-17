@@ -823,6 +823,32 @@ button.btn-link:hover { text-decoration: underline; }
 .kg-galaxy-legend i.contains { border-top-style: dashed; border-color: #34d399; }
 .kg-galaxy-legend i.related { border-top-color: rgba(148, 163, 184, .55); }
 .kg-galaxy-hint { margin-left: auto; color: #64748b; font-size: 12px; }
+.kg-galaxy-crumb-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.kg-galaxy-back {
+  border: 1px solid rgba(125, 211, 252, .35);
+  background: rgba(14, 165, 233, .12);
+  border-radius: 999px;
+  padding: 3px 12px;
+  font: inherit;
+  font-size: 12px;
+  color: #7dd3fc;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.kg-galaxy-back:hover:not(:disabled) {
+  border-color: rgba(125, 211, 252, .7);
+  background: rgba(14, 165, 233, .22);
+  color: #bae6fd;
+}
+.kg-galaxy-back:disabled {
+  opacity: .35;
+  cursor: default;
+}
 .kg-galaxy-crumbs {
   display: flex;
   align-items: center;

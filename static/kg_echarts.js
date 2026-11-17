@@ -8,6 +8,7 @@
   var errorBox = document.getElementById('kg-galaxy-error');
   var categoryBox = document.getElementById('kg-galaxy-categories');
   var crumbsBox = document.getElementById('kg-galaxy-crumbs');
+  var backBtn = document.getElementById('kg-galaxy-back');
   var hintBox = shell.querySelector('.kg-galaxy-hint');
   var nodeTable = document.getElementById('kg-node-table');
   var nodeBody = document.getElementById('kg-node-body');
@@ -627,6 +628,7 @@
   // ---- 面包屑与提示 ----
 
   function renderCrumbs() {
+    if (backBtn) backBtn.disabled = viewStack.length <= 1;
     if (!crumbsBox) return;
     var html = viewStack.map(function (view, index) {
       var current = index === viewStack.length - 1;
@@ -652,6 +654,14 @@
       ? '点击星团逐层下钻 · 滚轮缩放 · 拖拽平移'
       : '滚轮缩放 · 拖拽平移 · 前 50 个枢纽显示标签';
   }
+
+  function goUp() {
+    if (viewStack.length <= 1) return;
+    viewStack = viewStack.slice(0, -1);
+    renderView();
+  }
+
+  if (backBtn) backBtn.addEventListener('click', goUp);
 
   // ---- 交互 ----
 

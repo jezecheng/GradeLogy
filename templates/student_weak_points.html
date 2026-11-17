@@ -2,29 +2,77 @@
 {% block title %}我的薄弱点图谱{% endblock %}
 {% block content %}
 <h1>我的薄弱点图谱</h1>
-<p class="muted">由每次作业人工复核后自动更新，记录你在各知识点上的表现。你可以标记「已复习」或「已掌握」来管理复习进度。</p>
+<p class="muted">由每次作业人工复核后自动更新。同一知识点下的多个标签已合并，统计为各讲最近一次判定；你可以标记「已复习」或「已掌握」来管理复习进度。</p>
 
 {% if by_course %}
+<details class="card wp-galaxy-card" open>
+  <summary class="card-head">
+    <h2>薄弱点星图 <span class="muted small">（只点亮需要复习的知识点）</span></h2>
+  </summary>
+  <div class="kg-galaxy-shell" id="wp-galaxy-shell"
+       data-url="{{ url_for('student_weak_points_galaxy') }}">
+    <div class="kg-galaxy-toolbar">
+      <div class="kg-galaxy-toolbar-row">
+        <div class="kg-galaxy-legend" aria-hidden="true">
+          <span><i class="wp-lit-weak"></i>薄弱</span>
+          <span><i class="wp-lit-reviewed"></i>已复习</span>
+          <span><i class="wp-lit-mastered"></i>已掌握</span>
+          <span><i class="wp-lit-context"></i>背景知识</span>
+        </div>
+        <span class="kg-galaxy-hint">点击亮点可定位到下方卡片 · 滚轮缩放 · 拖拽平移</span>
+      </div>
+      <div class="wp-galaxy-courses" id="wp-galaxy-courses"></div>
+    </div>
+    <div class="kg-galaxy wp-galaxy" id="wp-galaxy" role="img"
+         aria-label="薄弱知识点星图"></div>
+    <div class="kg-galaxy-loading" id="wp-galaxy-loading">正在点亮薄弱知识点…</div>
+    <div class="kg-galaxy-error" id="wp-galaxy-error" hidden>
+      星图加载失败，可先查看下方薄弱点列表。
+    </div>
+  </div>
+  <p class="muted small" id="wp-galaxy-note" hidden></p>
+</details>
+
+<div class="wp-filter" role="group" aria-label="按复习状态筛选">
+  <button type="button" class="wp-filter-btn is-active" data-filter="all">全部 {{ counts.all }}</button>
+  <button type="button" class="wp-filter-btn" data-filter="weak">待复习 {{ counts.weak }}</button>
+  <button type="button" class="wp-filter-btn" data-filter="reviewed">已复习 {{ counts.reviewed }}</button>
+  <button type="button" class="wp-filter-btn" data-filter="mastered">已掌握 {{ counts.mastered }}</button>
+</div>
+
 {% for cid, group in by_course.items() %}
-<div class="card" style="margin-bottom:18px">
-  <h2>{{ group.name }}</h2>
+<details class="card wp-course" open>
+  <summary class="wp-course-head">
+    <h2>{{ group.name }}</h2>
+    <span class="muted small">{{ group.weak_points | length }} 个知识点</span>
+  </summary>
   {% for w in group.weak_points %}
-  <div class="weak-point-card" data-status="{{ w.status }}">
+  <div class="weak-point-card" data-status="{{ w.status }}" data-group="{{ w.key }}">
     <div class="wp-head">
-      <span class="wp-tag">{{ w.node_name or w.tag }}</span>
-      {% if w.status == 'weak' %}
-      <span class="tag tag-未提交">薄弱</span>
-      {% elif w.status == 'reviewed' %}
-      <span class="tag" style="background:#fff4e0;color:#b25e09">已复习</span>
-      {% else %}
-      <span class="tag tag-已提交">已掌握</span>
-      {% endif %}
+      <span class="wp-tag">{{ w.title }}</span>
+      <span class="wp-head-right">
+        {% if w.status == 'weak' %}
+        <span class="tag tag-未提交">薄弱</span>
+        {% elif w.status == 'reviewed' %}
+        <span class="tag" style="background:#fff4e0;color:#b25e09">已复习</span>
+        {% else %}
+        <span class="tag tag-已提交">已掌握</span>
+        {% endif %}
+        <form method="post" action="{{ url_for('student_weak_point_remove') }}"
+              class="wp-remove-form"
+              onsubmit="return confirm('确定移除这个薄弱点？后续讲次再做错会自动恢复。');">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <input type="hidden" name="course_id" value="{{ w.course_id }}">
+          <input type="hidden" name="group" value="{{ w.key }}">
+          <button type="submit">移除</button>
+        </form>
+      </span>
     </div>
     {% if w.definition %}
     <p class="muted small" style="margin:4px 0">{{ w.definition }}</p>
     {% endif %}
     <div class="wp-stats small">
-      判定统计：
+      累计判定：
       <span style="color:#18794e">✓对 {{ w.right_count }}</span> ·
       <span style="color:#b25e09">◐半对 {{ w.partial_count }}</span> ·
       <span style="color:#c93338">✗错 {{ w.wrong_count }}</span>
@@ -33,6 +81,9 @@
       <span class="muted">· 最近出现 {{ w.last_seen_at[:10] }}</span>
       {% endif %}
     </div>
+    {% if w.tags | length > 1 %}
+    <p class="small muted" style="margin:4px 0">合并标签：{{ w.tags | join('、') }}</p>
+    {% endif %}
     {% if w.prerequisites %}
     <div class="wp-prereqs small">
       <strong>前置知识：</strong>
@@ -41,23 +92,53 @@
       {% endfor %}
     </div>
     {% endif %}
-    {% if w.student_note %}
-    <p class="small muted" style="margin:6px 0"><strong>我的备注：</strong>{{ w.student_note }}</p>
+    {% if w.note %}
+    <p class="small muted" style="margin:6px 0"><strong>我的备注：</strong>{{ w.note }}</p>
     {% endif %}
-    <form method="post" action="{{ url_for('student_weak_point_status', wid=w.id) }}" class="wp-status-form">
+    <p class="small" style="margin:6px 0">
+      <a class="btn-link" href="{{ url_for('student_wrong_questions', course=cid, tags=w.tags | join(',')) }}">查看相关错题 →</a>
+    </p>
+    <form method="post" action="{{ url_for('student_weak_point_status') }}" class="wp-status-form">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <input type="hidden" name="course_id" value="{{ w.course_id }}">
+      <input type="hidden" name="group" value="{{ w.key }}">
       <select name="status">
         <option value="weak" {% if w.status=='weak' %}selected{% endif %}>薄弱</option>
         <option value="reviewed" {% if w.status=='reviewed' %}selected{% endif %}>已复习</option>
         <option value="mastered" {% if w.status=='mastered' %}selected{% endif %}>已掌握</option>
       </select>
-      <input type="text" name="note" placeholder="备注（可选）" value="{{ w.student_note }}" style="flex:1;min-width:120px">
+      <input type="text" name="note" placeholder="备注（可选）" value="{{ w.note }}" style="flex:1;min-width:120px">
       <button type="submit" class="small">保存</button>
     </form>
   </div>
   {% endfor %}
-</div>
+</details>
 {% endfor %}
+
+<script>
+(function () {
+  var buttons = Array.prototype.slice.call(document.querySelectorAll('.wp-filter-btn'));
+  var cards = Array.prototype.slice.call(document.querySelectorAll('.weak-point-card'));
+  buttons.forEach(function (button) {
+    button.addEventListener('click', function () {
+      var filter = button.dataset.filter;
+      buttons.forEach(function (item) {
+        item.classList.toggle('is-active', item === button);
+      });
+      cards.forEach(function (card) {
+        card.hidden = filter !== 'all' && card.dataset.status !== filter;
+      });
+      if (filter !== 'all') {
+        Array.prototype.forEach.call(document.querySelectorAll('.wp-course'), function (course) {
+          course.open = true;
+        });
+      }
+    });
+  });
+})();
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+<script defer src="{{ url_for('static', filename='weak_galaxy.js') }}"></script>
 {% else %}
 <div class="card">
   <p class="muted">还没有薄弱点记录。完成作业并经老师复核后，薄弱知识点会自动出现在这里。</p>
@@ -65,14 +146,54 @@
 {% endif %}
 
 <style>
+.wp-filter { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 14px; }
+.wp-filter-btn { border: 1px solid #d0d5de; background: #fff; border-radius: 999px;
+                 padding: 4px 12px; font-size: 13px; color: #4b5563; cursor: pointer; }
+.wp-filter-btn.is-active { background: #1456f0; border-color: #1456f0; color: #fff; }
+.wp-course > summary { cursor: pointer; list-style: none; display: flex;
+                       align-items: baseline; gap: 10px; margin-bottom: 8px;
+                       color: #1f2937; }
+.wp-course > summary::-webkit-details-marker { display: none; }
+.wp-course > summary::before { content: '▸'; color: #8a8f99; font-size: 12px;
+                               transition: transform .15s; }
+.wp-course[open] > summary::before { transform: rotate(90deg); }
+.wp-course-head h2 { margin: 0; }
+.wp-course-head .muted { margin-left: auto; }
 .weak-point-card { border: 1px solid #e3e7ee; border-radius: 8px; padding: 12px;
                    margin-bottom: 10px; }
 .wp-head { display: flex; align-items: center; justify-content: space-between; }
+.wp-head-right { display: flex; align-items: center; gap: 8px; }
+.wp-remove-form { margin: 0; }
+.wp-remove-form button { border: 1px solid #e6c9cb; background: #fff; color: #c93338;
+                         border-radius: 6px; padding: 1px 8px; font-size: 12px;
+                         line-height: 1.6; cursor: pointer; }
+.wp-remove-form button:hover { background: #fdecec; }
 .wp-tag { font-weight: 600; font-size: 16px; }
 .wp-stats { margin: 6px 0; }
 .wp-prereqs { margin: 6px 0; }
 .wp-status-form { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
 .wp-status-form select, .wp-status-form input { padding: 4px 8px; border: 1px solid #d0d5de;
                                                 border-radius: 6px; font-size: 13px; }
+.wp-status-form select { width: auto; flex: 0 0 auto; }
+.wp-status-form input[type=text] { width: auto; flex: 1; }
+.wp-galaxy-card > summary { cursor: pointer; list-style: none; }
+.wp-galaxy-card > summary::-webkit-details-marker { display: none; }
+.wp-galaxy { height: min(56vh, 520px); min-height: 360px; }
+.wp-galaxy-courses { display: flex; gap: 8px; flex-wrap: wrap; }
+.wp-galaxy-course { border: 1px solid rgba(125, 211, 252, .35);
+                    background: rgba(14, 165, 233, .12); border-radius: 999px;
+                    padding: 3px 12px; font: inherit; font-size: 12px;
+                    color: #7dd3fc; cursor: pointer; }
+.wp-galaxy-course.is-active { background: #7dd3fc; border-color: #7dd3fc;
+                              color: #082f49; font-weight: 600; }
+.kg-galaxy-legend i.wp-lit-weak,
+.kg-galaxy-legend i.wp-lit-reviewed,
+.kg-galaxy-legend i.wp-lit-mastered,
+.kg-galaxy-legend i.wp-lit-context { width: 9px; height: 9px; border: 0; border-radius: 50%; }
+.kg-galaxy-legend i.wp-lit-weak { background: #fb923c; box-shadow: 0 0 10px #fb923c; }
+.kg-galaxy-legend i.wp-lit-reviewed { background: #fbbf24; box-shadow: 0 0 8px #fbbf24; }
+.kg-galaxy-legend i.wp-lit-mastered { background: #34d399; box-shadow: 0 0 8px #34d399; }
+.kg-galaxy-legend i.wp-lit-context { background: #475569; }
+.weak-point-card.is-focus { box-shadow: 0 0 0 2px #f59e0b; }
 </style>
 {% endblock %}
