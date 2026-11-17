@@ -120,13 +120,33 @@
 {% if g.user and g.user.role == 'teacher' %}
 <script>
 // 后台任务队列：顶部图标 + 悬停/点按查看排队中与进行中的所有 AI 任务，
-// 并在任务完成时弹出右上角提示。
+// 并在任务完成时弹出右上角提示。已弹过的 toast 会持久化到 localStorage，
+// 刷新页面后不再重复弹出；弹窗内始终展示最近 8 条已完成任务及时间。
 (function () {
   var box = document.getElementById('grading-queue');
   if (!box) return;
   var list = box.querySelector('[data-grading-list]');
   var count = box.querySelector('[data-grading-count]');
-  var seenFinished = {};
+  var STORAGE_KEY = 'gradelogy.seen_finished_tasks';
+  var seenFinished = loadSeen();
+
+  function loadSeen() {
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch (e) { return {}; }
+  }
+  function saveSeen() {
+    try {
+      // 只保留最近 200 条，避免无限增长
+      var keys = Object.keys(seenFinished);
+      if (keys.length > 200) {
+        keys.sort(function (a, b) { return seenFinished[b] - seenFinished[a]; });
+        keys.slice(200).forEach(function (k) { delete seenFinished[k]; });
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(seenFinished));
+    } catch (e) {}
+  }
 
   function showToast(job) {
     var container = document.getElementById('ai-toast-container');
@@ -152,11 +172,21 @@
     }, 4200);
   }
 
+  function fmtTime(s) {
+    if (!s) return '';
+    // finished_at 形如 "2026-11-17 14:30:00"，取 mm-dd HH:MM 即可
+    var m = /(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(s);
+    if (m) return m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5];
+    return s.slice(0, 16);
+  }
+
   function render(data) {
     box.hidden = !data.active;
     if (!data.active) { count.hidden = true; }
     else { count.hidden = false; count.textContent = data.jobs.length; }
     list.textContent = '';
+
+    // 进行中/排队中
     data.jobs.forEach(function (job) {
       var li = document.createElement('li');
       li.className = 'grading-queue-item';
@@ -176,9 +206,33 @@
       li.appendChild(item);
       list.appendChild(li);
     });
+
+    // 最近完成（用于弹窗展示历史与时间）
+    (data.recent || []).forEach(function (job) {
+      var li = document.createElement('li');
+      li.className = 'grading-queue-item grading-queue-item-finished';
+      var item = document.createElement(job.url ? 'a' : 'span');
+      if (job.url) item.href = job.url;
+      var state = document.createElement('span');
+      state.className = 'grading-queue-state ' + job.status;
+      state.textContent = job.status === 'success' ? '完成' : '失败';
+      var label = document.createElement('strong');
+      label.textContent = job.label;
+      var meta = document.createElement('span');
+      meta.className = 'muted small';
+      meta.textContent = ' · ' + job.title + (job.finished_at ? ' · ' + fmtTime(job.finished_at) : '');
+      item.appendChild(state);
+      item.appendChild(label);
+      item.appendChild(meta);
+      li.appendChild(item);
+      list.appendChild(li);
+    });
+
+    // 60 秒内新完成的任务弹 toast（刷新后已弹过的不重复弹）
     (data.finished || []).forEach(function (job) {
       if (!seenFinished[job.id]) {
-        seenFinished[job.id] = true;
+        seenFinished[job.id] = Date.now();
+        saveSeen();
         showToast(job);
       }
     });
@@ -212,7 +266,52 @@
         crossorigin="anonymous"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
         integrity="sha384-43gviWU0YVjaDtb/GhzOouOXtZMP/7XUzwPTstBeZFe/+rCMvRwr4yROQP43s0Xk"
-        crossorigin="anonymous"
-        onload="if(window.renderMathInElement){document.querySelectorAll('.report-body,.lecture-summary-body,.tag-analysis-body,.knowledge-graph-analysis,.markdown-body,.question-comment').forEach(function(el){renderMathInElement(el,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}],throwOnError:false});});}"></script>
+        crossorigin="anonymous"></script>
+<script>
+// KaTeX 渲染入口：等 auto-render 加载完成后再渲染目标元素。
+// 不依赖 defer 脚本的 onload（iOS Safari 下不可靠），改用轮询等待 renderMathInElement。
+(function () {
+  var SELECTORS = '.report-body,.lecture-summary-body,.tag-analysis-body,'
+                + '.knowledge-graph-analysis,.markdown-body,.question-comment';
+  var rendered = new WeakSet();
+
+  function renderKatex() {
+    if (typeof window.renderMathInElement !== 'function') return false;
+    var nodes = document.querySelectorAll(SELECTORS);
+    nodes.forEach(function (el) {
+      if (rendered.has(el)) return;
+      try {
+        window.renderMathInElement(el, {
+          delimiters: [
+            {left: '$$', right: '$$', display: true},
+            {left: '$', right: '$', display: false}
+          ],
+          throwOnError: false
+        });
+        rendered.add(el);
+      } catch (e) { /* 单节点失败不影响其他 */ }
+    });
+    return true;
+  }
+
+  function waitAndRender() {
+    if (renderKatex()) return;
+    var tries = 0;
+    var timer = setInterval(function () {
+      tries += 1;
+      if (renderKatex() || tries > 100) clearInterval(timer);
+    }, 50);
+  }
+
+  // 暴露给动态内容（如局部刷新）手动触发重新渲染
+  window.renderKatex = renderKatex;
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', waitAndRender);
+  } else {
+    waitAndRender();
+  }
+})();
+</script>
 </body>
 </html>

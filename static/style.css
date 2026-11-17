@@ -47,6 +47,9 @@ a:hover { text-decoration: underline; }
   border-radius: 999px; font-size: 11px; font-weight: 700; }
 .grading-queue-state.running { background: #e8f1ff; color: #1456f0; }
 .grading-queue-state.queued { background: #fff3e2; color: #a35a00; }
+.grading-queue-state.success { background: #e6f6ec; color: #18794e; }
+.grading-queue-state.failed { background: #fdecec; color: #c93338; }
+.grading-queue-item-finished a, .grading-queue-item-finished > span { color: #5b6472; }
 .grading-queue-pop .small { margin: 8px 0 0; }
 .ai-toast-container { position: fixed; top: 64px; right: 16px; z-index: 9999;
   display: flex; flex-direction: column; gap: 8px; max-width: 360px; }

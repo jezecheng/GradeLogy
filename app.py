@@ -2567,7 +2567,8 @@ def submission_grading_status(sid):
 @role_required("teacher")
 def grading_queue():
     """教师导航栏的后台任务队列：返回自己名下所有排队中/进行中的 AI 任务，
-    以及最近 60 秒内完成的任务（供前端弹出完成提示）。"""
+    最近 60 秒内完成的任务（供前端弹出完成提示），以及最近若干条已完成任务
+    （供弹窗展示历史）。"""
     db = get_db()
     rows = db.execute(
         "SELECT o.id,o.operation_type,o.status,o.started_at,o.finished_at,o.error,"
@@ -2588,9 +2589,8 @@ def grading_queue():
 
     jobs = [_queue_job(r) for r in rows]
 
-    # 最近 60 秒内完成的任务，用于前端 toast
-    finished = db.execute(
-        "SELECT o.id,o.operation_type,o.status,o.error,o.course_id,"
+    _FINISHED_SQL = (
+        "SELECT o.id,o.operation_type,o.status,o.error,o.finished_at,o.course_id,"
         "COALESCE(o.lecture_id, s.lecture_id) AS lecture_id,"
         "o.submission_id,o.material_id,"
         "COALESCE(u.display_name,'未知学生') AS student_name,"
@@ -2605,14 +2605,25 @@ def grading_queue():
         "LEFT JOIN kg_materials m ON m.id=o.material_id "
         "LEFT JOIN knowledge_graphs g ON g.id=m.graph_id "
         "WHERE o.teacher_id=? AND o.status IN ('success','failed') "
-        "AND o.finished_at IS NOT NULL "
-        "AND julianday('now') - julianday(o.finished_at) < 60/86400.0 "
-        "ORDER BY o.id DESC LIMIT 20", (g.user["id"],)).fetchall()
+        "AND o.finished_at IS NOT NULL ")
+
+    # 最近 60 秒内完成的任务，用于前端 toast 提示
+    finished = db.execute(
+        _FINISHED_SQL
+        + "AND julianday('now') - julianday(o.finished_at) < 60/86400.0 "
+        + "ORDER BY o.id DESC LIMIT 20", (g.user["id"],)).fetchall()
     finished_jobs = [_queue_job(r, finished=True) for r in finished]
+
+    # 最近 8 条已完成任务（不限时间），用于弹窗展示历史与时间
+    recent = db.execute(
+        _FINISHED_SQL
+        + "ORDER BY o.id DESC LIMIT 8", (g.user["id"],)).fetchall()
+    recent_jobs = [_queue_job(r, finished=True) for r in recent]
 
     return jsonify({
         "jobs": jobs,
         "finished": finished_jobs,
+        "recent": recent_jobs,
         "active": bool(jobs),
         "queued": sum(1 for j in jobs if j["status"] == "queued"),
         "running": sum(1 for j in jobs if j["status"] == "running"),
@@ -2655,6 +2666,7 @@ def _queue_job(r, finished=False):
     }
     if finished:
         item["error"] = r["error"] or ""
+        item["finished_at"] = (r["finished_at"] or "")[:19]
     return item
 
 
