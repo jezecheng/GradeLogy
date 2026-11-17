@@ -137,7 +137,24 @@ def _overall_text(detail, fallback=""):
 
 
 def render_markdown(md):
-    """把报告用的极简 Markdown（标题/表格/列表/粗体）渲染成 HTML，避免引入额外依赖。"""
+    """把报告用的极简 Markdown（标题/表格/列表/粗体）渲染成 HTML，避免引入额外依赖。
+
+    支持轻量 LaTeX：行内 ``$...$`` 与块级 ``$$...$$`` 会原样保留，交给前端 KaTeX
+    渲染；在 Markdown 转义阶段用占位符保护，避免 ``&`` ``<`` ``>`` 被破坏。
+    """
+    # 1) 先把所有数学片段抽出来，用占位符替换，避免被转义/被加粗等正则误伤
+    math_store = {}
+
+    def _stash(m):
+        key = f"\x00MATH{len(math_store)}\x00"
+        math_store[key] = m.group(0)
+        return key
+
+    # 块级 $$...$$（允许跨行），必须在行内 $ 之前处理
+    text = re.sub(r"\$\$[\s\S]+?\$\$", _stash, md or "")
+    # 行内 $...$（不跨行、不含 $）
+    text = re.sub(r"\$[^$\n]+\$", _stash, text)
+
     esc = lambda s: (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
     def inline(text):
@@ -145,9 +162,18 @@ def render_markdown(md):
         s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
         s = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)",
                    r'<a href="\2" target="_blank" rel="noopener">\1</a>', s)
-        return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
+        s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
+        return s
 
-    lines = (md or "").splitlines()
+    def _restore(s):
+        """把占位符换回原始数学片段（不转义）。"""
+        for key, raw in math_store.items():
+            if key in s:
+                s = s.replace(esc(key), raw)
+                s = s.replace(key, raw)
+        return s
+
+    lines = text.splitlines()
     html, i = [], 0
     while i < len(lines):
         line = lines[i]
@@ -169,7 +195,7 @@ def render_markdown(md):
                 quotes.append(lines[i].lstrip(">").strip())
                 i += 1
             html.append("<blockquote>"
-                        + "".join(f"<p>{inline(x)}</p>" for x in quotes if x)
+                        + "".join(f"<p>{_restore(inline(x))}</p>" for x in quotes if x)
                         + "</blockquote>")
             continue
         if re.fullmatch(r"-{3,}|\*{3,}", line.strip()):
@@ -178,12 +204,12 @@ def render_markdown(md):
             continue
         if line.startswith("#"):
             level = len(line) - len(line.lstrip("#"))
-            html.append(f"<h{min(level, 4)}>{inline(line[level:].strip())}</h{min(level, 4)}>")
+            html.append(f"<h{min(level, 4)}>{_restore(inline(line[level:].strip()))}"
+                        f"</h{min(level, 4)}>")
             i += 1
             continue
         if line.startswith("|") and i + 1 < len(lines) and re.match(r"^\|[\s:|-]+\|$", lines[i + 1]):
             rows = []
-            # 保存表头行（否则第一行数据会被误标为 <th>）
             rows.append([c.strip() for c in line.strip().strip("|").split("|")])
             i += 2
             while i < len(lines) and lines[i].startswith("|"):
@@ -192,7 +218,9 @@ def render_markdown(md):
             html.append("<table class='report-table'>")
             for r, cells in enumerate(rows):
                 tag = "th" if r == 0 else "td"
-                html.append("<tr>" + "".join(f"<{tag}>{inline(c)}</{tag}>" for c in cells) + "</tr>")
+                html.append("<tr>"
+                            + "".join(f"<{tag}>{_restore(inline(c))}</{tag}>" for c in cells)
+                            + "</tr>")
             html.append("</table>")
             continue
         if re.match(r"^\d+\.\s", line):
@@ -200,15 +228,17 @@ def render_markdown(md):
             while i < len(lines) and re.match(r"^\d+\.\s", lines[i]):
                 items.append(re.sub(r"^\d+\.\s", "", lines[i]))
                 i += 1
-            html.append("<ol>" + "".join(f"<li>{inline(x)}</li>" for x in items) + "</ol>")
+            html.append("<ol>" + "".join(f"<li>{_restore(inline(x))}</li>" for x in items)
+                        + "</ol>")
             continue
         if line.startswith("- "):
             items = []
             while i < len(lines) and lines[i].startswith("- "):
                 items.append(lines[i][2:])
                 i += 1
-            html.append("<ul>" + "".join(f"<li>{inline(x)}</li>" for x in items) + "</ul>")
+            html.append("<ul>" + "".join(f"<li>{_restore(inline(x))}</li>" for x in items)
+                        + "</ul>")
             continue
-        html.append(f"<p>{inline(line)}</p>")
+        html.append(f"<p>{_restore(inline(line))}</p>")
         i += 1
     return "\n".join(html)

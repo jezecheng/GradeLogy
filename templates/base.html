@@ -8,6 +8,9 @@
   <title>{% block title %}教学管理平台{% endblock %}</title>
   <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" sizes="any">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css"
+        integrity="sha384-nB0miv6/jRmo5UMMR1wu3Gz6NLsoTkbqJghGIsx//Rlm+ZU03BU6SQNC66uf4l5+"
+        crossorigin="anonymous">
 </head>
 <body>
 {% if g.user %}
@@ -203,5 +206,13 @@
 <div id="ai-toast-container" class="ai-toast-container"></div>
 {% include "_assistant.html" %}
 {% block scripts %}{% endblock %}
+<!-- KaTeX 轻量数学/化学式渲染：行内 $...$、块级 $$...$$ -->
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"
+        integrity="sha384-7zkQWkzuo3B5mTepMUcHkMB5jZaolc2xDwL6VFqjFALcbeS9Ggm/Yr2r3Dy4lfFg"
+        crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+        integrity="sha384-43gviWU0YVjaDtb/GhzOouOXtZMP/7XUzwPTstBeZFe/+rCMvRwr4yROQP43s0Xk"
+        crossorigin="anonymous"
+        onload="if(window.renderMathInElement){document.querySelectorAll('.report-body,.lecture-summary-body,.tag-analysis-body,.knowledge-graph-analysis,.markdown-body,.question-comment').forEach(function(el){renderMathInElement(el,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}],throwOnError:false});});}"></script>
 </body>
 </html>

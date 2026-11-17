@@ -299,7 +299,10 @@ details summary { cursor: pointer; color: #1456f0; }
 .report-body ol, .report-body ul { margin: 6px 0 6px 22px; font-size: 14px; }
 .report-body li { margin-bottom: 4px; }
 .report-body table.report-table { margin: 8px 0 12px; }
-.report-body table.report-table th, .report-body table.report-table td { font-size: 14px; }
+.report-body table.report-table th, .report-body table.report-table td { font-size: 14px; vertical-align: top; }
+.report-body td .katex-display, .lecture-summary-body .katex-display,
+.tag-analysis-body .katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; }
+.report-body .katex, .lecture-summary-body .katex, .tag-analysis-body .katex { font-size: 1.05em; }
 .q-score-hint { margin-left: auto; font-size: 13px; color: #8a8f99; font-weight: 400; }
 .field-row { display: flex; gap: 12px; align-items: flex-start; }
 .field-row > label { flex: 1; }
