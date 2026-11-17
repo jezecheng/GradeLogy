@@ -823,6 +823,30 @@ button.btn-link:hover { text-decoration: underline; }
 .kg-galaxy-legend i.contains { border-top-style: dashed; border-color: #34d399; }
 .kg-galaxy-legend i.related { border-top-color: rgba(148, 163, 184, .55); }
 .kg-galaxy-hint { margin-left: auto; color: #64748b; font-size: 12px; }
+.kg-galaxy-crumbs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-height: 18px;
+  color: #64748b;
+  font-size: 12px;
+}
+.kg-galaxy-crumb {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: #7dd3fc;
+  cursor: pointer;
+}
+.kg-galaxy-crumb:hover { color: #bae6fd; }
+.kg-galaxy-crumb[aria-current='true'] {
+  color: #e2e8f0;
+  font-weight: 600;
+  cursor: default;
+}
+.kg-galaxy-crumb-sep { color: #475569; }
 .kg-galaxy-categories {
   display: flex;
   gap: 8px;

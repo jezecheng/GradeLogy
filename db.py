@@ -333,6 +333,22 @@ CREATE TABLE IF NOT EXISTS kg_audits(
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   applied_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_kg_audits_graph ON kg_audits(graph_id, id);
+-- 分类重构：AI 把自由文本分类重映射为 2~3 层学科树，先预览后应用，应用后可回滚
+CREATE TABLE IF NOT EXISTS kg_category_maps(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  graph_id INTEGER NOT NULL REFERENCES knowledge_graphs(id),
+  status TEXT NOT NULL DEFAULT '待确认',
+  model TEXT DEFAULT '',
+  error TEXT DEFAULT '',
+  mappings TEXT DEFAULT '',
+  rejected TEXT DEFAULT '',
+  snapshot TEXT DEFAULT '',
+  operation_id INTEGER,
+  created_by INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  applied_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_kg_category_maps_graph
+  ON kg_category_maps(graph_id, id);
 -- 图谱协作：manage 可改名/删除/管理成员，edit 可加语料与改关系，use 可在自己的课程中引入
 CREATE TABLE IF NOT EXISTS kg_members(
   graph_id INTEGER NOT NULL REFERENCES knowledge_graphs(id),

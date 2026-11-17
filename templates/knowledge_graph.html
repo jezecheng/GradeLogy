@@ -357,8 +357,9 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
           <span><i class="contains"></i>包含</span>
           <span><i class="related"></i>相关</span>
         </div>
-        <span class="kg-galaxy-hint">滚轮缩放 · 拖拽平移 · 全景只显示前 50 个枢纽标签</span>
+        <span class="kg-galaxy-hint">点击星团逐层下钻 · 滚轮缩放 · 拖拽平移</span>
       </div>
+      <div class="kg-galaxy-crumbs" id="kg-galaxy-crumbs"></div>
       <div class="kg-galaxy-categories" id="kg-galaxy-categories"></div>
     </div>
     <div class="kg-galaxy" id="kg-galaxy" role="img"
@@ -440,7 +441,7 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
   {% endif %}
 </details>
 
-{% if materials %}
+{% if nodes %}
 <details class="card kg-fold" id="kg-audit"
          {% if audits and audits[0].status == '待确认' %}open{% endif %}>
   <summary class="card-head"><h2>图谱体检 <span class="muted small">（AI 只给建议，确认后才改图）</span></h2></summary>
@@ -506,6 +507,83 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
     {% elif can_edit and a.status == '已应用' and a.has_snapshot %}
     <form method="post"
           action="{{ url_for('knowledge_graph_audit_rollback', gid=graph.id, aid=a.id) }}"
+          onsubmit="return confirm('回滚会用快照覆盖图谱当前状态。继续？')">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <button class="ghost small">回滚</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endfor %}
+</details>
+
+<details class="card kg-fold" id="kg-category"
+         {% if cat_maps and cat_maps[0].status == '待确认' %}open{% endif %}>
+  <summary class="card-head"><h2>分类重构 <span class="muted small">（AI 把扁平分类整理成分层学科树，确认后才改图）</span></h2></summary>
+  {% if can_edit %}
+  <form class="kg-audit-run" method="post"
+        action="{{ url_for('knowledge_graph_category_run', gid=graph.id) }}"
+        onsubmit="this.querySelector('button').disabled = true; this.querySelector('button').textContent = '整理中…';">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <button class="ghost small">用 AI 重整分类</button>
+    <span class="muted small">把「方法」「公式」等自由标签归并到 2~3 层学科路径；结果先预览，应用后可回滚。</span>
+  </form>
+  {% endif %}
+  {% if not cat_maps %}
+  <p class="muted small">还没有分类重构记录。</p>
+  {% endif %}
+  {% for m in cat_maps %}
+  <div class="kg-audit">
+    <div class="kg-audit-head">
+      <span class="kg-audit-status">{{ m.status }}</span>
+      <span class="muted small">{{ m.created_at }}{% if m.applied_at %} · 应用 {{ m.applied_at }}{% endif %}{% if m.model %} · {{ m.model }}{% endif %}{% if m.count %} · 覆盖 {{ m.count }} 个概念{% endif %}</span>
+    </div>
+    {% if m.error %}
+    <p class="kg-request-error">{{ m.error }}</p>
+    {% endif %}
+    {% if m['items'] %}
+    <div class="kg-table-wrap">
+      <table class="kg">
+        <thead><tr><th>原分类</th><th>概念数</th><th>新路径</th><th>理由</th></tr></thead>
+        <tbody>
+          {% for item in m['items'] %}
+          <tr>
+            <td class="kg-name">{{ item['from'] or '（未分类）' }}</td>
+            <td>{{ item.count }}</td>
+            <td>{{ item['to'] }}</td>
+            <td class="kg-note">{{ item.reason or '—' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    {% if m.rejected %}
+    <details>
+      <summary class="muted small">{{ m.rejected | length }} 条映射未通过校验</summary>
+      <ul class="kg-cycle-list">
+        {% for r in m.rejected %}
+        <li>{{ r.text }}：{{ r.reason }}</li>
+        {% endfor %}
+      </ul>
+    </details>
+    {% endif %}
+    {% if can_edit and m.status == '待确认' and m['items'] %}
+    <div class="kg-audit-actions">
+      <form method="post"
+            action="{{ url_for('knowledge_graph_category_apply', gid=graph.id, mid=m.id) }}"
+            onsubmit="return confirm('应用后会批量改写节点分类，应用后仍可回滚。继续？')">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <button class="ghost small">应用映射</button>
+      </form>
+      <form method="post"
+            action="{{ url_for('knowledge_graph_category_discard', gid=graph.id, mid=m.id) }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <button class="ghost small">忽略</button>
+      </form>
+    </div>
+    {% elif can_edit and m.status == '已应用' and m.has_snapshot %}
+    <form method="post"
+          action="{{ url_for('knowledge_graph_category_rollback', gid=graph.id, mid=m.id) }}"
           onsubmit="return confirm('回滚会用快照覆盖图谱当前状态。继续？')">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
       <button class="ghost small">回滚</button>

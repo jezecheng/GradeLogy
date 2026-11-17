@@ -1230,3 +1230,166 @@ def restore_snapshot(db, graph_id, snapshot):
                (graph_id,))
     db.commit()
 
+
+# ---------- 分类重构：把扁平的自由分类映射成 2~3 层学科树 ----------
+CATEGORY_PENDING = AUDIT_PENDING
+CATEGORY_APPLIED = AUDIT_APPLIED
+CATEGORY_DISCARDED = AUDIT_DISCARDED
+CATEGORY_FAILED = AUDIT_FAILED
+CATEGORY_ROLLED_BACK = AUDIT_ROLLED_BACK
+CATEGORY_MAX_LAYERS = 3
+CATEGORY_MAX_SEGMENT = 12
+CATEGORY_MAX_ITEMS = 800
+CATEGORY_SAMPLE_NAMES = 3
+CATEGORY_MAX_TOKENS = 32768
+
+CATEGORY_PROMPT = """你是学科教研与知识图谱治理专家。下面是一张学科知识图谱里的全部分类标签，
+它们由建图时自由生成，层级扁平、粒度混乱，还混进了「方法」「公式」这类不是学科主题的标签。
+请把它们重新组织成 2~3 层的学科分类树。
+
+### 要求
+1. 每条映射给出 from（必须原样照抄下面的分类名）与 to（新分类路径）。
+2. to 用 / 分隔，2~3 层，例如：物质结构/原子结构/核外电子排布。
+   第一层用学科大模块（如 物质结构、化学反应、实验方法），第二层用主题，
+   第三层只在确有细分必要时使用。
+3. 每一段不超过 12 个字，不要带编号、括号注释或标点。
+4. 含义相同的旧分类合并到同一条新路径；不同主题不要硬塞进同一路径。
+5. 不要保留「方法」「公式」「迷思概念」「其他」这类没有学科含义的标签：
+   按概念实际所属的主题归入合适路径，确实无法归类时才放进「其他」。
+6. 下面列出的每一个分类都必须覆盖且只出现一次；标为（未分类）的条目 from 填空字符串。
+7. 只输出 JSON，不要解释。
+
+### 输出格式（严格输出合法 JSON）
+{"mappings": [
+  {"from": "旧分类", "to": "一级/二级", "reason": "不超过 20 字的归类理由"}
+]}
+
+### 待整理的分类（名称｜概念数｜示例概念）
+"""
+
+
+def _category_groups(db, graph_id):
+    """按原始分类字符串聚合节点名，保持分类为空时也单独成组。"""
+    groups = {}
+    for row in db.execute(
+            "SELECT category,name FROM kg_nodes WHERE graph_id=? "
+            "ORDER BY category, confidence DESC, id", (graph_id,)):
+        groups.setdefault((row["category"] or "").strip(), []).append(row["name"])
+    return groups
+
+
+def _category_catalog(groups, sample=CATEGORY_SAMPLE_NAMES):
+    lines = []
+    ordered = sorted(groups.items(), key=lambda item: (-len(item[1]), item[0]))
+    for index, (category, names) in enumerate(ordered, 1):
+        label = category or "（未分类）"
+        lines.append(f"{index}. {label}｜{len(names)} 个概念｜示例：" +
+                     "、".join(names[:sample]))
+    return "\n".join(lines)
+
+
+def _category_path(value):
+    """把模型给的路径拆成层级：兼容 / ／ > → 等分隔写法。"""
+    text = str(value or "").strip()
+    for separator in ("／", "＞", ">", "→", "\\"):
+        text = text.replace(separator, "/")
+    parts = [part.strip(" 　-—·。、,，") for part in text.split("/")]
+    return [part for part in parts if part]
+
+
+def validate_category_map(db, graph_id, items):
+    """逐条校验映射：from 必须存在于本图，to 为 1~3 层且每层不超过 12 字。
+
+    返回 (可用映射, 被拦截映射, 错误)；错误恒为空串，与体检接口保持一致。
+    """
+    groups = _category_groups(db, graph_id)
+    if not groups:
+        return [], [], "图谱还没有概念，无需重构分类"
+    known = {category: len(names) for category, names in groups.items()}
+    valid, rejected, seen = [], [], set()
+    for raw in (items or [])[:CATEGORY_MAX_ITEMS]:
+        if not isinstance(raw, dict):
+            continue
+        source = str(raw.get("from") or "").strip()
+        if source not in known and source in ("（未分类）", "未分类") and "" in known:
+            source = ""
+        display = source or "（未分类）"
+        reason = str(raw.get("reason") or "").strip()[:120]
+        if source not in known:
+            rejected.append({"from": source, "text": display,
+                             "reason": "该分类不在当前图谱中"})
+            continue
+        parts = _category_path(raw.get("to"))
+        if not parts:
+            rejected.append({"from": source, "text": display,
+                             "reason": "新分类为空"})
+            continue
+        if len(parts) > CATEGORY_MAX_LAYERS:
+            rejected.append({"from": source, "text": display,
+                             "reason": f"最多 {CATEGORY_MAX_LAYERS} 层"})
+            continue
+        too_long = next((part for part in parts
+                         if len(part) > CATEGORY_MAX_SEGMENT), "")
+        if too_long:
+            rejected.append({"from": source, "text": display,
+                             "reason": f"单层名称超过 {CATEGORY_MAX_SEGMENT} 字：{too_long}"})
+            continue
+        if source in seen:
+            rejected.append({"from": source, "text": display,
+                             "reason": "同一分类出现多条映射"})
+            continue
+        seen.add(source)
+        target = "/".join(parts)
+        if target == source:
+            continue  # 与原分类完全一致，无需调整
+        valid.append({"from": source, "to": target, "count": known[source],
+                      "reason": reason, "label": f"「{display}」→「{target}」"})
+    return valid, rejected, ""
+
+
+def analyze_categories(db, graph_id, api_url, api_key, model, usage_hook=None,
+                       max_tokens=CATEGORY_MAX_TOKENS):
+    """让模型给出分类重映射，返回 (可用映射, 被拦截映射, 错误)。"""
+    groups = _category_groups(db, graph_id)
+    if not groups:
+        return [], [], "图谱还没有概念，无需重构分类"
+    prompt = CATEGORY_PROMPT + _category_catalog(groups)
+    try:
+        reply, finish, err = llm.chat(
+            api_url, api_key, model, [{"type": "text", "text": prompt}],
+            max_tokens=max_tokens, usage_hook=usage_hook, report_running=True)
+    except Exception as e:  # noqa: BLE001 分类重构失败不影响图谱本身
+        return [], [], str(e)
+    if err:
+        return [], [], err
+    if finish == "length" or not (reply or "").strip():
+        return [], [], (f"{TRUNCATED_MARK}（max_tokens={max_tokens}），"
+                        "可改用非推理模型或调大输出上限")
+    data = llm.extract_json(reply)
+    if not isinstance(data, dict):
+        return [], [], "模型未返回合法 JSON"
+    return validate_category_map(db, graph_id, data.get("mappings"))
+
+
+def apply_category_map(db, graph_id, mappings):
+    """按映射批量改写节点分类，返回应用前快照。"""
+    snapshot = snapshot_graph(db, graph_id)
+    for item in mappings or []:
+        target = str(item.get("to") or "").strip()
+        if not target:
+            continue
+        source = str(item.get("from") or "").strip()
+        if source:
+            db.execute(
+                "UPDATE kg_nodes SET category=?, updated_at=CURRENT_TIMESTAMP "
+                "WHERE graph_id=? AND category=?", (target, graph_id, source))
+        else:
+            db.execute(
+                "UPDATE kg_nodes SET category=?, updated_at=CURRENT_TIMESTAMP "
+                "WHERE graph_id=? AND (category='' OR category IS NULL)",
+                (target, graph_id))
+    db.execute("UPDATE knowledge_graphs SET updated_at=CURRENT_TIMESTAMP WHERE id=?",
+               (graph_id,))
+    db.commit()
+    return snapshot
+

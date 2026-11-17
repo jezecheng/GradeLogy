@@ -37,6 +37,8 @@ MAX_TOKENS_SETTINGS = {
                             "hint": "从资料抽取概念与关系"},
     "max_tokens_kg_audit": {"label": "知识图谱体检", "default": 32768,
                             "hint": "审校图谱并给出治理建议"},
+    "max_tokens_kg_category": {"label": "知识图谱分类重构", "default": 32768,
+                               "hint": "把自由分类重映射为分层学科树"},
     "max_tokens_report": {"label": "报告评语", "default": 2048,
                           "hint": "生成学生作业的个性化评语"},
 }

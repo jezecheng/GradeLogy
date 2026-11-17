@@ -23,11 +23,11 @@ import app as app_module  # noqa: E402
 import db as database  # noqa: E402
 from utilities import kg_cli, kg_text, kg_transfer, knowledge_graph as kg  # noqa: E402
 
-_TABLES = ("kg_members", "kg_audits", "kg_chunks", "kg_edges", "kg_nodes",
-           "kg_materials", "knowledge_graphs", "tag_analyses", "question_tags",
-           "questions", "submissions", "lectures", "exams", "exam_scores",
-           "enrollments", "course_teachers", "courses", "users", "settings",
-           "ai_usage_events", "ai_operations")
+_TABLES = ("kg_category_maps", "kg_members", "kg_audits", "kg_chunks", "kg_edges",
+           "kg_nodes", "kg_materials", "knowledge_graphs", "tag_analyses",
+           "question_tags", "questions", "submissions", "lectures", "exams",
+           "exam_scores", "enrollments", "course_teachers", "courses", "users",
+           "settings", "ai_usage_events", "ai_operations")
 
 
 class KGLogicTest(unittest.TestCase):
@@ -581,6 +581,61 @@ class KGLogicTest(unittest.TestCase):
         self.assertEqual(error, "")
         self.assertEqual([item["action"] for item in valid], ["delete_edge"])
         self.assertEqual(rejected[0]["reason"], "关系 9999 不属于该图谱")
+
+    def test_category_map_validation_apply_and_restore(self):
+        kg.merge_extraction(self.con, 1, 101, [
+            {"name": "氧化还原反应", "category": "反应类型", "definition": "",
+             "aliases": [], "confidence": 0.8},
+            {"name": "离子反应", "category": "反应类型", "definition": "",
+             "aliases": [], "confidence": 0.8},
+            {"name": "核外电子排布", "category": "原子结构", "definition": "",
+             "aliases": [], "confidence": 0.8},
+            {"name": "阿伏加德罗常数", "category": "", "definition": "",
+             "aliases": [], "confidence": 0.8}], [])
+        valid, rejected, error = kg.validate_category_map(self.con, 1, [
+            {"from": "反应类型", "to": "化学反应/氧化还原", "reason": "归入反应"},
+            {"from": "原子结构", "to": "物质结构/原子结构/核外电子/更细", "reason": "太深"},
+            {"from": "", "to": "化学计量/物质的量", "reason": "未分类"},
+            {"from": "不存在的分类", "to": "其他", "reason": "不存在"},
+            {"from": "反应类型", "to": "化学反应/离子反应", "reason": "重复"},
+        ])
+        self.assertEqual(error, "")
+        self.assertEqual([item["to"] for item in valid],
+                         ["化学反应/氧化还原", "化学计量/物质的量"])
+        reasons = [item["reason"] for item in rejected]
+        self.assertTrue(any("最多 3 层" in reason for reason in reasons))
+        self.assertTrue(any("不在当前图谱" in reason for reason in reasons))
+        self.assertTrue(any("多条映射" in reason for reason in reasons))
+
+        snapshot = kg.apply_category_map(self.con, 1, valid)
+        categories = {row["name"]: row["category"] for row in self.con.execute(
+            "SELECT name,category FROM kg_nodes")}
+        self.assertEqual(categories["氧化还原反应"], "化学反应/氧化还原")
+        self.assertEqual(categories["离子反应"], "化学反应/氧化还原")
+        self.assertEqual(categories["阿伏加德罗常数"], "化学计量/物质的量")
+        self.assertEqual(categories["核外电子排布"], "原子结构")
+
+        kg.restore_snapshot(self.con, 1, snapshot)
+        categories = {row["name"]: row["category"] for row in self.con.execute(
+            "SELECT name,category FROM kg_nodes")}
+        self.assertEqual(categories["氧化还原反应"], "反应类型")
+        self.assertEqual(categories["阿伏加德罗常数"], "")
+
+    def test_analyze_categories_parses_and_validates_model_output(self):
+        kg.merge_extraction(self.con, 1, 101, [
+            {"name": "过滤操作", "category": "方法", "definition": "",
+             "aliases": [], "confidence": 0.8}], [])
+        reply = json.dumps({"mappings": [
+            {"from": "方法", "to": "实验方法/基本操作", "reason": "归入实验"},
+            {"from": "不存在", "to": "其他", "reason": "无效"}]},
+            ensure_ascii=False)
+        with mock.patch.object(kg.llm, "chat", return_value=(reply, "stop", "")):
+            valid, rejected, error = kg.analyze_categories(
+                self.con, 1, "u", "k", "m")
+        self.assertEqual(error, "")
+        self.assertEqual([item["to"] for item in valid], ["实验方法/基本操作"])
+        self.assertEqual(valid[0]["count"], 1)
+        self.assertEqual(rejected[0]["reason"], "该分类不在当前图谱中")
 
     def test_merge_nodes_moves_edges_and_dedupes(self):
         kg.merge_extraction(self.con, 1, 101, self._concepts("A", "B", "C"), [
@@ -1542,6 +1597,58 @@ class KGRouteTest(unittest.TestCase):
         con.close()
         self.assertEqual(audit["status"], kg.AUDIT_FAILED)
         self.assertIn("未配置 AI", audit["error"])
+
+    def test_category_run_without_ai_config_records_failure(self):
+        graph = self._create_graph()
+        with mock.patch.object(app_module, "_ai_endpoint",
+                               return_value=("", "", "", "未配置 AI")):
+            resp = self.client.post(
+                self.url("knowledge_graph_category_run", gid=graph["id"]),
+                data={"_csrf": "test-token"}, follow_redirects=True)
+        self.assertIn("分类重构未执行", resp.get_data(as_text=True))
+        con = self._db()
+        record = con.execute("SELECT * FROM kg_category_maps").fetchone()
+        con.close()
+        self.assertEqual(record["status"], kg.CATEGORY_FAILED)
+        self.assertIn("未配置 AI", record["error"])
+
+    def test_category_apply_and_rollback_restores_categories(self):
+        graph = self._create_graph()
+        con = self._db()
+        node_id = con.execute(
+            "INSERT INTO kg_nodes(graph_id,name,normalized,category,confidence)"
+            " VALUES(?,?,?,?,0.8)",
+            (graph["id"], "过滤", "过滤", "方法")).lastrowid
+        map_id = con.execute(
+            "INSERT INTO kg_category_maps(graph_id,status,mappings,created_by)"
+            " VALUES(?, '待确认', ?, 2)",
+            (graph["id"], json.dumps([{
+                "from": "方法", "to": "实验方法/基本操作", "count": 1,
+                "reason": "归入实验", "label": "「方法」→「实验方法/基本操作」"}],
+                ensure_ascii=False))).lastrowid
+        con.commit()
+        con.close()
+
+        self._post("knowledge_graph_category_apply", gid=graph["id"], mid=map_id)
+        con = self._db()
+        record = con.execute("SELECT * FROM kg_category_maps WHERE id=?",
+                             (map_id,)).fetchone()
+        category = con.execute("SELECT category FROM kg_nodes WHERE id=?",
+                               (node_id,)).fetchone()["category"]
+        con.close()
+        self.assertEqual(record["status"], kg.CATEGORY_APPLIED)
+        self.assertTrue(record["snapshot"])
+        self.assertEqual(category, "实验方法/基本操作")
+
+        self._post("knowledge_graph_category_rollback", gid=graph["id"], mid=map_id)
+        con = self._db()
+        record = con.execute("SELECT * FROM kg_category_maps WHERE id=?",
+                             (map_id,)).fetchone()
+        category = con.execute("SELECT category FROM kg_nodes WHERE id=?",
+                               (node_id,)).fetchone()["category"]
+        con.close()
+        self.assertEqual(record["status"], kg.CATEGORY_ROLLED_BACK)
+        self.assertEqual(category, "方法")
 
     def test_detail_shows_storage_time_tokens_and_model(self):
         graph = self._create_graph()

@@ -285,22 +285,26 @@ erDiagram
 
 1. **资料视图**：文件状态、页数、字数、本地处理时间、chunk 统计、ETA 和请求明细；
 2. **表格视图**：概念节点与关系边，可折叠；关系边支持反向与删除；
-3. **图形视图（知识星系）**：ECharts 5 力导向图一次渲染全量节点与关系，`category` 作为分组星团，节点半径随连接度 `degree` 变化；默认全景只显示连接度前 50 的枢纽标签，滚轮放大后按视野动态显示次级标签；悬停/点击触发 `emphasis.focus: 'adjacency'` 邻接聚光，点击节点从右侧抽屉展示定义、证据出处和上下游跳转；
+3. **图形视图（知识星系）**：ECharts 5 力导向图，默认只画按 `category` 路径聚合出的星团（每层最多 24 个），点击星团逐层下钻，进入某模块且概念数不超过 150 时才渲染真实节点与关系；节点半径随连接度 `degree` 变化，只默认显示连接度前 50 的枢纽标签，滚轮放大后按视野动态补充次级标签；悬停/点击触发 `emphasis.focus: 'adjacency'` 邻接聚光，点击概念从右侧抽屉展示定义、证据出处和上下游跳转；
 4. **治理视图**：成环告警、AI 体检建议预览、协作成员管理、空间/耗时/Token/模型指标与存储明细。
 
 ### 4.5 知识星系界面（生产图谱实测）
 
 以下截图来自从生产环境导出的化学知识图谱迁移包（`scope=graph`）重新导入后的实例，包内声明 2639 个概念、4753 条关系；导入后数据库节点与边数量一致，`graph.json` 返回 711 个分类，最大连接度为 43（速率常数），浏览器控制台无脚本报错。
 
-**全景视图**：深空画布上按 `category` 着色的星团，节点大小随连接度变化，默认只显示前 50 个枢纽标签：
+**星团概览**：首屏不再渲染 2000+ 节点，而是把节点按 `category` 的 `/` 层级聚合为星团（每层最多 24 个，超出部分折叠为「其他 N 类」继续下钻），星团大小与其概念数成正比、边按星团间关系聚合。首屏元素数从 2639 个节点降到 24 个星团，力导向布局瞬间稳定：
 
-![知识星系全景](images/kg-galaxy-overview.jpg)
+![知识星系星团概览](images/kg-galaxy-overview.jpg)
+
+**逐层下钻**：点击星团进入下一层，面包屑记录路径（如「全部 › 电化学」）。某个分支的概念数不超过 150 时改为渲染真实概念与关系，此时恢复完整的力导向、粒子与标签 LOD：
+
+![知识星系下钻后的概念视图](images/kg-galaxy-drill.jpg)
 
 **滚轮放大**：`graphRoam` 触发 LOD，按视野补充次级节点标签，并按连接度分层限制数量避免重叠：
 
 ![知识星系放大后的标签](images/kg-galaxy-zoom.jpg)
 
-**节点抽屉**：点击概念后邻接节点高亮、无关星团暗化，右侧滑出半透明抽屉，展示定义、连接度、置信度、前置/延伸/相关概念及其证据出处，并提供「查看完整概念页」入口：
+**节点抽屉**：点击概念后邻接节点高亮、无关节点暗化，右侧滑出半透明抽屉，展示定义、连接度、置信度、前置/延伸/相关概念及其证据出处，并提供「查看完整概念页」入口：
 
 ![知识星系节点抽屉](images/kg-galaxy-drawer.jpg)
 
@@ -508,7 +512,7 @@ Content-Type: application/json
 - OpenAI 兼容调用、重试和请求事件：[utilities/llm.py](../utilities/llm.py)
 - AI operation、usage、token 和费用记录：[ai_usage.py](../ai_usage.py)
 - 教师端页面、知识星系容器与轮询：[templates/knowledge_graph.html](../templates/knowledge_graph.html)
-- 知识星系前端渲染（ECharts 力导向、LOD 标签、抽屉、粒子）：[static/kg_echarts.js](../static/kg_echarts.js)
+- 知识星系前端渲染（层级聚合与下钻、ECharts 力导向、LOD 标签、抽屉、粒子）：[static/kg_echarts.js](../static/kg_echarts.js)
 - 概念邻域页面：[templates/knowledge_graph_concept.html](../templates/knowledge_graph_concept.html)
 - 单元与路由测试：[tests/test_knowledge_graph.py](../tests/test_knowledge_graph.py)
 - 面向教师的使用说明：[docs/teacher.md](teacher.md)

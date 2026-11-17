@@ -31,6 +31,8 @@ AI_OPERATION_LABEL = {
     "tag_horizontal": "横向知识点分析",
     "tag_vertical": "纵向知识点分析",
     "kg_build": "知识图谱构建",
+    "kg_audit": "知识图谱体检",
+    "kg_category": "知识图谱分类重构",
     "grade": "作业批阅",
     "lecture_summary": "讲次汇总",
     "report_generate": "批改报告评价",

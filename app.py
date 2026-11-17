@@ -3152,6 +3152,8 @@ def _kg_metrics(db, graph_id):
     usage_sql = (
         "o.material_id IN (SELECT id FROM kg_materials WHERE graph_id=?)"
         " OR o.id IN (SELECT operation_id FROM kg_audits"
+        " WHERE graph_id=? AND operation_id IS NOT NULL)"
+        " OR o.id IN (SELECT operation_id FROM kg_category_maps"
         " WHERE graph_id=? AND operation_id IS NOT NULL)")
     material = db.execute(
         "SELECT COALESCE(SUM(size),0) AS bytes,"
@@ -3162,10 +3164,10 @@ def _kg_metrics(db, graph_id):
     usage = db.execute(
         "SELECT SUM(e.total_tokens) AS tokens FROM ai_usage_events e"
         " JOIN ai_operations o ON o.id=e.operation_id WHERE " + usage_sql,
-        (graph_id, graph_id)).fetchone()
+        (graph_id, graph_id, graph_id)).fetchone()
     models = [row["model"] for row in db.execute(
         "SELECT DISTINCT o.model FROM ai_operations o WHERE o.model<>'' AND ("
-        + usage_sql + ") ORDER BY o.model", (graph_id, graph_id))]
+        + usage_sql + ") ORDER BY o.model", (graph_id, graph_id, graph_id))]
     tokens = usage["tokens"] if usage else None
     db_items, db_bytes = _kg_db_usage(db, graph_id)
     file_bytes = material["bytes"] or 0
@@ -3513,6 +3515,27 @@ def _kg_audit_view(row):
     }
 
 
+def _kg_category_map_view(row):
+    """把一条分类重构记录转成模板可直接渲染的结构。"""
+    try:
+        items = json.loads(row["mappings"] or "[]")
+    except (TypeError, ValueError):
+        items = []
+    try:
+        rejected = json.loads(row["rejected"] or "[]")
+    except (TypeError, ValueError):
+        rejected = []
+    return {
+        "id": row["id"], "status": row["status"],
+        "model": row["model"] or "", "error": row["error"] or "",
+        "created_at": _localtime(row["created_at"]),
+        "applied_at": _localtime(row["applied_at"]) if row["applied_at"] else "",
+        "items": items, "rejected": rejected,
+        "has_snapshot": bool(row["snapshot"]),
+        "count": sum(int(item.get("count") or 0) for item in items),
+    }
+
+
 @_routes.route("/knowledge-graphs/<oid:gid>")
 @role_required("teacher", "admin")
 def knowledge_graph_detail(gid):
@@ -3525,6 +3548,9 @@ def knowledge_graph_detail(gid):
                    for m in materials)
     audits = [_kg_audit_view(row) for row in db.execute(
         "SELECT * FROM kg_audits WHERE graph_id=? ORDER BY id DESC LIMIT 3",
+        (gid,)).fetchall()]
+    cat_maps = [_kg_category_map_view(row) for row in db.execute(
+        "SELECT * FROM kg_category_maps WHERE graph_id=? ORDER BY id DESC LIMIT 3",
         (gid,)).fetchall()]
     role = _kg_role(graph)
     members = db.execute(
@@ -3545,6 +3571,7 @@ def knowledge_graph_detail(gid):
         layered=kg_utils.layered_graph(db, gid),
         cycles=kg_utils.prerequisite_cycles(db, gid),
         audits=audits,
+        cat_maps=cat_maps,
         metrics=_kg_metrics(db, gid),
         members=members, teacher_candidates=teacher_candidates,
         role=role, role_label=KG_ROLE_LABEL.get(role, "只读"),
@@ -3977,12 +4004,153 @@ def knowledge_graph_audit_discard(gid, aid):
     return redirect(url_for("knowledge_graph_detail", gid=gid))
 
 
+@_routes.route("/knowledge-graphs/<oid:gid>/categories/analyze", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_category_run(gid):
+    """让模型把自由分类重映射为分层学科树：异步执行，先预览后应用。"""
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    api_url, api_key, model, err = _ai_endpoint(g.user["id"])
+    if err:
+        db.execute(
+            "INSERT INTO kg_category_maps(graph_id,status,model,error,created_by)"
+            " VALUES(?,?,?,?,?)",
+            (gid, kg_utils.CATEGORY_FAILED, "", err, g.user["id"]))
+        db.commit()
+        flash(f"分类重构未执行：{err}")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    max_tokens = _get_max_tokens(g.user["id"], "max_tokens_kg_category")
+    created_by = g.user["id"]
+
+    def runner(database, operation):
+        try:
+            mappings, rejected, run_err = kg_utils.analyze_categories(
+                database, gid, api_url, api_key, model,
+                usage_hook=operation["usage_hook"], max_tokens=max_tokens)
+        except Exception as e:  # noqa: BLE001
+            run_err = str(e)
+            kg_log.exception("知识图谱分类重构失败 graph=%s", gid)
+            mappings, rejected = [], []
+        if run_err:
+            status = kg_utils.CATEGORY_FAILED
+        elif mappings:
+            status = kg_utils.CATEGORY_PENDING
+        else:
+            status = kg_utils.AUDIT_CLEAN
+        database.execute(
+            "INSERT INTO kg_category_maps(graph_id,status,model,error,mappings,"
+            "rejected,operation_id,created_by) VALUES(?,?,?,?,?,?,?,?)",
+            (gid, status, model, (run_err or "")[:500],
+             json.dumps(mappings, ensure_ascii=False),
+             json.dumps(rejected, ensure_ascii=False), operation["id"],
+             created_by))
+        database.commit()
+        kg_log.info("知识图谱分类重构 user=#%s graph=%s status=%s 映射=%s 拦截=%s",
+                    created_by, gid, status, len(mappings), len(rejected))
+        _finish_ai_operation(operation, "failed" if run_err else "success", run_err)
+
+    operation, queue_err = _ai_task_queue.submit(
+        g.user["id"], "kg_category", model=model, runner=runner,
+        material_id=None, dedup_key=f"kg_category|{gid}")
+    if queue_err:
+        flash(queue_err)
+    else:
+        flash("分类重构已加入后台队列，可离开当前页面。")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+def _kg_category_map(gid, mid):
+    row = get_db().execute(
+        "SELECT * FROM kg_category_maps WHERE id=? AND graph_id=?", (mid, gid)).fetchone()
+    if not row:
+        abort(404)
+    return row
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/categories/<oid:mid>/apply", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_category_apply(gid, mid):
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    record = _kg_category_map(gid, mid)
+    if record["status"] != kg_utils.CATEGORY_PENDING:
+        flash("该分类重构结果已处理，不能重复应用")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    try:
+        items = json.loads(record["mappings"] or "[]")
+    except (TypeError, ValueError):
+        items = []
+    if not items:
+        flash("没有可应用的分类映射")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    snapshot = kg_utils.apply_category_map(db, gid, items)
+    db.execute(
+        "UPDATE kg_category_maps SET status=?, snapshot=?, "
+        "applied_at=CURRENT_TIMESTAMP WHERE id=?",
+        (kg_utils.CATEGORY_APPLIED, json.dumps(snapshot, ensure_ascii=False), mid))
+    db.commit()
+    kg_log.info("应用知识图谱分类重构 user=%s#%s graph=%s map=%s 映射=%s",
+                g.user["username"], g.user["id"], gid, mid, len(items))
+    flash(f"已应用 {len(items)} 条分类映射，可随时回滚")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/categories/<oid:mid>/rollback",
+               methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_category_rollback(gid, mid):
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    record = _kg_category_map(gid, mid)
+    if record["status"] != kg_utils.CATEGORY_APPLIED or not record["snapshot"]:
+        flash("这条分类重构没有可回滚的快照")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    later = db.execute(
+        "SELECT id FROM kg_category_maps WHERE graph_id=? AND id>? AND status=? LIMIT 1",
+        (gid, mid, kg_utils.CATEGORY_APPLIED)).fetchone()
+    if later:
+        flash("之后已有新的分类重构被应用，请先回滚最新的那条")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    try:
+        snapshot = json.loads(record["snapshot"])
+    except (TypeError, ValueError):
+        snapshot = {}
+    kg_utils.restore_snapshot(db, gid, snapshot)
+    db.execute("UPDATE kg_category_maps SET status=? WHERE id=?",
+               (kg_utils.CATEGORY_ROLLED_BACK, mid))
+    db.commit()
+    kg_log.info("回滚知识图谱分类重构 user=%s#%s graph=%s map=%s",
+                g.user["username"], g.user["id"], gid, mid)
+    flash("已回滚到分类重构前的图谱状态")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/categories/<oid:mid>/discard",
+               methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_category_discard(gid, mid):
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    record = _kg_category_map(gid, mid)
+    if record["status"] != kg_utils.CATEGORY_PENDING:
+        flash("该分类重构结果已处理")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    db.execute("UPDATE kg_category_maps SET status=? WHERE id=?",
+               (kg_utils.CATEGORY_DISCARDED, mid))
+    db.commit()
+    kg_log.info("忽略知识图谱分类重构 user=%s#%s graph=%s map=%s",
+                g.user["username"], g.user["id"], gid, mid)
+    flash("已忽略这次分类重构建议")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
 @_routes.route("/knowledge-graphs/<oid:gid>/delete", methods=["POST"])
 @role_required("teacher", "admin")
 def knowledge_graph_delete(gid):
     graph = _kg_graph(gid, manage=True)
     db = get_db()
     db.execute("DELETE FROM kg_audits WHERE graph_id=?", (gid,))
+    db.execute("DELETE FROM kg_category_maps WHERE graph_id=?", (gid,))
     db.execute("DELETE FROM kg_members WHERE graph_id=?", (gid,))
     db.execute("DELETE FROM kg_chunks WHERE graph_id=?", (gid,))
     db.execute("DELETE FROM kg_edges WHERE graph_id=?", (gid,))
