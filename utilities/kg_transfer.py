@@ -247,12 +247,45 @@ _FIELD_GLOSSARY = {
 }
 
 
-def _build_metadata(graph, counts, material_files):
+def _build_metadata(graph, counts, material_files, scope="full"):
     """生成结构化元数据；不包含原图谱名称。"""
+    if scope == "graph":
+        provenance = {
+            "concepts": "仅包含图谱结构；原始资料未随包导出",
+            "source_materials": "已清空：本包不含原始资料，因此不保留材料引用",
+            "evidence": "关系边保留的原句或关键短语",
+            "confidence": "0~1 的模型自评置信度，不是经过教学审核的正确率",
+        }
+        guidance = [
+            "本包为仅知识图谱包，不包含原始资料、文本块、体检历史与协作成员",
+            "导入时必须为新图谱指定名称；原图谱名称已被有意省略",
+            "kg_nodes / kg_edges 的 id 是包内局部 ID，导入到新平台时应重新分配",
+            "先按 kg_nodes 建节点，再用旧 id 映射重建 kg_edges 的 src_id 与 dst_id",
+            "relation 的 from/to 方向必须按 relation_types 的解释保留",
+            "source_materials 已清空，无法据此追溯原始资料或重建资料内容",
+        ]
+    else:
+        provenance = {
+            "concepts": "由教师上传的资料经模型逐块抽取，再按归一化名称增量合并",
+            "source_materials": "节点和关系通过 source_materials 关联支撑它的资料 ID",
+            "evidence": "关系边保留资料原句或关键短语，便于人工复核",
+            "confidence": "0~1 的模型自评置信度，不是经过教学审核的正确率",
+        }
+        guidance = [
+            "导入时必须为新图谱指定名称；原图谱名称已被有意省略",
+            "kg_nodes / kg_edges 的 id 是包内局部 ID，导入到新平台时应重新分配",
+            "先按 kg_nodes 建节点，再用旧 id 映射重建 kg_edges 的 src_id 与 dst_id",
+            "relation 的 from/to 方向必须按 relation_types 的解释保留",
+            "source_materials 中的数字是 kg_materials.id，可映射到 files/ 下的原始资料",
+            "kg_chunks 与 kg_audits 是可选的历史信息，可在只需要图结构时忽略",
+        ]
     return {
         "format": FORMAT,
         "version": VERSION,
-        "document_type": "knowledge_graph_transfer_package",
+        "scope": scope,
+        "document_type": (
+            "knowledge_graph_only_package" if scope == "graph"
+            else "knowledge_graph_transfer_package"),
         "generated_by": {
             "name": "GradeLogy",
             "description": "从教材、考纲、讲义中抽取学科概念与关系形成的知识图谱",
@@ -267,20 +300,8 @@ def _build_metadata(graph, counts, material_files):
         "counts": counts,
         "relation_types": _RELATION_TYPES,
         "field_glossary": _FIELD_GLOSSARY,
-        "provenance": {
-            "concepts": "由教师上传的资料经模型逐块抽取，再按归一化名称增量合并",
-            "source_materials": "节点和关系通过 source_materials 关联支撑它的资料 ID",
-            "evidence": "关系边保留资料原句或关键短语，便于人工复核",
-            "confidence": "0~1 的模型自评置信度，不是经过教学审核的正确率",
-        },
-        "import_guidance": [
-            "导入时必须为新图谱指定名称；原图谱名称已被有意省略",
-            "kg_nodes / kg_edges 的 id 是包内局部 ID，导入到新平台时应重新分配",
-            "先按 kg_nodes 建节点，再用旧 id 映射重建 kg_edges 的 src_id 与 dst_id",
-            "relation 的 from/to 方向必须按 relation_types 的解释保留",
-            "source_materials 中的数字是 kg_materials.id，可映射到 files/ 下的原始资料",
-            "kg_chunks 与 kg_audits 是可选的历史信息，可在只需要图结构时忽略",
-        ],
+        "provenance": provenance,
+        "import_guidance": guidance,
         "files": {
             "manifest": "manifest.json",
             "data": "data.json",
@@ -300,10 +321,12 @@ def _render_readme(metadata):
     """把元数据渲染成自然语言说明，便于 LLM 直接阅读。"""
     graph = metadata["graph"]
     counts = metadata["counts"]
+    graph_only = metadata.get("scope") == "graph"
     material_count = counts.get("kg_materials", 0)
     chunk_count = counts.get("kg_chunks", 0)
+    example_sources = "" if graph_only else ",11,"
     lines = [
-        "# GradeLogy 知识图谱迁移包",
+        "# GradeLogy 知识图谱迁移包" + ("（仅知识图谱）" if graph_only else ""),
         "",
         "本说明面向人类读者与大语言模型，用自然语言描述这个 ZIP 的内容与语义。",
         "即使不运行 GradeLogy，也可以据此理解、校验或迁移图谱。",
@@ -314,8 +337,13 @@ def _render_readme(metadata):
         "| --- | --- |",
         "| `metadata.json` | 结构化元数据：关系语义、字段说明、数量与导入建议 |",
         "| `manifest.json` | 机器校验清单：格式版本、导出时间、各表行数与资料文件 SHA256 |",
-        "| `data.json` | 图谱数据：资料、文本块、节点、关系、体检历史与协作成员 |",
-        "| `files/<material_id>/<filename>` | 原始资料文件，按资料 ID 归档 |",
+        "| `data.json` | 图谱数据：图谱信息、节点与关系"
+        + ("（其余数据表为空数组）" if graph_only
+           else "、资料、文本块、体检历史与协作成员") + " |",
+    ]
+    if not graph_only:
+        lines.append("| `files/<material_id>/<filename>` | 原始资料文件，按资料 ID 归档 |")
+    lines += [
         "| `README.md` | 本说明 |",
         "",
         "## 2. 图谱概况",
@@ -325,7 +353,12 @@ def _render_readme(metadata):
         f"- 说明：{_one_line(graph.get('description')) or '无'}",
         f"- 概念节点：{counts.get('kg_nodes', 0)} 个",
         f"- 关系边：{counts.get('kg_edges', 0)} 条",
-        f"- 原始资料：{material_count} 份（文本块 {chunk_count} 个）",
+    ]
+    if graph_only:
+        lines.append("- 包范围：仅知识图谱，不含原始资料文件、文本块、体检历史与协作成员")
+    else:
+        lines.append(f"- 原始资料：{material_count} 份（文本块 {chunk_count} 个）")
+    lines += [
         "",
         "导出时有意省略了原图谱名称，导入方应自行命名。",
         "",
@@ -341,16 +374,25 @@ def _render_readme(metadata):
         "## 4. 关键字段",
         "",
         "- `kg_nodes`：每个对象是一个概念或知识点。`name` 为显示名称，"
-        "`normalized` 用于同名合并，`aliases` 是 JSON 数组字符串，"
-        "`source_materials` 形如 `,11,12,`，指向 `kg_materials.id`。",
+        "`normalized` 用于同名合并，`aliases` 是 JSON 数组字符串。",
         "- `kg_edges`：每个对象是一条有向关系。`src_id` / `dst_id` 引用 `kg_nodes.id`；"
         "方向必须结合上面的 `relation` 语义解释。",
         "- `confidence`：0~1 的模型自评置信度，不是教师审核后的正确率。",
         "- `evidence`：关系边的资料依据，通常为原句或关键短语。",
-        "- `kg_chunks.extraction_json`：模型对单个文本块的原始抽取结果，"
-        "可用于追溯概念的来源上下文。",
-        "- `kg_audits` 与 `kg_members` 记录体检历史和协作成员，"
-        "他们不是图谱结构本身；迁移到其他平台时可以忽略。",
+    ]
+    if graph_only:
+        lines.append(
+            "- `source_materials` 已清空：本包不包含原始资料，无法据此追溯或重建资料内容。")
+    else:
+        lines += [
+            "- `source_materials` 形如 `,11,12,`，指向 `kg_materials.id`，"
+            "可映射到 `files/` 下的原始文件。",
+            "- `kg_chunks.extraction_json`：模型对单个文本块的原始抽取结果，"
+            "可用于追溯概念的来源上下文。",
+            "- `kg_audits` 与 `kg_members` 记录体检历史和协作成员，"
+            "他们不是图谱结构本身；迁移到其他平台时可以忽略。",
+        ]
+    lines += [
         "",
         "## 5. 重建图谱的最小步骤",
         "",
@@ -359,15 +401,28 @@ def _render_readme(metadata):
         "3. 建立旧 `id` 到新节点 ID 的映射。",
         "4. 遍历 `kg_edges` 创建有向关系，用映射重写 `src_id` / `dst_id`，"
         "并按 `relation_types` 保留方向语义。",
-        "5. 如需追溯出处，把 `source_materials` 中的资料 ID 映射到 "
-        "`files/<material_id>/` 下的原始文件。",
-        "6. 只关心图结构时，可以忽略 `kg_chunks`、`kg_audits` 与 `kg_members`。",
+    ]
+    if graph_only:
+        lines.append("5. 本包不包含原始资料与文本块，只能恢复图谱结构，无法恢复资料内容。")
+    else:
+        lines += [
+            "5. 如需追溯出处，把 `source_materials` 中的资料 ID 映射到 "
+            "`files/<material_id>/` 下的原始文件。",
+            "6. 只关心图结构时，可以忽略 `kg_chunks`、`kg_audits` 与 `kg_members`。",
+        ]
+    lines += [
         "",
         "## 6. 导入到其他平台的提示",
         "",
         "- 节点唯一性建议使用 `normalized`，而不是显示名称；同一概念可能有别名。",
         "- 关系去重建议使用 `(src_id, dst_id, relation)`。",
-        "- 需要保留可解释性时，同时导入 `evidence`、`source_materials` 与 `confidence`。",
+    ]
+    if graph_only:
+        lines.append("- 本包不包含资料与出处信息，无法恢复可重建的原始材料。")
+    else:
+        lines.append(
+            "- 需要保留可解释性时，同时导入 `evidence`、`source_materials` 与 `confidence`。")
+    lines += [
         "- 导入 GradeLogy 时，使用系统内「导入迁移包」并填写新图谱名称即可；"
         "导入不会自动调用 AI。",
         "",
@@ -377,10 +432,10 @@ def _render_readme(metadata):
         json.dumps({
             "node": {"id": 31, "name": "氧化还原反应", "normalized": "氧化还原反应",
                      "category": "反应类型", "aliases": "[\"氧化还原\"]",
-                     "source_materials": ",11,", "confidence": 0.9},
+                     "source_materials": example_sources, "confidence": 0.9},
             "edge": {"src_id": 31, "dst_id": 32, "relation": "prerequisite",
                      "evidence": "电子守恒是配平氧化还原反应的基础",
-                     "source_materials": ",11,", "confidence": 0.85},
+                     "source_materials": example_sources, "confidence": 0.85},
         }, ensure_ascii=False, indent=2),
         "```",
         "",
@@ -388,21 +443,37 @@ def _render_readme(metadata):
     return "\n".join(lines)
 
 
-def export_graph(db, graph_id, upload_dir, output_path):
-    """把一个图谱及其原始材料导出为 version=2 ZIP，并返回 manifest。
+def export_graph(db, graph_id, upload_dir, output_path, scope="full"):
+    """导出指定图谱为 version=2 ZIP，并返回 manifest。
+
+    ``scope="full"`` 导出完整迁移包；``scope="graph"`` 仅导出图谱本身
+    （节点与关系），不包含原始资料文件、文本块、体检历史和协作成员，
+    节点/关系上的 source_materials 会被清空。
 
     迁移包不保留原图谱名称，导入时由使用者重新命名；同时写入
     metadata.json 与 README.md，便于其他 LLM 或平台理解包内容。
     """
+    if scope not in ("full", "graph"):
+        raise KGTransferError(f"未知的导出范围：{scope}")
     graph = _graph(db, graph_id)
     graph["name"] = ""
     data = {"graph": graph}
     for key, table in _DATA_TABLES.items():
+        if scope == "graph" and key not in ("nodes", "edges"):
+            data[key] = []
+            continue
         order = "user_id" if key == "members" else "id"
         data[key] = _many(
             db, f"SELECT * FROM {table} WHERE graph_id=? ORDER BY {order}", (graph_id,))
-    data["users"] = _username_metadata(
-        db, graph, data["materials"], data["audits"], data["members"])
+    if scope == "graph":
+        # 没有原始资料时，保留出处 ID 只会产生悬空引用。
+        for row in data["nodes"] + data["edges"]:
+            row["source_materials"] = ""
+        graph["created_by_username"] = None
+        data["users"] = {}
+    else:
+        data["users"] = _username_metadata(
+            db, graph, data["materials"], data["audits"], data["members"])
 
     output = os.path.abspath(os.fspath(output_path))
     parent = os.path.dirname(output)
@@ -412,6 +483,7 @@ def export_graph(db, graph_id, upload_dir, output_path):
     manifest = {
         "format": FORMAT,
         "version": VERSION,
+        "scope": scope,
         "exported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "graph_id": graph["id"],
         "counts": counts,
@@ -447,7 +519,7 @@ def export_graph(db, graph_id, upload_dir, output_path):
             metadata = _build_metadata(
                 graph, counts,
                 {str(item["material_id"]): item["archive_path"]
-                 for item in manifest["materials"]})
+                 for item in manifest["materials"]}, scope)
             readme = _render_readme(metadata)
             archive.writestr(
                 "metadata.json",
@@ -573,13 +645,17 @@ def _validate_package(archive):
             or version not in SUPPORTED_VERSIONS):
         raise KGTransferError(
             "仅支持 format=gradelogy-kg、version=1 或 2 的迁移包")
+    scope = manifest.get("scope", "full")
+    if scope not in ("full", "graph"):
+        raise KGTransferError("manifest.json 的 scope 无效")
     # metadata.json 是 version=2 新增的可选说明文件；旧包没有也允许导入。
     if "metadata.json" in by_name:
         metadata = _read_json(archive, by_name["metadata.json"])
         if (not isinstance(metadata, dict) or metadata.get("format") != FORMAT
-                or metadata.get("version") != version):
+                or metadata.get("version") != version
+                or metadata.get("scope", "full") != scope):
             raise KGTransferError(
-                "metadata.json 与 manifest.json 的格式或版本不一致")
+                "metadata.json 与 manifest.json 的格式、版本或范围不一致")
     if not isinstance(data.get("graph"), dict):
         raise KGTransferError("data.json 缺少 graph 对象")
     graph_id = _positive_id(data["graph"].get("id"), "graph.id")

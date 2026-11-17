@@ -113,6 +113,8 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
   {% if can_manage %}
   <div class="kg-head-actions">
     <a class="ghost small" href="{{ url_for('knowledge_graph_export', gid=graph.id) }}">导出完整迁移包</a>
+    <a class="ghost small" href="{{ url_for('knowledge_graph_export', gid=graph.id, scope='graph') }}"
+       title="只导出图谱信息、节点和关系，不含原始资料文件">仅导出知识图谱</a>
     <button class="ghost small" type="button" data-dialog-open="kg-edit">编辑信息</button>
     <form method="post" action="{{ url_for('knowledge_graph_delete', gid=graph.id) }}"
           onsubmit="return confirm('删除该知识图谱及全部资料？此操作不可恢复。')">

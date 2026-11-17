@@ -3303,26 +3303,28 @@ def knowledge_graph_create():
 @_routes.route("/knowledge-graphs/<oid:gid>/export")
 @role_required("teacher", "admin")
 def knowledge_graph_export(gid):
-    """导出图结构、原始资料、文本块、抽取结果与体检历史。"""
+    """导出迁移包；scope=graph 时仅导出图谱结构，不含原始资料文件。"""
     graph = _kg_graph(gid, manage=True)
+    scope = "graph" if request.args.get("scope") == "graph" else "full"
     os.makedirs(cfg.EXPORT_DIR, exist_ok=True)
     fd, path = tempfile.mkstemp(prefix=f"kg_{gid}_", suffix=".zip", dir=cfg.EXPORT_DIR)
     os.close(fd)
     try:
-        kg_transfer.export_graph(get_db(), gid, UPLOAD_DIR, path)
+        kg_transfer.export_graph(get_db(), gid, UPLOAD_DIR, path, scope=scope)
     except Exception:  # noqa: BLE001 半截导出文件不能留在服务器
-        kg_log.exception("知识图谱迁移包导出失败 user=%s#%s graph=%s",
-                         g.user["username"], g.user["id"], gid)
+        kg_log.exception("知识图谱迁移包导出失败 user=%s#%s graph=%s scope=%s",
+                         g.user["username"], g.user["id"], gid, scope)
         try:
             os.remove(path)
         except OSError:
             pass
         flash("知识图谱导出失败，请查看知识图谱日志")
         return redirect(url_for("knowledge_graph_detail", gid=gid))
-    kg_log.info("导出知识图谱迁移包 user=%s#%s graph=%s package=%s",
-                g.user["username"], g.user["id"], gid, os.path.basename(path))
+    kg_log.info("导出知识图谱迁移包 user=%s#%s graph=%s scope=%s package=%s",
+                g.user["username"], g.user["id"], gid, scope, os.path.basename(path))
+    suffix = "_知识图谱.zip" if scope == "graph" else "_完整迁移包.zip"
     download = (f"{course_export.safe_component(graph['subject'], '知识图谱')}"
-                "_完整迁移包.zip")
+                f"{suffix}")
     response = send_file(path, as_attachment=True, download_name=download)
     response.call_on_close(lambda: os.remove(path) if os.path.exists(path) else None)
     return response

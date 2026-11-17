@@ -28,6 +28,8 @@ def _parser():
     export = commands.add_parser("export", help="导出完整迁移 ZIP")
     export.add_argument("graph_id", type=int, metavar="GID")
     export.add_argument("--output", required=True, metavar="PATH", help="输出 ZIP 路径")
+    export.add_argument("--graph-only", action="store_true",
+                        help="仅导出知识图谱（节点与关系），不含原始资料文件")
 
     restore = commands.add_parser("import", help="导入迁移 ZIP并创建新图谱")
     restore.add_argument("package", metavar="PACKAGE", help="迁移 ZIP 路径")
@@ -87,10 +89,14 @@ def main(argv=None):
             _print_status(inspect_graph(connection, args.graph_id))
             return 0
         if args.command == "export":
-            result = export_graph(connection, args.graph_id, storage_path, args.output)
+            scope = "graph" if args.graph_only else "full"
+            result = export_graph(connection, args.graph_id, storage_path,
+                                  args.output, scope=scope)
             print(f"导出成功：{result['output_path']}")
-            print(f"材料 {result['counts']['kg_materials']} 份；"
-                  f"节点 {result['counts']['kg_nodes']} 个；关系 {result['counts']['kg_edges']} 条")
+            print(f"范围：{'仅知识图谱' if scope == 'graph' else '完整迁移包'}；"
+                  f"材料 {result['counts']['kg_materials']} 份；"
+                  f"节点 {result['counts']['kg_nodes']} 个；"
+                  f"关系 {result['counts']['kg_edges']} 条")
             return 0
         if args.command == "import":
             owner = connection.execute(

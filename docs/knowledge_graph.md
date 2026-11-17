@@ -312,7 +312,7 @@ erDiagram
 | GET | `/knowledge-graphs/<oid:gid>` | 图谱详情、资料、表格和分层图 | HTML |
 | GET | `/knowledge-graphs/<oid:gid>/concepts/<oid:nid>` | 单个概念上下游邻域 | HTML |
 | GET | `/knowledge-graphs/<oid:gid>/status.json` | 建图状态轮询 | JSON |
-| GET | `/knowledge-graphs/<oid:gid>/export` | 导出指定图谱的完整迁移包；包内不保留图谱名称 | ZIP 下载 |
+| GET | `/knowledge-graphs/<oid:gid>/export` | 导出指定图谱的迁移包；`scope=graph` 时仅导出知识图谱；包内不保留图谱名称 | ZIP 下载 |
 | POST | `/knowledge-graphs/import` | 导入迁移包并新建图谱；表单 `package/name`，名称由导入者指定 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/materials` | 上传一份或多份资料；表单字段 `files` | 重定向 |
 | POST | `/knowledge-graphs/materials/<oid:mid>/delete` | 删除资料并回收其独有节点和边 | 重定向 |
@@ -334,6 +334,11 @@ erDiagram
 - `README.md`：面向人与大语言模型的自然语言说明，解释包结构、关系语义、关键字段以及重建图谱的最小步骤。
 
 导入仍兼容 `version=1` 的旧包；新包缺少这两个说明文件时也允许导入。
+
+`scope=graph` 的“仅导出知识图谱”包只包含图谱信息、`kg_nodes` 与 `kg_edges`，
+不包含 `files/` 下的原始资料、文本块、体检历史和协作成员，节点/关系上的
+`source_materials` 会被清空。该包可正常导入 GradeLogy 或迁移到其他平台，
+但只能恢复图谱结构，无法恢复或重建原始资料内容。
 
 ### 5.2 建图状态 JSON
 

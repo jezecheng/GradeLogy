@@ -1604,11 +1604,11 @@ class KGRouteTest(unittest.TestCase):
         self.assertEqual(self.login(3).get(
             self.url("knowledge_graph_export", gid=graph["id"])).status_code, 403)
 
-        def write_package(db, gid, upload_dir, output_path):
+        def write_package(db, gid, upload_dir, output_path, scope="full"):
             self.assertEqual(gid, graph["id"])
             with zipfile.ZipFile(output_path, "w") as archive:
                 archive.writestr("manifest.json", "{}")
-            return {"graph_id": gid}
+            return {"graph_id": gid, "scope": scope}
 
         with mock.patch.object(app_module.kg_transfer, "export_graph",
                                side_effect=write_package) as export:
@@ -1616,8 +1616,14 @@ class KGRouteTest(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertTrue(response.data.startswith(b"PK"))
             self.assertIn("attachment", response.headers["Content-Disposition"])
+            self.assertEqual(export.call_args.kwargs["scope"], "full")
             response.close()
-        export.assert_called_once()
+            response = self.client.get(
+                self.url("knowledge_graph_export", gid=graph["id"]) + "?scope=graph")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(export.call_args.kwargs["scope"], "graph")
+            response.close()
+        self.assertEqual(export.call_count, 2)
 
     def test_import_route_uploads_package_as_current_user(self):
         created = {}
@@ -1988,6 +1994,53 @@ class KGTransferTest(unittest.TestCase):
         self.assertNotEqual(duplicate["graph_id"], gid)
         self.assertEqual(self.target.execute(
             "SELECT COUNT(*) FROM knowledge_graphs").fetchone()[0], 3)
+
+    def test_graph_only_export_omits_materials_and_imports(self):
+        package = os.path.join(self.temp.name, "graph-only.zip")
+        manifest = kg_transfer.export_graph(
+            self.source, 7, self.source_upload, package, scope="graph")
+        self.assertEqual(manifest["scope"], "graph")
+        self.assertEqual(manifest["materials"], [])
+        self.assertEqual(manifest["counts"]["kg_materials"], 0)
+        self.assertEqual(manifest["counts"]["kg_chunks"], 0)
+        with zipfile.ZipFile(package) as archive:
+            names = set(archive.namelist())
+            data = json.loads(archive.read("data.json"))
+            metadata = json.loads(archive.read("metadata.json"))
+            readme = archive.read("README.md").decode("utf-8")
+        self.assertEqual(names, {"manifest.json", "data.json", "metadata.json", "README.md"})
+        for key in ("materials", "chunks", "audits", "members"):
+            self.assertEqual(data[key], [])
+        self.assertEqual(data["users"], {})
+        self.assertEqual(data["graph"]["name"], "")
+        self.assertEqual(len(data["nodes"]), 2)
+        self.assertEqual(len(data["edges"]), 1)
+        for row in data["nodes"] + data["edges"]:
+            self.assertEqual(row["source_materials"], "")
+        self.assertEqual(metadata["scope"], "graph")
+        self.assertEqual(metadata["document_type"], "knowledge_graph_only_package")
+        self.assertIn("仅知识图谱", readme)
+        self.assertIn("无法恢复资料内容", readme)
+
+        result = kg_transfer.import_graph(
+            self.target, package, self.target_upload, 20, name="仅图谱导入")
+        gid = result["graph_id"]
+        self.assertEqual(result["counts"], {
+            "materials": 0, "chunks": 0, "nodes": 2,
+            "edges": 1, "audits": 0, "members": 0})
+        self.assertEqual(self.target.execute(
+            "SELECT COUNT(*) FROM kg_materials WHERE graph_id=?", (gid,)).fetchone()[0], 0)
+        nodes = {row["name"]: row for row in self.target.execute(
+            "SELECT * FROM kg_nodes WHERE graph_id=?", (gid,))}
+        self.assertEqual(set(nodes), {"氧化还原", "电子守恒"})
+        for node in nodes.values():
+            self.assertEqual(node["source_materials"], "")
+        edge = self.target.execute(
+            "SELECT * FROM kg_edges WHERE graph_id=?", (gid,)).fetchone()
+        self.assertEqual(edge["src_id"], nodes["氧化还原"]["id"])
+        self.assertEqual(edge["dst_id"], nodes["电子守恒"]["id"])
+        self.assertEqual(edge["source_materials"], "")
+        self.assertEqual(edge["evidence"], "教材原文")
 
     def test_cli_status_export_and_import(self):
         source_db = os.path.join(self.temp.name, "source.db")
