@@ -1622,12 +1622,12 @@ class KGRouteTest(unittest.TestCase):
     def test_import_route_uploads_package_as_current_user(self):
         created = {}
 
-        def import_package(db, package_path, upload_dir, owner_id):
+        def import_package(db, package_path, upload_dir, owner_id, name=None):
             self.assertTrue(zipfile.is_zipfile(package_path))
             cur = db.execute("INSERT INTO knowledge_graphs(subject,name,created_by) "
-                             "VALUES('化学','导入图谱',?)", (owner_id,))
+                             "VALUES('化学',?,?)", (name, owner_id))
             db.commit()
-            created.update(id=cur.lastrowid, owner=owner_id)
+            created.update(id=cur.lastrowid, owner=owner_id, name=name)
             return {"graph_id": cur.lastrowid}
 
         payload = io.BytesIO()
@@ -1638,16 +1638,85 @@ class KGRouteTest(unittest.TestCase):
                                side_effect=import_package) as importer:
             response = self.client.post(
                 self.url("knowledge_graph_import"),
-                data={"_csrf": "test-token", "package": (payload, "graph.zip")},
+                data={"_csrf": "test-token", "name": "导入后的图谱",
+                      "package": (payload, "graph.zip")},
                 content_type="multipart/form-data")
         self.assertEqual(response.status_code, 302)
         self.assertEqual(created["owner"], 2)
+        self.assertEqual(created["name"], "导入后的图谱")
         self.assertTrue(response.headers["Location"].endswith(
             self.url("knowledge_graph_detail", gid=created["id"])))
         importer.assert_called_once()
         html = self.client.get(self.url("knowledge_graphs")).get_data(as_text=True)
         self.assertIn("导入迁移包", html)
         self.assertIn('data-dialog-open="kg-import"', html)
+
+    def test_import_route_roundtrip_with_real_package(self):
+        """不经 mock：导出真实迁移包并通过导入路由创建新图谱。"""
+        graph = self._create_graph()
+        content = b"prerequisite concept"
+        abs_dir = os.path.join(app_module.UPLOAD_DIR, "kg", str(graph["id"]))
+        os.makedirs(abs_dir, exist_ok=True)
+        with open(os.path.join(abs_dir, "book.txt"), "wb") as fh:
+            fh.write(content)
+        con = self._db()
+        con.execute(
+            "INSERT INTO kg_materials(id,graph_id,filename,stored_name,size,sha256,"
+            "status,uploaded_by) VALUES(110,?,?,?,?,?,'完成',2)",
+            (graph["id"], "教材.txt", f"kg/{graph['id']}/book.txt",
+             len(content), hashlib.sha256(content).hexdigest()))
+        con.executemany(
+            "INSERT INTO kg_nodes(id,graph_id,name,normalized) VALUES(?,?,?,?)",
+            [(120, graph["id"], "A", "A"), (121, graph["id"], "B", "B")])
+        con.execute(
+            "INSERT INTO kg_edges(id,graph_id,src_id,dst_id,relation) "
+            "VALUES(130,?,120,121,'prerequisite')", (graph["id"],))
+        con.commit()
+        con.close()
+
+        handle = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        handle.close()
+        try:
+            con = self._db()
+            kg_transfer.export_graph(
+                con, graph["id"], app_module.UPLOAD_DIR, handle.name)
+            con.close()
+            with open(handle.name, "rb") as fh:
+                payload = io.BytesIO(fh.read())
+            response = self.client.post(
+                self.url("knowledge_graph_import"),
+                data={"_csrf": "test-token", "name": "路由导入图谱",
+                      "package": (payload, "graph.zip")},
+                content_type="multipart/form-data")
+            self.assertEqual(response.status_code, 302)
+
+            con = self._db()
+            imported = con.execute(
+                "SELECT * FROM knowledge_graphs WHERE name='路由导入图谱'").fetchone()
+            self.assertIsNotNone(imported)
+            self.assertNotEqual(imported["id"], graph["id"])
+            self.assertTrue(response.headers["Location"].endswith(
+                self.url("knowledge_graph_detail", gid=imported["id"])))
+            counts = {
+                table: con.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE graph_id=?",
+                    (imported["id"],)).fetchone()[0]
+                for table in ("kg_materials", "kg_nodes", "kg_edges")}
+            material = con.execute(
+                "SELECT stored_name FROM kg_materials WHERE graph_id=?",
+                (imported["id"],)).fetchone()
+            con.close()
+        finally:
+            os.remove(handle.name)
+
+        self.assertEqual(counts, {"kg_materials": 1, "kg_nodes": 2, "kg_edges": 1})
+        self.assertTrue(material["stored_name"].startswith(f"kg/{imported['id']}/"))
+        imported_file = os.path.join(app_module.UPLOAD_DIR, material["stored_name"])
+        with open(imported_file, "rb") as fh:
+            self.assertEqual(fh.read(), content)
+        html = self.client.get(
+            self.url("knowledge_graph_detail", gid=imported["id"])).get_data(as_text=True)
+        self.assertIn("路由导入图谱", html)
 
     def test_failed_material_retry_reuses_successful_chunks(self):
         graph = self._create_graph()
@@ -1839,23 +1908,37 @@ class KGTransferTest(unittest.TestCase):
     def test_roundtrip_remaps_all_ids_users_and_course(self):
         with zipfile.ZipFile(self.package) as archive:
             self.assertEqual(set(archive.namelist()),
-                             {"manifest.json", "data.json", "files/11/教材.txt"})
+                             {"manifest.json", "data.json", "metadata.json",
+                              "README.md", "files/11/教材.txt"})
             raw = archive.read("data.json")
             self.assertNotIn(b"teacher-secret", raw)
             data = json.loads(raw)
             self.assertEqual(data["users"]["2"], "teacher")
+            self.assertEqual(data["graph"]["name"], "")
+            metadata = json.loads(archive.read("metadata.json"))
+            readme = archive.read("README.md").decode("utf-8")
+        self.assertEqual(metadata["format"], "gradelogy-kg")
+        self.assertEqual(metadata["version"], 2)
+        self.assertTrue(metadata["graph_name_omitted"])
+        self.assertNotIn("name", metadata["graph"])
+        self.assertEqual(metadata["counts"]["kg_nodes"], 2)
+        self.assertIn("prerequisite", readme)
+        self.assertIn("metadata.json", readme)
+        self.assertNotIn("必修一", readme)
+        self.assertNotIn("必修一", json.dumps(metadata, ensure_ascii=False))
         self.assertEqual(self.manifest["counts"]["kg_nodes"], 2)
         inspected = kg_transfer.inspect_graph(self.source, 7)
         self.assertEqual(inspected["counts"]["chunks"], 2)
         self.assertEqual(len(inspected["recent_errors"]), 2)
 
         result = kg_transfer.import_graph(
-            self.target, self.package, self.target_upload, 20, course_id=900)
+            self.target, self.package, self.target_upload, 20, course_id=900,
+            name="迁移后的图谱")
         gid = result["graph_id"]
         self.assertNotEqual(gid, 7)
         graph = self.target.execute("SELECT * FROM knowledge_graphs WHERE id=?", (gid,)).fetchone()
         self.assertEqual(graph["created_by"], 20)
-        self.assertEqual(graph["name"], "必修一")
+        self.assertEqual(graph["name"], "迁移后的图谱")
         self.assertIsNotNone(self.target.execute(
             "SELECT 1 FROM course_knowledge_graphs WHERE course_id=900 AND graph_id=?",
             (gid,)).fetchone())
@@ -1901,7 +1984,7 @@ class KGTransferTest(unittest.TestCase):
         self.assertFalse(self.target.in_transaction)
 
         duplicate = kg_transfer.import_graph(
-            self.target, self.package, self.target_upload, 20)
+            self.target, self.package, self.target_upload, 20, name="迁移后的图谱副本")
         self.assertNotEqual(duplicate["graph_id"], gid)
         self.assertEqual(self.target.execute(
             "SELECT COUNT(*) FROM knowledge_graphs").fetchone()[0], 3)
@@ -1937,7 +2020,8 @@ class KGTransferTest(unittest.TestCase):
         with contextlib.redirect_stdout(stdout):
             code = kg_cli.main([
                 "--db", target_db, "--storage", self.target_upload,
-                "import", cli_package, "--owner", "owner", "--course-id", "900"])
+                "import", cli_package, "--owner", "owner", "--name", "命令行导入图谱",
+                "--course-id", "900"])
         self.assertEqual(code, 0)
         self.assertIn("导入成功：新图谱 #", stdout.getvalue())
         self.assertIn("已绑定课程 #900", stdout.getvalue())
@@ -1945,7 +2029,7 @@ class KGTransferTest(unittest.TestCase):
         with contextlib.closing(sqlite3.connect(target_db)) as imported:
             imported.row_factory = sqlite3.Row
             graph = imported.execute(
-                "SELECT * FROM knowledge_graphs WHERE name='必修一'").fetchone()
+                "SELECT * FROM knowledge_graphs WHERE name='命令行导入图谱'").fetchone()
             self.assertIsNotNone(graph)
             self.assertEqual(graph["created_by"], 20)
             self.assertIsNotNone(imported.execute(
@@ -1977,7 +2061,8 @@ class KGTransferTest(unittest.TestCase):
                         info.external_attr = 0o120777 << 16
                         archive.writestr(info, "target")
                 with self.assertRaises(kg_transfer.KGTransferError):
-                    kg_transfer.import_graph(self.target, path, self.target_upload, 20)
+                    kg_transfer.import_graph(
+                        self.target, path, self.target_upload, 20, name="恶意包测试")
                 self.assertEqual(self.target.execute(
                     "SELECT COUNT(*) FROM knowledge_graphs").fetchone()[0], 1)
         self.assertFalse(os.path.exists(os.path.join(self.temp.name, "escape.txt")))
@@ -1994,7 +2079,8 @@ class KGTransferTest(unittest.TestCase):
             archive.writestr("data.json", data_text)
             archive.writestr(material_path, b"X" * len(self.content))
         with self.assertRaisesRegex(kg_transfer.KGTransferError, "SHA256"):
-            kg_transfer.import_graph(self.target, bad_package, self.target_upload, 20)
+            kg_transfer.import_graph(
+                self.target, bad_package, self.target_upload, 20, name="校验失败测试")
         self.assertEqual(self.target.execute(
             "SELECT COUNT(*) FROM knowledge_graphs").fetchone()[0], 1)
         self.assertEqual(self.target.execute(

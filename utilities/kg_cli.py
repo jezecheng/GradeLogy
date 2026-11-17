@@ -32,6 +32,8 @@ def _parser():
     restore = commands.add_parser("import", help="导入迁移 ZIP并创建新图谱")
     restore.add_argument("package", metavar="PACKAGE", help="迁移 ZIP 路径")
     restore.add_argument("--owner", required=True, metavar="USERNAME", help="新图谱所有者用户名")
+    restore.add_argument("--name", metavar="NAME",
+                         help="新图谱名称；新迁移包不携带名称，需指定")
     restore.add_argument("--course-id", type=int, metavar="ID", help="可选：显式绑定课程 ID")
     return parser
 
@@ -96,7 +98,8 @@ def main(argv=None):
             if owner is None:
                 raise KGTransferError(f"导入者用户名不存在：{args.owner}")
             result = import_graph(
-                connection, args.package, storage_path, owner["id"], args.course_id)
+                connection, args.package, storage_path, owner["id"],
+                args.course_id, name=args.name)
             print(f"导入成功：新图谱 #{result['graph_id']}")
             print("；".join(f"{label} {result['counts'][key]}" for key, label in (
                 ("materials", "材料"), ("chunks", "文本块"), ("nodes", "节点"),

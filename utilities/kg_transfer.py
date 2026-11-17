@@ -15,7 +15,8 @@ from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
 FORMAT = "gradelogy-kg"
-VERSION = 1
+VERSION = 2
+SUPPORTED_VERSIONS = (1, 2)
 MAX_JSON_BYTES = 256 * 1024 * 1024
 MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
@@ -187,9 +188,214 @@ def _write_material(archive, source, archive_name):
     return size, digest.hexdigest()
 
 
+_RELATION_TYPES = [
+    {"name": "prerequisite", "label": "前置知识",
+     "direction": "from 是学习 to 之前必须具备的基础"},
+    {"name": "contains", "label": "结构包含",
+     "direction": "from 是上位概念，to 是下位概念"},
+    {"name": "related", "label": "并列 / 互补 / 常共同考查",
+     "direction": "不表达学习先后依赖，from 与 to 可互换理解"},
+]
+
+_FIELD_GLOSSARY = {
+    "kg_materials": {
+        "id": "资料 ID；与 files/<id>/ 下的归档文件一一对应",
+        "filename": "原始文件名，仅用于展示",
+        "sha256": "原始文件 SHA256，可用于校验文件内容",
+        "size": "原始文件字节数",
+        "page_count": "PDF 解析页数，文本资料为 0",
+        "char_count": "参与建图的字符数",
+        "status": "建图状态：待建图 / 建图中 / 完成 / 失败",
+    },
+    "kg_chunks": {
+        "id": "文本块 ID",
+        "material_id": "所属资料 ID",
+        "page_no": "起始页码，文本资料为 0",
+        "chunk_no": "资料内块序号，从 0 开始",
+        "content": "送入模型的原文片段",
+        "status": "该块建图状态：pending / running / success / failed",
+        "extraction_json": "该块的原始抽取结果，包含 concepts 与 relations",
+    },
+    "kg_nodes": {
+        "id": "节点在源实例中的主键；导入时应重新分配，仅用于包内交叉引用",
+        "name": "概念、定理、方法或公式的显示名称",
+        "normalized": "名称归一化结果，同一图谱内唯一，用于合并同义写法",
+        "category": "模块 / 主题分类，可为空",
+        "definition": "一句话定义，可为空",
+        "aliases": "别名的 JSON 数组字符串",
+        "source_materials": "支撑该节点的资料 ID 列表，格式为 ,11,12,",
+        "confidence": "模型抽取置信度，0~1；不等同于教师审核后的正确率",
+    },
+    "kg_edges": {
+        "id": "关系在源实例中的主键；导入时应重新分配",
+        "src_id": "起点节点 ID；方向含义见 relation_types",
+        "dst_id": "终点节点 ID",
+        "relation": "关系类型，见 relation_types",
+        "evidence": "支撑该关系的资料原句或关键短语",
+        "source_materials": "支撑该关系的资料 ID 列表，格式为 ,11,",
+        "confidence": "模型抽取置信度，0~1",
+    },
+    "kg_audits": {
+        "status": "AI 体检状态：待确认 / 已应用 / 无需调整 等",
+        "suggestions": "AI 体检建议 JSON，可能引用 node_ids / edge_id",
+        "snapshot": "应用建议前的图谱快照 JSON，可用于回滚",
+    },
+    "kg_members": {
+        "user_id": "协作者在源实例中的用户 ID；导入时按 username 重新匹配",
+        "role": "协作角色：manage / edit / use",
+    },
+}
+
+
+def _build_metadata(graph, counts, material_files):
+    """生成结构化元数据；不包含原图谱名称。"""
+    return {
+        "format": FORMAT,
+        "version": VERSION,
+        "document_type": "knowledge_graph_transfer_package",
+        "generated_by": {
+            "name": "GradeLogy",
+            "description": "从教材、考纲、讲义中抽取学科概念与关系形成的知识图谱",
+        },
+        "exported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "graph_name_omitted": True,
+        "graph": {
+            "subject": graph.get("subject") or "",
+            "grade_level": graph.get("grade_level") or "",
+            "description": graph.get("description") or "",
+        },
+        "counts": counts,
+        "relation_types": _RELATION_TYPES,
+        "field_glossary": _FIELD_GLOSSARY,
+        "provenance": {
+            "concepts": "由教师上传的资料经模型逐块抽取，再按归一化名称增量合并",
+            "source_materials": "节点和关系通过 source_materials 关联支撑它的资料 ID",
+            "evidence": "关系边保留资料原句或关键短语，便于人工复核",
+            "confidence": "0~1 的模型自评置信度，不是经过教学审核的正确率",
+        },
+        "import_guidance": [
+            "导入时必须为新图谱指定名称；原图谱名称已被有意省略",
+            "kg_nodes / kg_edges 的 id 是包内局部 ID，导入到新平台时应重新分配",
+            "先按 kg_nodes 建节点，再用旧 id 映射重建 kg_edges 的 src_id 与 dst_id",
+            "relation 的 from/to 方向必须按 relation_types 的解释保留",
+            "source_materials 中的数字是 kg_materials.id，可映射到 files/ 下的原始资料",
+            "kg_chunks 与 kg_audits 是可选的历史信息，可在只需要图结构时忽略",
+        ],
+        "files": {
+            "manifest": "manifest.json",
+            "data": "data.json",
+            "readme": "README.md",
+            "metadata": "metadata.json",
+            "materials": material_files,
+        },
+    }
+
+
+def _one_line(value, limit=200):
+    text = " ".join(str(value or "").split())
+    return text[:limit]
+
+
+def _render_readme(metadata):
+    """把元数据渲染成自然语言说明，便于 LLM 直接阅读。"""
+    graph = metadata["graph"]
+    counts = metadata["counts"]
+    material_count = counts.get("kg_materials", 0)
+    chunk_count = counts.get("kg_chunks", 0)
+    lines = [
+        "# GradeLogy 知识图谱迁移包",
+        "",
+        "本说明面向人类读者与大语言模型，用自然语言描述这个 ZIP 的内容与语义。",
+        "即使不运行 GradeLogy，也可以据此理解、校验或迁移图谱。",
+        "",
+        "## 1. 包内文件",
+        "",
+        "| 文件 | 作用 |",
+        "| --- | --- |",
+        "| `metadata.json` | 结构化元数据：关系语义、字段说明、数量与导入建议 |",
+        "| `manifest.json` | 机器校验清单：格式版本、导出时间、各表行数与资料文件 SHA256 |",
+        "| `data.json` | 图谱数据：资料、文本块、节点、关系、体检历史与协作成员 |",
+        "| `files/<material_id>/<filename>` | 原始资料文件，按资料 ID 归档 |",
+        "| `README.md` | 本说明 |",
+        "",
+        "## 2. 图谱概况",
+        "",
+        f"- 学科：{_one_line(graph.get('subject'), 80) or '未填写'}",
+        f"- 学段 / 适用年级：{_one_line(graph.get('grade_level'), 40) or '未填写'}",
+        f"- 说明：{_one_line(graph.get('description')) or '无'}",
+        f"- 概念节点：{counts.get('kg_nodes', 0)} 个",
+        f"- 关系边：{counts.get('kg_edges', 0)} 条",
+        f"- 原始资料：{material_count} 份（文本块 {chunk_count} 个）",
+        "",
+        "导出时有意省略了原图谱名称，导入方应自行命名。",
+        "",
+        "## 3. 关系语义与方向",
+        "",
+        "| relation | 含义 | 方向 |",
+        "| --- | --- | --- |",
+    ]
+    for item in metadata["relation_types"]:
+        lines.append(f"| `{item['name']}` | {item['label']} | {item['direction']} |")
+    lines += [
+        "",
+        "## 4. 关键字段",
+        "",
+        "- `kg_nodes`：每个对象是一个概念或知识点。`name` 为显示名称，"
+        "`normalized` 用于同名合并，`aliases` 是 JSON 数组字符串，"
+        "`source_materials` 形如 `,11,12,`，指向 `kg_materials.id`。",
+        "- `kg_edges`：每个对象是一条有向关系。`src_id` / `dst_id` 引用 `kg_nodes.id`；"
+        "方向必须结合上面的 `relation` 语义解释。",
+        "- `confidence`：0~1 的模型自评置信度，不是教师审核后的正确率。",
+        "- `evidence`：关系边的资料依据，通常为原句或关键短语。",
+        "- `kg_chunks.extraction_json`：模型对单个文本块的原始抽取结果，"
+        "可用于追溯概念的来源上下文。",
+        "- `kg_audits` 与 `kg_members` 记录体检历史和协作成员，"
+        "他们不是图谱结构本身；迁移到其他平台时可以忽略。",
+        "",
+        "## 5. 重建图谱的最小步骤",
+        "",
+        "1. 读取 `data.json`。",
+        "2. 遍历 `kg_nodes` 创建概念节点，忽略旧 `id`，按 `normalized` 去重。",
+        "3. 建立旧 `id` 到新节点 ID 的映射。",
+        "4. 遍历 `kg_edges` 创建有向关系，用映射重写 `src_id` / `dst_id`，"
+        "并按 `relation_types` 保留方向语义。",
+        "5. 如需追溯出处，把 `source_materials` 中的资料 ID 映射到 "
+        "`files/<material_id>/` 下的原始文件。",
+        "6. 只关心图结构时，可以忽略 `kg_chunks`、`kg_audits` 与 `kg_members`。",
+        "",
+        "## 6. 导入到其他平台的提示",
+        "",
+        "- 节点唯一性建议使用 `normalized`，而不是显示名称；同一概念可能有别名。",
+        "- 关系去重建议使用 `(src_id, dst_id, relation)`。",
+        "- 需要保留可解释性时，同时导入 `evidence`、`source_materials` 与 `confidence`。",
+        "- 导入 GradeLogy 时，使用系统内「导入迁移包」并填写新图谱名称即可；"
+        "导入不会自动调用 AI。",
+        "",
+        "## 7. 示例",
+        "",
+        "```json",
+        json.dumps({
+            "node": {"id": 31, "name": "氧化还原反应", "normalized": "氧化还原反应",
+                     "category": "反应类型", "aliases": "[\"氧化还原\"]",
+                     "source_materials": ",11,", "confidence": 0.9},
+            "edge": {"src_id": 31, "dst_id": 32, "relation": "prerequisite",
+                     "evidence": "电子守恒是配平氧化还原反应的基础",
+                     "source_materials": ",11,", "confidence": 0.85},
+        }, ensure_ascii=False, indent=2),
+        "```",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def export_graph(db, graph_id, upload_dir, output_path):
-    """把一个图谱及其原始材料导出为 version=1 ZIP，并返回 manifest。"""
+    """把一个图谱及其原始材料导出为 version=2 ZIP，并返回 manifest。
+
+    迁移包不保留原图谱名称，导入时由使用者重新命名；同时写入
+    metadata.json 与 README.md，便于其他 LLM 或平台理解包内容。
+    """
     graph = _graph(db, graph_id)
+    graph["name"] = ""
     data = {"graph": graph}
     for key, table in _DATA_TABLES.items():
         order = "user_id" if key == "members" else "id"
@@ -238,6 +444,15 @@ def export_graph(db, graph_id, upload_dir, output_path):
                     "size": size,
                     "sha256": sha256,
                 })
+            metadata = _build_metadata(
+                graph, counts,
+                {str(item["material_id"]): item["archive_path"]
+                 for item in manifest["materials"]})
+            readme = _render_readme(metadata)
+            archive.writestr(
+                "metadata.json",
+                json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8"))
+            archive.writestr("README.md", readme.encode("utf-8"))
             archive.writestr(
                 "data.json", json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"))
             archive.writestr(
@@ -337,7 +552,8 @@ def _validate_package(archive):
             raise KGTransferError(f"ZIP 包含非普通文件：{name}")
         if info.file_size < 0 or info.file_size > MAX_FILE_BYTES:
             raise KGTransferError(f"ZIP 文件大小异常：{name}")
-        if name in ("manifest.json", "data.json") and info.file_size > MAX_JSON_BYTES:
+        if name in ("manifest.json", "data.json", "metadata.json") \
+                and info.file_size > MAX_JSON_BYTES:
             raise KGTransferError(f"JSON 文件过大：{name}")
         total_size += info.file_size
         if total_size > MAX_TOTAL_BYTES:
@@ -350,11 +566,20 @@ def _validate_package(archive):
     data = _read_json(archive, by_name["data.json"])
     if not isinstance(manifest, dict) or not isinstance(data, dict):
         raise KGTransferError("manifest.json 和 data.json 顶层必须是对象")
+    version = manifest.get("version")
     if (manifest.get("format") != FORMAT
-            or isinstance(manifest.get("version"), bool)
-            or not isinstance(manifest.get("version"), int)
-            or manifest.get("version") != VERSION):
-        raise KGTransferError("仅支持 format=gradelogy-kg、version=1 的迁移包")
+            or isinstance(version, bool)
+            or not isinstance(version, int)
+            or version not in SUPPORTED_VERSIONS):
+        raise KGTransferError(
+            "仅支持 format=gradelogy-kg、version=1 或 2 的迁移包")
+    # metadata.json 是 version=2 新增的可选说明文件；旧包没有也允许导入。
+    if "metadata.json" in by_name:
+        metadata = _read_json(archive, by_name["metadata.json"])
+        if (not isinstance(metadata, dict) or metadata.get("format") != FORMAT
+                or metadata.get("version") != version):
+            raise KGTransferError(
+                "metadata.json 与 manifest.json 的格式或版本不一致")
     if not isinstance(data.get("graph"), dict):
         raise KGTransferError("data.json 缺少 graph 对象")
     graph_id = _positive_id(data["graph"].get("id"), "graph.id")
@@ -380,6 +605,10 @@ def _validate_package(archive):
     material_by_id = {row["id"]: row for row in data["materials"]}
     file_entries = {}
     expected_names = {"manifest.json", "data.json"}
+    # version=2 起附带面向人或 LLM 的说明文件；旧包没有也兼容。
+    for optional in ("metadata.json", "README.md"):
+        if optional in by_name:
+            expected_names.add(optional)
     for entry in entries:
         if not isinstance(entry, dict):
             raise KGTransferError("manifest.json 的材料清单存在非对象项")
@@ -682,8 +911,12 @@ def _rollback_import(db, graph_dir, directory_created):
         shutil.rmtree(graph_dir, ignore_errors=True)
 
 
-def import_graph(db, package_path, upload_dir, owner_id, course_id=None):
-    """安全导入迁移包，始终创建新图谱；失败时回滚数据库并清理新文件。"""
+def import_graph(db, package_path, upload_dir, owner_id, course_id=None, name=None):
+    """安全导入迁移包，始终创建新图谱；失败时回滚数据库并清理新文件。
+
+    优先使用调用方传入的 ``name`` 作为新图谱名称；未传入时兼容旧迁移包中
+    携带的名称。两者都为空时拒绝导入，避免出现无名图谱。
+    """
     owner = _one(db, "SELECT id,username FROM users WHERE id=?", (owner_id,))
     if owner is None:
         raise KGTransferError(f"导入者不存在：{owner_id}")
@@ -698,6 +931,10 @@ def import_graph(db, package_path, upload_dir, owner_id, course_id=None):
         with zipfile.ZipFile(os.fspath(package_path), "r") as archive:
             _manifest, data, infos, files = _validate_package(archive)
             graph = data["graph"]
+            graph_name = (name if name is not None else graph.get("name") or "")
+            graph_name = str(graph_name).strip()[:80]
+            if not graph_name:
+                raise KGTransferError("迁移包未包含图谱名称，请在导入时为新图谱命名")
             materials = data["materials"]
             chunks = data["chunks"]
             nodes = data["nodes"]
@@ -729,7 +966,7 @@ def import_graph(db, package_path, upload_dir, owner_id, course_id=None):
             cursor = db.execute(
                 "INSERT INTO knowledge_graphs(subject,name,description,grade_level,"
                 "created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-                (graph.get("subject") or "", graph.get("name") or "",
+                (graph.get("subject") or "", graph_name,
                  graph.get("description") or "", graph.get("grade_level") or "",
                  owner_id, graph.get("created_at"), graph.get("updated_at")))
             new_graph_id = cursor.lastrowid

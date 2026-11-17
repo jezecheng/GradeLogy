@@ -3321,7 +3321,7 @@ def knowledge_graph_export(gid):
         return redirect(url_for("knowledge_graph_detail", gid=gid))
     kg_log.info("导出知识图谱迁移包 user=%s#%s graph=%s package=%s",
                 g.user["username"], g.user["id"], gid, os.path.basename(path))
-    download = (f"{course_export.safe_component(graph['name'], '知识图谱')}"
+    download = (f"{course_export.safe_component(graph['subject'], '知识图谱')}"
                 "_完整迁移包.zip")
     response = send_file(path, as_attachment=True, download_name=download)
     response.call_on_close(lambda: os.remove(path) if os.path.exists(path) else None)
@@ -3332,6 +3332,10 @@ def knowledge_graph_export(gid):
 @role_required("teacher", "admin")
 def knowledge_graph_import():
     """导入完整迁移包；始终新建图谱，不覆盖同名的既有图谱。"""
+    name = request.form.get("name", "").strip()[:80]
+    if not name:
+        flash("请为新导入的知识图谱命名")
+        return redirect(url_for("knowledge_graphs"))
     package = request.files.get("package")
     if not package or not package.filename:
         flash("请选择知识图谱迁移包")
@@ -3354,7 +3358,7 @@ def knowledge_graph_import():
                     raise ValueError(f"迁移包超过 {cfg.MAX_RESTORE_MB}MB 限制")
                 tmp.write(chunk)
         result = kg_transfer.import_graph(
-            get_db(), package_path, UPLOAD_DIR, g.user["id"])
+            get_db(), package_path, UPLOAD_DIR, g.user["id"], name=name)
     except (ValueError, zipfile.BadZipFile) as e:
         kg_log.warning("知识图谱迁移包导入被拒绝 user=%s#%s file=%s error=%s",
                        g.user["username"], g.user["id"], package.filename, e)

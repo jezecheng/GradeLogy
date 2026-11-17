@@ -312,6 +312,8 @@ erDiagram
 | GET | `/knowledge-graphs/<oid:gid>` | 图谱详情、资料、表格和分层图 | HTML |
 | GET | `/knowledge-graphs/<oid:gid>/concepts/<oid:nid>` | 单个概念上下游邻域 | HTML |
 | GET | `/knowledge-graphs/<oid:gid>/status.json` | 建图状态轮询 | JSON |
+| GET | `/knowledge-graphs/<oid:gid>/export` | 导出指定图谱的完整迁移包；包内不保留图谱名称 | ZIP 下载 |
+| POST | `/knowledge-graphs/import` | 导入迁移包并新建图谱；表单 `package/name`，名称由导入者指定 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/materials` | 上传一份或多份资料；表单字段 `files` | 重定向 |
 | POST | `/knowledge-graphs/materials/<oid:mid>/delete` | 删除资料并回收其独有节点和边 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/edit` | 修改名称和说明；表单 `name/description` | 重定向 |
@@ -325,6 +327,13 @@ erDiagram
 | POST | `/knowledge-graphs/<oid:gid>/members` | 新增或调整协作老师；表单 `user_id/role` | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/members/<oid:uid>/remove` | 移除协作老师 | 重定向 |
 | POST | `/course/<oid:cid>/knowledge-graphs` | 整体替换课程关联；表单 `graph_ids` 可多选 | 重定向 |
+
+迁移包（`format=gradelogy-kg`, `version=2`）除 `data.json`、`manifest.json` 和 `files/` 下的原始资料外，还会写入：
+
+- `metadata.json`：结构化元数据，包含学科/学段、各表数量、关系类型及方向、字段释义、出处约定和导入建议，且有意省略原图谱名称；
+- `README.md`：面向人与大语言模型的自然语言说明，解释包结构、关系语义、关键字段以及重建图谱的最小步骤。
+
+导入仍兼容 `version=1` 的旧包；新包缺少这两个说明文件时也允许导入。
 
 ### 5.2 建图状态 JSON
 

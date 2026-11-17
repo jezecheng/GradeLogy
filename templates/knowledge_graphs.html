@@ -36,12 +36,16 @@
         enctype="multipart/form-data" class="stack-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <h2>导入完整迁移包</h2>
+    <label>新图谱名称
+      <input name="name" required maxlength="80" placeholder="如：高中化学必修知识图谱">
+    </label>
     <label>知识图谱迁移包（ZIP）
       <input type="file" name="package" accept=".zip" required>
     </label>
     <p class="muted small">
       包含图结构、原始资料、文本块、抽取结果与体检历史，最大 {{ max_import_mb }}MB。
-      导入会新建一张图谱，不覆盖同名图谱，也不会自动调用 AI；协作账号按用户名匹配。
+      迁移包不保留原图谱名称，请在上方为新图谱命名。导入会新建一张图谱，不覆盖同名图谱，
+      也不会自动调用 AI；协作账号按用户名匹配。
     </p>
     <div class="modal-actions">
       <button type="button" class="ghost" data-dialog-close>取消</button>
