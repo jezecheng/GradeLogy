@@ -6,7 +6,7 @@
 2. 资料、文本块、概念、关系和课程关联在系统内如何组织；
 3. 模块目前提供哪些 Web、JSON 和内部 Python 接口。
 
-> 当前实现是 **Flask 单体应用内的轻量图谱模块**，底层使用 SQLite 邻接表，不是独立的 Neo4j 服务，也没有独立的公开图查询 API。
+> 当前实现是 **Flask 单体应用内的轻量图谱模块**，底层使用 SQLite 邻接表，不是独立的 Neo4j 服务。图谱数据通过登录鉴权的内部 JSON 接口下发给前端，不提供带独立 Token 的公开 REST API。
 
 ## 1. 模块定位
 
@@ -131,7 +131,7 @@ flowchart TD
     K --> L[汇总本资料全部已保存抽取结果]
     L --> M[概念归一化、别名与关系解析]
     M --> N[(kg_nodes<br/>kg_edges)]
-    N --> O[分层 SVG / 概念邻域<br/>课程关联与后续分析]
+    N --> O[ECharts 知识星系<br/>概念邻域 / 课程关联]
 ```
 
 ### 3.1 上传与文本分块
@@ -285,8 +285,24 @@ erDiagram
 
 1. **资料视图**：文件状态、页数、字数、本地处理时间、chunk 统计、ETA 和请求明细；
 2. **表格视图**：概念节点与关系边，可折叠；关系边支持反向与删除；
-3. **图形视图**：按前置关系拓扑分层，最多展示关联度最高的 80 个节点；点击概念进入直接前置、直接延伸、包含和相关概念邻域；
+3. **图形视图（知识星系）**：ECharts 5 力导向图一次渲染全量节点与关系，`category` 作为分组星团，节点半径随连接度 `degree` 变化；默认全景只显示连接度前 50 的枢纽标签，滚轮放大后按视野动态显示次级标签；悬停/点击触发 `emphasis.focus: 'adjacency'` 邻接聚光，点击节点从右侧抽屉展示定义、证据出处和上下游跳转；
 4. **治理视图**：成环告警、AI 体检建议预览、协作成员管理、空间/耗时/Token/模型指标与存储明细。
+
+### 4.5 知识星系界面（生产图谱实测）
+
+以下截图来自从生产环境导出的化学知识图谱迁移包（`scope=graph`）重新导入后的实例，包内声明 2639 个概念、4753 条关系；导入后数据库节点与边数量一致，`graph.json` 返回 711 个分类，最大连接度为 43（速率常数），浏览器控制台无脚本报错。
+
+**全景视图**：深空画布上按 `category` 着色的星团，节点大小随连接度变化，默认只显示前 50 个枢纽标签：
+
+![知识星系全景](images/kg-galaxy-overview.jpg)
+
+**滚轮放大**：`graphRoam` 触发 LOD，按视野补充次级节点标签，并按连接度分层限制数量避免重叠：
+
+![知识星系放大后的标签](images/kg-galaxy-zoom.jpg)
+
+**节点抽屉**：点击概念后邻接节点高亮、无关星团暗化，右侧滑出半透明抽屉，展示定义、连接度、置信度、前置/延伸/相关概念及其证据出处，并提供「查看完整概念页」入口：
+
+![知识星系节点抽屉](images/kg-galaxy-drawer.jpg)
 
 ## 5. 当前提供的 HTTP 接口
 
@@ -309,8 +325,10 @@ erDiagram
 |---|---|---|---|
 | GET | `/knowledge-graphs` | 图谱列表及资料、节点、边数量 | HTML |
 | POST | `/knowledge-graphs/create` | 创建图谱；表单 `subject/name/description/grade_level` | 重定向 |
-| GET | `/knowledge-graphs/<oid:gid>` | 图谱详情、资料、表格和分层图 | HTML |
+| GET | `/knowledge-graphs/<oid:gid>` | 图谱详情、资料、表格和知识星系 | HTML |
 | GET | `/knowledge-graphs/<oid:gid>/concepts/<oid:nid>` | 单个概念上下游邻域 | HTML |
+| GET | `/knowledge-graphs/<oid:gid>/graph.json` | 全量节点（含 `degree`）、关系、分类与统计，供知识星系一次性加载 | JSON |
+| GET | `/knowledge-graphs/<oid:gid>/neighbors.json?node_id=` | 概念直接前置/延伸/相关邻域，附概念页带签名的跳转 `url` | JSON |
 | GET | `/knowledge-graphs/<oid:gid>/status.json` | 建图状态轮询 | JSON |
 | GET | `/knowledge-graphs/<oid:gid>/export` | 导出指定图谱的迁移包；`scope=graph` 时仅导出知识图谱；包内不保留图谱名称 | ZIP 下载 |
 | POST | `/knowledge-graphs/import` | 导入迁移包并新建图谱；表单 `package/name`，名称由导入者指定 | 重定向 |
@@ -461,7 +479,8 @@ Content-Type: application/json
 | `utilities/knowledge_graph.py` | `prerequisite_reachable(...)` | 递归 CTE 判断前置子图可达性 |
 | `utilities/knowledge_graph.py` | `prerequisite_cycles(...)` | 强连通分量找出存量前置环 |
 | `utilities/knowledge_graph.py` | `delete_material(...)` | 删除资料并回收独有图元素 |
-| `utilities/knowledge_graph.py` | `layered_graph(...)` | 生成前置关系分层图数据 |
+| `utilities/knowledge_graph.py` | `layered_graph(...)` | 生成前置关系分层数据（详情页已改用知识星系，保留供脚本与测试使用） |
+| `utilities/knowledge_graph.py` | `graph_payload(...)` | 汇总全量节点、关系、分类与节点连接度 `degree`，供知识星系接口下发 |
 | `utilities/knowledge_graph.py` | `concept_neighbors(...)` | 查询概念直接上下游邻域 |
 | `utilities/knowledge_graph.py` | `analyze_graph(...)` | 调用模型生成图谱体检建议 |
 | `utilities/knowledge_graph.py` | `validate_audit_suggestions(...)` | 校验建议的 ID、合并冲突和成环风险 |
@@ -472,7 +491,7 @@ Content-Type: application/json
 
 1. **单机单进程调度**：串行锁和防重集合都在进程内，不能直接当作多 worker 或多实例分布式队列使用。
 2. **轻量邻接表**：适合当前直接上下游、出处和分层查询；不提供 Cypher、Gremlin 或复杂图算法。
-3. **没有公开图查询 API**：当前节点和边通过 HTML 页面展示，JSON 接口只服务建图状态与请求明细。
+3. **只有内部 JSON 图接口**：`graph.json` 会一次性下发整张图谱的全部节点与边，适合当前 2000 量级；它依赖登录会话与图谱权限，不是公开 API，也没有分页、增量或过滤参数。
 4. **抽取结果需要教学复核**：置信度来自模型自评，不等同于经过教师审核的正确率。
 5. **归一化不是完整本体推理**：当前主要解决同名和别名合并，不自动证明两个不同概念在语义上完全等价。
 6. **ETA 是经验估算**：模型限流、重试、推理长度和网络状况都可能使实际时间变化。
@@ -488,7 +507,8 @@ Content-Type: application/json
 - SQLite 表结构与启动中断处理：[db.py](../db.py)
 - OpenAI 兼容调用、重试和请求事件：[utilities/llm.py](../utilities/llm.py)
 - AI operation、usage、token 和费用记录：[ai_usage.py](../ai_usage.py)
-- 教师端页面、分层 SVG 和轮询：[templates/knowledge_graph.html](../templates/knowledge_graph.html)
+- 教师端页面、知识星系容器与轮询：[templates/knowledge_graph.html](../templates/knowledge_graph.html)
+- 知识星系前端渲染（ECharts 力导向、LOD 标签、抽屉、粒子）：[static/kg_echarts.js](../static/kg_echarts.js)
 - 概念邻域页面：[templates/knowledge_graph_concept.html](../templates/knowledge_graph_concept.html)
 - 单元与路由测试：[tests/test_knowledge_graph.py](../tests/test_knowledge_graph.py)
 - 面向教师的使用说明：[docs/teacher.md](teacher.md)

@@ -724,6 +724,48 @@ def layered_graph(db, graph_id, limit=80):
     }
 
 
+def graph_payload(db, graph_id):
+    """返回全量图谱数据，供前端 ECharts 力导向「知识星系」渲染。
+
+    节点带上连接度 degree 作为星球大小权重，分类 category 作为星团分组。
+    """
+    rows = db.execute(
+        "SELECT id,name,category,definition,confidence FROM kg_nodes "
+        "WHERE graph_id=? ORDER BY id", (graph_id,)).fetchall()
+    edge_rows = db.execute(
+        "SELECT id,src_id,dst_id,relation,evidence,confidence FROM kg_edges "
+        "WHERE graph_id=? ORDER BY id", (graph_id,)).fetchall()
+    degree = {row["id"]: 0 for row in rows}
+    for edge in edge_rows:
+        if edge["src_id"] in degree:
+            degree[edge["src_id"]] += 1
+        if edge["dst_id"] in degree:
+            degree[edge["dst_id"]] += 1
+    category_counts = {}
+    for row in rows:
+        name = row["category"] or "未分类"
+        category_counts[name] = category_counts.get(name, 0) + 1
+    categories = [{"name": name, "count": count} for name, count in
+                  sorted(category_counts.items(), key=lambda item: (-item[1], item[0]))]
+    return {
+        "nodes": [{
+            "id": row["id"], "name": row["name"],
+            "category": row["category"] or "未分类",
+            "definition": row["definition"] or "",
+            "confidence": row["confidence"] or 0,
+            "degree": degree[row["id"]],
+        } for row in rows],
+        "edges": [{
+            "id": edge["id"], "src_id": edge["src_id"], "dst_id": edge["dst_id"],
+            "relation": edge["relation"], "evidence": edge["evidence"] or "",
+            "confidence": edge["confidence"] or 0,
+        } for edge in edge_rows],
+        "categories": categories,
+        "stats": {"nodes": len(rows), "edges": len(edge_rows),
+                  "categories": len(categories)},
+    }
+
+
 def concept_neighbors(db, graph_id, node_id):
     """概念本身与它直接相邻的前置、延伸、包含/相关节点。"""
     node = db.execute("SELECT * FROM kg_nodes WHERE id=? AND graph_id=?",

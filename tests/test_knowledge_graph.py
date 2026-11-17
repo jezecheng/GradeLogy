@@ -339,6 +339,38 @@ class KGLogicTest(unittest.TestCase):
         self.assertEqual(len(layout["nodes"]), 3)
         self.assertEqual(layout["hidden_nodes"], 2)
 
+    def test_graph_payload_includes_degree_and_categories(self):
+        basic = self._node("物质分类", "基本概念")
+        middle = self._node("物质的量", "基本概念")
+        advanced = self._node("物质的量浓度", "溶液")
+        self._edge(basic, middle)
+        self._edge(middle, advanced)
+        self._edge(advanced, basic, "related")
+        payload = kg.graph_payload(self.con, 1)
+        self.assertEqual(payload["stats"],
+                         {"nodes": 3, "edges": 3, "categories": 2})
+        nodes = {node["name"]: node for node in payload["nodes"]}
+        self.assertEqual(nodes["物质的量"]["degree"], 2)
+        self.assertEqual(nodes["物质的量"]["category"], "基本概念")
+        self.assertEqual(nodes["物质分类"]["definition"], "物质分类的定义")
+        self.assertEqual(payload["edges"][0]["src_id"], basic)
+        self.assertEqual(payload["edges"][0]["relation"], "prerequisite")
+        counts = {item["name"]: item["count"] for item in payload["categories"]}
+        self.assertEqual(counts, {"基本概念": 2, "溶液": 1})
+
+    def test_graph_payload_marks_uncategorized_nodes(self):
+        self._node("无分类概念", "")
+        payload = kg.graph_payload(self.con, 1)
+        self.assertEqual(payload["nodes"][0]["category"], "未分类")
+        self.assertEqual(payload["categories"][0]["name"], "未分类")
+
+    def test_graph_payload_has_no_node_limit(self):
+        for number in range(120):
+            self._node(f"概念{number}")
+        payload = kg.graph_payload(self.con, 1)
+        self.assertEqual(len(payload["nodes"]), 120)
+        self.assertEqual(payload["stats"]["nodes"], 120)
+
     def test_concept_neighbors_groups_directions(self):
         basic = self._node("物质分类")
         current = self._node("物质的量")
@@ -788,7 +820,7 @@ class KGRouteTest(unittest.TestCase):
             app_module._kg_build_worker(graph["id"], 999, 2)
         endpoint.assert_not_called()
 
-    def test_detail_renders_layered_svg_and_concept_links(self):
+    def test_detail_renders_galaxy_shell_and_data_urls(self):
         graph = self._create_graph()
         basic = self._concept(graph["id"], "物质分类")
         middle = self._concept(graph["id"], "物质的量")
@@ -797,12 +829,67 @@ class KGRouteTest(unittest.TestCase):
         self._link(graph["id"], middle, advanced)
         html = self.client.get(
             self.url("knowledge_graph_detail", gid=graph["id"])).get_data(as_text=True)
-        self.assertIn("前置关系分层图", html)
-        self.assertIn("<svg", html)
-        self.assertIn('class="kg-node"', html)
-        self.assertIn("kg-arrow", html)
+        self.assertIn("知识星系", html)
+        self.assertIn('id="kg-galaxy"', html)
+        self.assertIn('id="kg-drawer"', html)
+        self.assertIn("kg_echarts.js", html)
+        self.assertIn("echarts.min.js", html)
+        self.assertIn(self.url("knowledge_graph_graph_data",
+                               gid=graph["id"]), html)
+        self.assertIn(self.url("knowledge_graph_neighbors_data",
+                               gid=graph["id"]), html)
+        self.assertNotIn("前置关系分层图", html)
+        self.assertNotIn('class="kg-node"', html)
         self.assertIn(self.url("knowledge_graph_concept", gid=graph["id"],
                                nid=middle), html)
+
+    def test_graph_data_route_returns_all_nodes_with_degree(self):
+        graph = self._create_graph()
+        for index in range(90):
+            self._concept(graph["id"], f"概念{index}", category="模块甲")
+        con = self._db()
+        rows = con.execute(
+            "SELECT id FROM kg_nodes WHERE graph_id=? ORDER BY id",
+            (graph["id"],)).fetchall()
+        con.execute(
+            "INSERT INTO kg_edges(graph_id,src_id,dst_id,relation)"
+            " VALUES(?,?,?,'prerequisite')",
+            (graph["id"], rows[0]["id"], rows[1]["id"]))
+        con.commit()
+        con.close()
+        payload = self.client.get(
+            self.url("knowledge_graph_graph_data", gid=graph["id"])).get_json()
+        self.assertEqual(payload["stats"]["nodes"], 90)
+        self.assertEqual(payload["stats"]["edges"], 1)
+        self.assertEqual(payload["categories"],
+                         [{"name": "模块甲", "count": 90}])
+        degrees = {node["id"]: node["degree"] for node in payload["nodes"]}
+        self.assertEqual(degrees[rows[0]["id"]], 1)
+        self.assertEqual(degrees[rows[2]["id"]], 0)
+
+    def test_neighbors_route_returns_links_and_directions(self):
+        graph = self._create_graph()
+        basic = self._concept(graph["id"], "物质分类")
+        middle = self._concept(graph["id"], "物质的量")
+        advanced = self._concept(graph["id"], "物质的量浓度")
+        self._link(graph["id"], basic, middle)
+        self._link(graph["id"], middle, advanced)
+        payload = self.client.get(self.url(
+            "knowledge_graph_neighbors_data", gid=graph["id"],
+            node_id=middle)).get_json()
+        self.assertEqual(payload["node"]["name"], "物质的量")
+        self.assertEqual([item["name"] for item in payload["prerequisites"]],
+                         ["物质分类"])
+        self.assertEqual([item["name"] for item in payload["dependents"]],
+                         ["物质的量浓度"])
+        self.assertTrue(payload["prerequisites"][0]["url"].startswith(
+            "/knowledge-graphs/"))
+        self.assertEqual(self.client.get(self.url(
+            "knowledge_graph_neighbors_data",
+            gid=graph["id"])).status_code, 400)
+        self.assertEqual(self.client.get(self.url(
+            "knowledge_graph_neighbors_data", gid=graph["id"],
+            node_id=99999)).status_code, 404)
 
     def test_concept_page_shows_neighbors(self):
         graph = self._create_graph()

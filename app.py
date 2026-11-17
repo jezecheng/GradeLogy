@@ -645,7 +645,8 @@ def security_headers(resp):
     resp.headers.setdefault(
         "Content-Security-Policy",
         "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
-        "script-src 'self' 'unsafe-inline'; frame-src 'self'; object-src 'none'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "frame-src 'self'; object-src 'none'; "
         "base-uri 'self'; form-action 'self'; frame-ancestors 'self'")
     if request.is_secure:
         resp.headers.setdefault("Strict-Transport-Security",
@@ -3551,6 +3552,45 @@ def knowledge_graph_detail(gid):
         max_upload_mb=cfg.KG_MAX_UPLOAD_MB,
         can_edit=role in ("manage", "edit"),
         can_manage=role == "manage")
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/graph.json")
+@role_required("teacher", "admin")
+def knowledge_graph_graph_data(gid):
+    """知识星系数据：一次性下发全量节点、关系、分类与连接度。"""
+    _kg_graph(gid)
+    return jsonify(kg_utils.graph_payload(get_db(), gid))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/neighbors.json")
+@role_required("teacher", "admin")
+def knowledge_graph_neighbors_data(gid):
+    """知识点详情：复用 concept_neighbors 并补齐可跳转链接。"""
+    _kg_graph(gid)
+    node_id = request.args.get("node_id", type=int)
+    if not node_id:
+        abort(400)
+    detail = kg_utils.concept_neighbors(get_db(), gid, node_id)
+    if detail is None:
+        abort(404)
+    node = detail["node"]
+
+    def with_url(items):
+        return [dict(item, url=url_for("knowledge_graph_concept", gid=gid,
+                                       nid=item["id"])) for item in items]
+
+    return jsonify({
+        "node": {
+            "id": node["id"], "name": node["name"],
+            "category": node["category"] or "未分类",
+            "definition": node["definition"] or "",
+            "confidence": node["confidence"] or 0,
+            "url": url_for("knowledge_graph_concept", gid=gid, nid=node["id"]),
+        },
+        "prerequisites": with_url(detail["prerequisites"]),
+        "dependents": with_url(detail["dependents"]),
+        "others": with_url(detail["others"]),
+    })
 
 
 @_routes.route("/knowledge-graphs/<oid:gid>/concepts/<oid:nid>")
