@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}我的提示词{% endblock %}
+{% block body_class %}prompt-workspace{% endblock %}
 {% block content %}
 <style>
 .prompt-item { border-bottom: 1px solid #eef0f3; }
@@ -31,13 +32,16 @@
   知识点分析提示词的输入数据通过占位符注入，保留占位符即可按讲次 / 学生自动填充。
 </p>
 
+<div data-tab-group="prompts"><div class="ui-tabs" role="tablist" aria-label="提示词用途">
+{% for kind in ['grade', 'report', 'tag_horizontal', 'tag_vertical'] %}<button type="button" data-tab="prompts-{{ kind }}">{{ kind_label[kind] }}</button>{% endfor %}</div>
 {% for kind in ['grade', 'report', 'tag_horizontal', 'tag_vertical'] %}
-<div class="card">
+<section id="prompts-{{ kind }}" data-tab-panel><div class="card">
   <div class="card-head">
     <h2>{{ kind_label[kind] }}提示词</h2>
     <button type="button" class="small" data-dialog-open="prompt-dialog-{{ kind }}">＋ 新建</button>
   </div>
 
+  <label class="ui-filter">搜索名称<input type="search" data-filter="#prompts-{{ kind }} .prompt-item" placeholder="输入名称关键词"></label>
   <dialog id="prompt-dialog-{{ kind }}" class="modal">
     <form method="post" action="{{ url_for('prompt_create') }}" class="stack-form">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
@@ -53,7 +57,7 @@
       {% if placeholder_hints[kind] %}
       <p class="muted small">{{ placeholder_hints[kind] }}</p>
       {% endif %}
-      <p class="muted small">保存后可在「具体课程 → 提示词配置」里选用；建议先在副本上测试效果。</p>
+      <p class="muted small">保存后可在「具体课程 → 课程设置 → 提示词配置」里选用；建议先在副本上测试效果。</p>
       <div class="modal-actions">
         <button type="button" class="ghost" data-dialog-close>取消</button>
         <button type="submit">保存</button>
@@ -91,7 +95,7 @@
   {% endfor %}
 
   {% for p in kind_mine %}
-  <details class="prompt-item" id="prompt-{{ p.id }}" open>
+  <details class="prompt-item" id="prompt-{{ p.id }}">
     <summary>
       <span class="prompt-name">{{ p.name }}</span>
       <span class="mine-badge">我的</span>
@@ -99,10 +103,11 @@
       <span class="muted small">可编辑、可删除</span>
     </summary>
     <div class="prompt-body">
+      <p class="muted small">明确选用此提示词的课程：{% for c in usage.get(p.id, []) %}<a href="{{ url_for('course_detail', cid=c.id) }}#course-settings">{{ c.name }}</a>{% if not loop.last %}、{% endif %}{% else %}你管理的课程中尚无明确引用{% endfor %}</p>
       {% if placeholder_hints[p.kind] %}
       <p class="muted small">{{ placeholder_hints[p.kind] }}</p>
       {% endif %}
-      <form method="post" action="{{ url_for('prompt_save', pid=p.id) }}" class="stack-form">
+      <form method="post" action="{{ url_for('prompt_save', pid=p.id) }}" class="stack-form" data-edit-guard>
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
         <label>名称
           <input name="name" value="{{ p.name }}" required>
@@ -111,7 +116,7 @@
           <textarea name="content" rows="12" required>{{ p.content }}</textarea>
         </label>
         <div class="prompt-actions">
-          <button type="submit">保存修改</button>
+          <button type="submit">保存修改</button><span data-dirty-hint class="ui-dirty-hint" role="status"></span>
         </div>
       </form>
       <div class="prompt-actions">
@@ -128,8 +133,8 @@
     </div>
   </details>
   {% endfor %}
-</div>
-{% endfor %}
+</div></section>
+{% endfor %}</div>
 
 <script>
 (function () {

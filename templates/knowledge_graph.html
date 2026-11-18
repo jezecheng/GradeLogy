@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ graph.name }}{% endblock %}
+{% block body_class %}graph-workspace{% endblock %}
 {% block content %}
 <style>
 .kg-stats { display: flex; gap: 18px; flex-wrap: wrap; margin: 10px 0 4px; }
@@ -111,7 +112,7 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
   <h1>{{ graph.name }} <span class="subject-badge">{{ graph.subject }}</span>
     <span class="kg-role-badge">{{ role_label }}</span></h1>
   {% if can_manage %}
-  <div class="kg-head-actions">
+  <details class="ui-fold"><summary>更多操作</summary><div class="kg-head-actions">
     <a class="ghost small" href="{{ url_for('knowledge_graph_export', gid=graph.id) }}">导出完整迁移包</a>
     <a class="ghost small" href="{{ url_for('knowledge_graph_export', gid=graph.id, scope='graph') }}"
        title="只导出图谱信息、节点和关系，不含原始资料文件">仅导出知识图谱</a>
@@ -121,7 +122,7 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
       <button class="ghost small">删除图谱</button>
     </form>
-  </div>
+  </div></details>
   {% endif %}
 </div>
 <p class="muted">
@@ -134,32 +135,114 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
   <div class="kg-stat"><b data-count="materials">{{ counts.materials }}</b><span>资料</span></div>
   <div class="kg-stat"><b data-count="nodes">{{ counts.nodes }}</b><span>概念节点</span></div>
   <div class="kg-stat"><b data-count="edges">{{ counts.edges }}</b><span>关系边</span></div>
-  <div class="kg-stat"><b data-count="chunks">{{ counts.chunks }}</b><span>文本块</span></div>
-  <div class="kg-stat"><b>{{ metrics.size_text }}</b><span>占用空间</span></div>
-  <div class="kg-stat"><b>{{ metrics.duration_text }}</b><span>构建总用时</span></div>
-  <div class="kg-stat"><b>{{ metrics.tokens_text }}</b><span>Token</span></div>
-  <div class="kg-stat kg-stat-model"><b>{{ metrics.models_text }}</b><span>使用模型</span></div>
+
 </div>
 
-<details class="card kg-fold" id="kg-members">
+<div data-tab-group="graph">
+<div class="ui-tabs" role="tablist" aria-label="图谱分区">
+<button type="button" data-tab="graph-browse">浏览</button>
+<button type="button" data-tab="graph-materials">资料与建图 · {{ counts.materials }}</button>
+<button type="button" data-tab="graph-governance">治理{% if cycles %} · {{ cycles|length }} 处成环{% endif %}</button>
+<button type="button" data-tab="graph-manage">协作与存储</button></div>
+{% if status_counts.failed or building %}<p class="kg-warn">{% if building %}资料正在构建。{% endif %}{% if status_counts.failed %}{{ status_counts.failed }} 份资料构建失败。{% endif %}<button type="button" class="ghost small" data-show-tab="graph-materials">查看资料状态</button></p>{% endif %}
+{% if cycles %}<p class="kg-warn">发现 {{ cycles|length }} 处前置关系成环。<button type="button" class="ghost small" data-show-tab="graph-governance">检查关系</button></p>{% endif %}
+<section id="graph-browse" data-tab-panel>
+{% if counts.nodes %}<div class="card"><label>查找概念、分类或别名<input type="search" id="graph-search" placeholder="例如：速率常数" autocomplete="off"></label><p class="muted small" id="graph-search-status" role="status">正在准备搜索；也可使用下方概念列表。</p><div id="graph-search-results" class="graph-search-results"></div></div>{% else %}<p class="card">还没有概念，请先到「资料与建图」上传教材。</p>{% endif %}
+{% if counts.nodes %}
+<details class="card kg-fold kg-galaxy-card" open>
   <summary class="card-head">
-    <h2>协作成员 <span class="muted small">{{ members | length }} 位老师；创建者与管理员默认拥有管理权限</span></h2>
+    <h2>知识星系 <span class="muted small">（{{ counts.nodes }} 个概念 · {{ counts.edges }} 条关系）</span></h2>
   </summary>
-  {% if members %}
-  <table class="kg">
-    <thead><tr><th>老师</th><th>角色</th>{% if can_manage %}<th>操作</th>{% endif %}</tr></thead>
-    <tbody>
-      {% for member in members %}
+  <div class="kg-galaxy-shell" id="kg-galaxy-shell"
+       data-url="{{ url_for('knowledge_graph_graph_data', gid=graph.id) }}"
+       data-scope-url="{{ url_for('knowledge_graph_scope_data', gid=graph.id) }}"
+       data-neighbors-url="{{ url_for('knowledge_graph_neighbors_data', gid=graph.id) }}">
+    <div class="kg-galaxy-toolbar">
+      <div class="kg-galaxy-toolbar-row">
+        <div class="kg-galaxy-legend" aria-hidden="true">
+          <span><i class="prerequisite"></i>前置</span>
+          <span><i class="contains"></i>包含</span>
+          <span><i class="related"></i>相关</span>
+        </div>
+        <span class="kg-galaxy-hint">点击星团逐层下钻 · 滚轮缩放 · 拖拽平移</span>
+      </div>
+      <div class="kg-galaxy-crumb-row">
+        <button type="button" class="kg-galaxy-back" id="kg-galaxy-back" disabled
+                title="返回上一层">← 返回上一层</button>
+        <div class="kg-galaxy-crumbs" id="kg-galaxy-crumbs"></div>
+      </div>
+      <div class="kg-galaxy-categories" id="kg-galaxy-categories"></div>
+    </div>
+    <div class="kg-galaxy" id="kg-galaxy" role="img"
+         aria-label="{{ graph.name }} 的知识星系"></div>
+    <div class="kg-galaxy-loading" id="kg-galaxy-loading">正在展开知识星系…</div>
+    <div class="kg-galaxy-error" id="kg-galaxy-error" hidden>
+      知识星系加载失败，请刷新重试；概念与关系仍可在下方表格中查看。
+    </div>
+    <aside class="kg-drawer" id="kg-drawer" aria-hidden="true" aria-label="知识点详情" inert>
+      <button class="kg-drawer-close" id="kg-drawer-close" type="button" aria-label="关闭">×</button>
+      <div class="kg-drawer-body" id="kg-drawer-body"></div>
+    </aside>
+  </div>
+</details>
+{% endif %}
+
+<details class="card kg-fold" open>
+  <summary class="card-head"><h2>概念节点 <span class="muted small" id="kg-node-summary">（跟随星图当前层级）</span></h2></summary>
+  {% if nodes %}
+  <table class="kg" id="kg-node-table">
+    <thead><tr><th>概念</th><th>分类</th><th>定义</th><th>别名</th><th>置信度</th></tr></thead>
+    <tbody id="kg-node-body">
+      {% for n in nodes %}
+      {% set aliases = n.aliases | fromjson if n.aliases else [] %}
       <tr>
-        <td>{{ member.display_name }} <span class="muted small">{{ member.username }}</span></td>
-        <td>{{ role_labels.get(member.role, member.role) }}</td>
-        {% if can_manage %}
+        <td class="kg-name"><a href="{{ url_for('knowledge_graph_concept', gid=graph.id, nid=n.id) }}">{{ n.name }}</a></td>
+        <td>{{ n.category or '—' }}</td>
+        <td>{{ n.definition or '—' }}</td>
+        <td class="kg-note">{{ aliases | join('、') if aliases else '—' }}</td>
+        <td>{{ ((n.confidence or 0) * 100) | round(0) | int }}%</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted small" id="kg-node-empty" hidden>
+    当前是星团概览：点击星团下钻到概念层后，这里只显示该层的概念。
+  </p>
+  {% else %}
+  <p class="muted small">暂无概念。资料构建完成后会出现在这里。</p>
+  {% endif %}
+</details>
+
+<details class="card kg-fold">
+  <summary class="card-head"><h2>关系边 <span class="muted small" id="kg-edge-summary">（跟随星图当前层级）</span></h2></summary>
+  {% if edges %}
+  <table class="kg" id="kg-edge-table">
+    <thead><tr><th>关系</th><th>依据</th><th>置信度</th>{% if can_edit %}<th>操作</th>{% endif %}</tr></thead>
+    <tbody id="kg-edge-body">
+      {% for e in edges %}
+      <tr>
         <td>
+          <span class="kg-name">{{ e.src_name }}</span>
+          <span class="kg-arrow">—{{ relation_label.get(e.relation, e.relation) }}→</span>
+          <span class="kg-name">{{ e.dst_name }}</span>
+        </td>
+        <td class="kg-note">{{ e.evidence or '—' }}</td>
+        <td>{{ ((e.confidence or 0) * 100) | round(0) | int }}%</td>
+        {% if can_edit %}
+        <td class="kg-edge-actions">
+          {% if e.relation == 'prerequisite' %}
           <form method="post"
-                action="{{ url_for('knowledge_graph_member_remove', gid=graph.id, uid=member.user_id) }}"
-                onsubmit="return confirm('移除该老师的协作权限？')">
+                action="{{ url_for('knowledge_graph_edge_reverse', gid=graph.id, eid=e.id) }}"
+                onsubmit="return confirm('把这条前置关系反向？系统会先检查是否会成环。')">
             <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-            <button class="ghost small">移除</button>
+            <button class="ghost small">反向</button>
+          </form>
+          {% endif %}
+          <form method="post"
+                action="{{ url_for('knowledge_graph_edge_delete', gid=graph.id, eid=e.id) }}"
+                onsubmit="return confirm('删除这条关系？')">
+            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+            <button class="ghost small">删除</button>
           </form>
         </td>
         {% endif %}
@@ -167,59 +250,15 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
       {% endfor %}
     </tbody>
   </table>
+  <p class="muted small" id="kg-edge-empty" hidden>
+    当前是星团概览：下钻到概念层后，这里只显示该层概念之间的关系。
+  </p>
   {% else %}
-  <p class="muted small">还没有协作老师。图谱对所有老师可见，但只有管理员、创建者或被授权的老师能修改。</p>
+  <p class="muted small">暂无关系。可再上传覆盖更完整的教材或考纲。</p>
   {% endif %}
-  {% if can_manage and teacher_candidates %}
-  <form method="post" action="{{ url_for('knowledge_graph_member_save', gid=graph.id) }}">
-    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <div class="kg-member-add">
-      <label>老师
-        <select name="user_id" required>
-          <option value="">选择老师…</option>
-          {% for teacher in teacher_candidates %}
-          <option value="{{ teacher.id }}">{{ teacher.display_name }}（{{ teacher.username }}）</option>
-          {% endfor %}
-        </select>
-      </label>
-      <label>角色
-        <select name="role">
-          <option value="manage">管理（改名/删除/分配成员）</option>
-          <option value="edit">编辑（加语料/改关系/体检）</option>
-          <option value="use" selected>使用（在自己课程中引入）</option>
-        </select>
-      </label>
-      <button class="small">添加</button>
-    </div>
-  </form>
-  {% endif %}
-  <p class="muted small">权限说明：<b>管理</b>可改名、删除图谱与分配成员；<b>编辑</b>可上传语料、修改关系、执行体检与瘦身；<b>使用</b>可在自己的课程里引入本图谱。</p>
 </details>
 
-<details class="card kg-fold" id="kg-storage">
-  <summary class="card-head">
-    <h2>存储明细 <span class="muted small">语料文件与数据库表占用</span></h2>
-  </summary>
-  <div class="kg-storage-summary">
-    <div><span class="muted small">语料文件</span><b>{{ metrics.file_text }}</b></div>
-    <div><span class="muted small">数据库表</span><b>{{ metrics.db_text }}</b></div>
-    <div><span class="muted small">合计</span><b>{{ metrics.size_text }}</b></div>
-  </div>
-  <table class="kg">
-    <thead><tr><th>数据表</th><th>记录数</th><th>估算占用</th></tr></thead>
-    <tbody>
-      {% for item in metrics.db_rows %}
-      <tr>
-        <td>{{ item.label }} <span class="muted small">{{ item.table }}</span></td>
-        <td>{{ item.count }}</td>
-        <td>{{ item.text }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  <p class="muted small">数据库占用按各行文本内容长度估算，并计入约 15% 的行头与索引开销，不含 SQLite 空闲页；顶部「占用空间」为语料文件与数据库表合计。</p>
-</details>
-
+</section><section id="graph-materials" data-tab-panel>
 <details class="card kg-fold kg-materials" id="kg-materials" {% if materials | length <= 8 %}open{% endif %}>
   <summary class="card-head">
     <h2>资料与建图
@@ -339,9 +378,10 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
   建图状态已更新，<a href="{{ request.path }}">刷新</a>查看最新节点与关系。
 </p>
 
+</section><section id="graph-governance" data-tab-panel>
 {% if cycles %}
 <div class="kg-warn">
-  <p><b>发现 {{ cycles | length }} 处前置关系成环</b>，成环会让依赖关系失去先后顺序。可到下方「关系边」删除或反向可疑关系，也可以先跑一次「图谱体检」。</p>
+  <p><b>发现 {{ cycles | length }} 处前置关系成环</b>，成环会让依赖关系失去先后顺序。可到「浏览 → 关系边」删除或反向可疑关系，也可以先跑一次「图谱体检」。</p>
   <ul class="kg-cycle-list">
     {% for c in cycles %}
     <li>
@@ -352,116 +392,6 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
   </ul>
 </div>
 {% endif %}
-
-{% if counts.nodes %}
-<details class="card kg-fold kg-galaxy-card" open>
-  <summary class="card-head">
-    <h2>知识星系 <span class="muted small">（{{ counts.nodes }} 个概念 · {{ counts.edges }} 条关系）</span></h2>
-  </summary>
-  <div class="kg-galaxy-shell" id="kg-galaxy-shell"
-       data-url="{{ url_for('knowledge_graph_graph_data', gid=graph.id) }}"
-       data-scope-url="{{ url_for('knowledge_graph_scope_data', gid=graph.id) }}"
-       data-neighbors-url="{{ url_for('knowledge_graph_neighbors_data', gid=graph.id) }}">
-    <div class="kg-galaxy-toolbar">
-      <div class="kg-galaxy-toolbar-row">
-        <div class="kg-galaxy-legend" aria-hidden="true">
-          <span><i class="prerequisite"></i>前置</span>
-          <span><i class="contains"></i>包含</span>
-          <span><i class="related"></i>相关</span>
-        </div>
-        <span class="kg-galaxy-hint">点击星团逐层下钻 · 滚轮缩放 · 拖拽平移</span>
-      </div>
-      <div class="kg-galaxy-crumb-row">
-        <button type="button" class="kg-galaxy-back" id="kg-galaxy-back" disabled
-                title="返回上一层">← 返回上一层</button>
-        <div class="kg-galaxy-crumbs" id="kg-galaxy-crumbs"></div>
-      </div>
-      <div class="kg-galaxy-categories" id="kg-galaxy-categories"></div>
-    </div>
-    <div class="kg-galaxy" id="kg-galaxy" role="img"
-         aria-label="{{ graph.name }} 的知识星系"></div>
-    <div class="kg-galaxy-loading" id="kg-galaxy-loading">正在展开知识星系…</div>
-    <div class="kg-galaxy-error" id="kg-galaxy-error" hidden>
-      知识星系加载失败，请刷新重试；概念与关系仍可在下方表格中查看。
-    </div>
-    <aside class="kg-drawer" id="kg-drawer" aria-hidden="true" aria-label="知识点详情">
-      <button class="kg-drawer-close" id="kg-drawer-close" type="button" aria-label="关闭">×</button>
-      <div class="kg-drawer-body" id="kg-drawer-body"></div>
-    </aside>
-  </div>
-</details>
-{% endif %}
-
-<details class="card kg-fold" open>
-  <summary class="card-head"><h2>概念节点 <span class="muted small" id="kg-node-summary">（跟随星图当前层级）</span></h2></summary>
-  {% if nodes %}
-  <table class="kg" id="kg-node-table">
-    <thead><tr><th>概念</th><th>分类</th><th>定义</th><th>别名</th><th>置信度</th></tr></thead>
-    <tbody id="kg-node-body">
-      {% for n in nodes %}
-      {% set aliases = n.aliases | fromjson if n.aliases else [] %}
-      <tr>
-        <td class="kg-name"><a href="{{ url_for('knowledge_graph_concept', gid=graph.id, nid=n.id) }}">{{ n.name }}</a></td>
-        <td>{{ n.category or '—' }}</td>
-        <td>{{ n.definition or '—' }}</td>
-        <td class="kg-note">{{ aliases | join('、') if aliases else '—' }}</td>
-        <td>{{ ((n.confidence or 0) * 100) | round(0) | int }}%</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  <p class="muted small" id="kg-node-empty" hidden>
-    当前是星团概览：点击星团下钻到概念层后，这里只显示该层的概念。
-  </p>
-  {% else %}
-  <p class="muted small">暂无概念。资料构建完成后会出现在这里。</p>
-  {% endif %}
-</details>
-
-<details class="card kg-fold">
-  <summary class="card-head"><h2>关系边 <span class="muted small" id="kg-edge-summary">（跟随星图当前层级）</span></h2></summary>
-  {% if edges %}
-  <table class="kg" id="kg-edge-table">
-    <thead><tr><th>关系</th><th>依据</th><th>置信度</th>{% if can_edit %}<th>操作</th>{% endif %}</tr></thead>
-    <tbody id="kg-edge-body">
-      {% for e in edges %}
-      <tr>
-        <td>
-          <span class="kg-name">{{ e.src_name }}</span>
-          <span class="kg-arrow">—{{ relation_label.get(e.relation, e.relation) }}→</span>
-          <span class="kg-name">{{ e.dst_name }}</span>
-        </td>
-        <td class="kg-note">{{ e.evidence or '—' }}</td>
-        <td>{{ ((e.confidence or 0) * 100) | round(0) | int }}%</td>
-        {% if can_edit %}
-        <td class="kg-edge-actions">
-          {% if e.relation == 'prerequisite' %}
-          <form method="post"
-                action="{{ url_for('knowledge_graph_edge_reverse', gid=graph.id, eid=e.id) }}"
-                onsubmit="return confirm('把这条前置关系反向？系统会先检查是否会成环。')">
-            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-            <button class="ghost small">反向</button>
-          </form>
-          {% endif %}
-          <form method="post"
-                action="{{ url_for('knowledge_graph_edge_delete', gid=graph.id, eid=e.id) }}"
-                onsubmit="return confirm('删除这条关系？')">
-            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-            <button class="ghost small">删除</button>
-          </form>
-        </td>
-        {% endif %}
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  <p class="muted small" id="kg-edge-empty" hidden>
-    当前是星团概览：下钻到概念层后，这里只显示该层概念之间的关系。
-  </p>
-  {% else %}
-  <p class="muted small">暂无关系。可再上传覆盖更完整的教材或考纲。</p>
-  {% endif %}
-</details>
 
 {% if nodes %}
 <details class="card kg-fold" id="kg-audit"
@@ -655,6 +585,91 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
 </details>
 {% endif %}
 
+</section><section id="graph-manage" data-tab-panel><details class="card ui-fold"><summary>构建与用量明细</summary><div class="kg-stats">  <div class="kg-stat"><b data-count="chunks">{{ counts.chunks }}</b><span>文本块</span></div>
+  <div class="kg-stat"><b>{{ metrics.size_text }}</b><span>占用空间</span></div>
+  <div class="kg-stat"><b>{{ metrics.duration_text }}</b><span>构建总用时</span></div>
+  <div class="kg-stat"><b>{{ metrics.tokens_text }}</b><span>Token</span></div>
+  <div class="kg-stat kg-stat-model"><b>{{ metrics.models_text }}</b><span>使用模型</span></div></div></details>
+<details class="card kg-fold" id="kg-members">
+  <summary class="card-head">
+    <h2>协作成员 <span class="muted small">{{ members | length }} 位老师；创建者与管理员默认拥有管理权限</span></h2>
+  </summary>
+  {% if members %}
+  <table class="kg">
+    <thead><tr><th>老师</th><th>角色</th>{% if can_manage %}<th>操作</th>{% endif %}</tr></thead>
+    <tbody>
+      {% for member in members %}
+      <tr>
+        <td>{{ member.display_name }} <span class="muted small">{{ member.username }}</span></td>
+        <td>{{ role_labels.get(member.role, member.role) }}</td>
+        {% if can_manage %}
+        <td>
+          <form method="post"
+                action="{{ url_for('knowledge_graph_member_remove', gid=graph.id, uid=member.user_id) }}"
+                onsubmit="return confirm('移除该老师的协作权限？')">
+            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+            <button class="ghost small">移除</button>
+          </form>
+        </td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted small">还没有协作老师。图谱对所有老师可见，但只有管理员、创建者或被授权的老师能修改。</p>
+  {% endif %}
+  {% if can_manage and teacher_candidates %}
+  <form method="post" action="{{ url_for('knowledge_graph_member_save', gid=graph.id) }}">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <div class="kg-member-add">
+      <label>老师
+        <select name="user_id" required>
+          <option value="">选择老师…</option>
+          {% for teacher in teacher_candidates %}
+          <option value="{{ teacher.id }}">{{ teacher.display_name }}（{{ teacher.username }}）</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>角色
+        <select name="role">
+          <option value="manage">管理（改名/删除/分配成员）</option>
+          <option value="edit">编辑（加语料/改关系/体检）</option>
+          <option value="use" selected>使用（在自己课程中引入）</option>
+        </select>
+      </label>
+      <button class="small">添加</button>
+    </div>
+  </form>
+  {% endif %}
+  <p class="muted small">权限说明：<b>管理</b>可改名、删除图谱与分配成员；<b>编辑</b>可上传语料、修改关系、执行体检与瘦身；<b>使用</b>可在自己的课程里引入本图谱。</p>
+</details>
+
+<details class="card kg-fold" id="kg-storage">
+  <summary class="card-head">
+    <h2>存储明细 <span class="muted small">语料文件与数据库表占用</span></h2>
+  </summary>
+  <div class="kg-storage-summary">
+    <div><span class="muted small">语料文件</span><b>{{ metrics.file_text }}</b></div>
+    <div><span class="muted small">数据库表</span><b>{{ metrics.db_text }}</b></div>
+    <div><span class="muted small">合计</span><b>{{ metrics.size_text }}</b></div>
+  </div>
+  <table class="kg">
+    <thead><tr><th>数据表</th><th>记录数</th><th>估算占用</th></tr></thead>
+    <tbody>
+      {% for item in metrics.db_rows %}
+      <tr>
+        <td>{{ item.label }} <span class="muted small">{{ item.table }}</span></td>
+        <td>{{ item.count }}</td>
+        <td>{{ item.text }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted small">数据库占用按各行文本内容长度估算，并计入约 15% 的行头与索引开销，不含 SQLite 空闲页；顶部「占用空间」为语料文件与数据库表合计。</p>
+</details>
+
+</section></div>
 {% if materials %}
 <script>
   // 局部轮询与按需展开请求明细，不打断建图期间继续选择/上传新资料

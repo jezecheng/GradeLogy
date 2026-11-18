@@ -835,7 +835,7 @@ class ApiKeyManagementTest(unittest.TestCase):
         self.assertIn("sk-s", html)
         self.assertNotIn("sk-secret-abcdef", html)
         self.assertGreater(html.find("AI API 配置"), -1)
-        self.assertLess(html.find("AI API 配置"), html.find("AI 模型参考与批阅设置"))
+        self.assertLess(html.find("AI API 配置"), html.find("常用批阅设置"))
         # 模型改为在每套 API 配置里单独指定，页面不再保留全局模型选择器
         self.assertNotIn('name="ai_model_select"', html)
 

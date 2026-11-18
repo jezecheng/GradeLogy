@@ -22,10 +22,7 @@
   var drawerBody = document.getElementById('kg-drawer-body');
   var drawerClose = document.getElementById('kg-drawer-close');
 
-  if (!window.echarts) {
-    showError();
-    return;
-  }
+  var available = !!window.echarts;
 
   var PALETTE = ['#38bdf8', '#a78bfa', '#34d399', '#f472b6', '#fbbf24',
     '#22d3ee', '#fb7185', '#a3e635', '#c084fc', '#60a5fa',
@@ -57,6 +54,8 @@
   var fitTimers = [];
   var roamTouched = false;
   var scopeRequest = 0;
+  var drawerRequest = 0;
+  var drawerFocus = null;
 
   var overlay = null;
   var overlayCtx = null;
@@ -75,7 +74,7 @@
     .then(prepare)
     .then(function () {
       viewStack = [rootView()];
-      renderView();
+      if (available) renderView(); else showError();
     })
     .catch(function () { showError(); });
 
@@ -165,6 +164,29 @@
     edges = payload.edges || [];
     nodes.forEach(function (node) { nodeById[String(node.id)] = node; });
     tree = buildTree(nodes);
+    initializeSearch();
+  }
+
+  function initializeSearch() {
+    var input = document.getElementById('graph-search');
+    var results = document.getElementById('graph-search-results');
+    var status = document.getElementById('graph-search-status');
+    if (!input || !results) return;
+    function search() {
+      var query = input.value.trim().toLocaleLowerCase();
+      var matches = query ? nodes.filter(function (n) {
+        return [n.name, n.category, JSON.stringify(n.aliases || [])].join(' ').toLocaleLowerCase().includes(query);
+      }) : [];
+      results.replaceChildren();
+      status.textContent = query ? '找到 ' + matches.length + ' 个概念' + (matches.length > 40 ? '，先显示 40 项，请缩小关键词' : '') : '可搜索全部 ' + nodes.length + ' 个概念；点击分类逐层浏览。';
+      matches.slice(0, 40).forEach(function (n) {
+        var link = document.createElement('a'); link.className = 'graph-search-result'; link.href = n.url;
+        link.textContent = n.name;
+        var category = document.createElement('small'); category.textContent = n.category || '未分类'; link.appendChild(category);
+        results.appendChild(link);
+      });
+    }
+    input.addEventListener('input', search); search();
   }
 
   function rootView() {
@@ -855,9 +877,13 @@
   function openDrawer(id) {
     if (!drawer || !drawerBody) return;
     var node = nodeById[id];
+    var request = ++drawerRequest;
+    drawerFocus = document.activeElement;
+    drawer.inert = false;
     drawerBody.innerHTML = renderDrawerShell(node);
     drawer.setAttribute('aria-hidden', 'false');
     drawer.classList.add('open');
+    if (drawerClose) drawerClose.focus({preventScroll: true});
     if (window.renderKatexIn) window.renderKatexIn(drawerBody);
     fetch(shell.dataset.neighborsUrl + '?node_id=' + encodeURIComponent(id),
       { headers: { Accept: 'application/json' } })
@@ -866,10 +892,12 @@
         return response.json();
       })
       .then(function (payload) {
+        if (request !== drawerRequest) return;
         drawerBody.innerHTML = renderDrawer(payload);
         if (window.renderKatexIn) window.renderKatexIn(drawerBody);
       })
       .catch(function () {
+        if (request !== drawerRequest) return;
         var note = drawerBody.querySelector('.kg-drawer-loading');
         if (note) note.textContent = '关联知识加载失败，请稍后重试。';
       });
@@ -923,8 +951,12 @@
 
   function closeDrawer() {
     if (!drawer) return;
+    ++drawerRequest;
+    var wasOpen = drawer.classList.contains('open');
+    drawer.inert = true;
     drawer.setAttribute('aria-hidden', 'true');
     drawer.classList.remove('open');
+    if (wasOpen && drawerFocus && drawerFocus.isConnected) drawerFocus.focus({preventScroll: true});
   }
 
   // ---- 粒子叠层（仅叶子节点视图） ----

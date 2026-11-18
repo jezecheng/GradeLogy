@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}AI 设置{% endblock %}
+{% block body_class %}settings-workspace{% endblock %}
 {% block content %}
 <style>
 .model-select-row { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 6px; }
@@ -65,6 +66,7 @@
 .max-tokens-input { width: 120px; padding: 4px 8px; text-align: right; }
 </style>
 <h1>AI 批阅设置</h1>
+<div class="settings-grid"><section aria-label="AI 连接">
 
 <div class="card narrow">
   <h2>AI API 配置</h2>
@@ -73,6 +75,7 @@
     <strong>当前 AI API 已配置</strong>
     {% if api_env_managed %}
     <div class="muted small">由环境变量注入，页面上的 Key 管理不会生效。</div>
+    <div class="muted small">接口：{{ cfg.ai_api_url or '未填写' }} · 模型：{{ cfg.ai_model or '未填写' }}</div>
     {% elif active_api_key %}
     <div class="muted small">
       正在使用：{{ active_api_key.name }} · <code>{{ active_api_key.base_url }}</code>
@@ -92,33 +95,23 @@
     {% else %}保存的配置会优先用于调用；只有未选择任何配置时才使用环境变量的默认值。{% endif %}</p>
   {% endif %}
   <p class="muted small">可以保存多组配置（例如阿里云一套、腾讯云两套），各自保存基地址、Key 与模型，
-    点击「使用此 Key」切换；每行都能单独「测试连接」，互不影响。</p>
+    点击「使用此 Key」切换；每套配置都能单独「测试连接」，互不影响。</p>
   {% if api_keys and not api_env_managed %}
-  <div class="api-key-wrap">
-  <table class="api-key-table">
-    <thead>
-      <tr><th>名称</th><th>接口基地址</th><th>API Key</th><th>模型</th><th>状态</th><th></th></tr>
-    </thead>
-    <tbody>
-    {% for k in api_keys %}
-      <tr class="{% if k.is_active %}cur-row{% endif %}">
-        <td>{{ k.name }}</td>
-        <td><code>{{ k.base_url }}</code></td>
-        <td class="nowrap">{{ k.masked_key }}</td>
-        <td>
+<div class="api-key-cards">
+{% for k in api_keys %}<details class="api-key-card" {% if k.is_active %}open{% endif %}>
+<summary><strong>{{ k.name }}</strong><span>{{ '当前使用' if k.is_active else '未启用' }}</span><span class="muted small">{{ k.model or '未选择模型' }}</span></summary>
+<div class="api-key-config"><p class="muted small">{{ k.base_url }} · Key {{ k.masked_key }}</p>
           <form method="post" action="{{ url_for('settings_api_key_model', key_id=k.id) }}"
                 class="model-inline">
             <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-            <input name="model" value="{{ k.model }}" maxlength="120"
+            <input aria-label="模型名称" name="model" value="{{ k.model }}" maxlength="120"
                    placeholder="填写该入口的模型">
             <button type="submit" class="ghost small">保存</button>
           </form>
-        </td>
-        <td class="nowrap">
+        </div><div class="api-key-actions">
           {% if k.is_active %}<span class="tag-chip ok">当前使用</span>
           {% else %}<span class="muted small">未启用</span>{% endif %}
-        </td>
-        <td class="nowrap">
+        </div><div class="api-key-actions">
           <form method="post" action="{{ url_for('settings_api_key_test', key_id=k.id) }}"
                 style="display:inline">
             <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
@@ -137,14 +130,10 @@
             <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
             <button type="submit" class="ghost small danger-text">删除</button>
           </form>
-        </td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  </div>
+</div></details>{% endfor %}</div>
   {% endif %}
   {% if not api_env_managed %}
+  <details class="ui-fold" data-fold="add-connection" data-force-open="{{ 0 if api_configured else 1 }}" {% if not api_configured %}open{% endif %}><summary>新增 AI 连接</summary>
   <form method="post" action="{{ url_for('settings_api_key_add') }}" class="stack-form api-key-add">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <label>名称（可选）
@@ -164,7 +153,7 @@
       保存后立即使用
     </label>
     <button type="submit">新增 API Key</button>
-  </form>
+  </form></details>
   {% endif %}
   <details class="api-catalog">
     <summary>查看已收录的服务入口</summary>
@@ -184,30 +173,15 @@
   </details>
 </div>
 
+</section><section aria-label="批阅设置">
 <div class="card narrow">
-  <h2>演示模式（没有 API 时用）</h2>
-  <p class="muted small">勾选后点「AI 批阅」不会联网：生成 6 道占位结果，
-    你可以照常体验逐题核对、修改 OCR、填写标准答案、保存和查看学生端效果。真实使用时请取消勾选。</p>
-  <form method="post">
-    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <input type="hidden" name="demo_only" value="1">
-    <label class="check-line">
-      <input type="checkbox" name="ai_demo" value="1" {% if cfg.ai_demo == '1' %}checked{% endif %}
-             style="width:auto">
-      启用演示模式（不调用 AI）
-    </label>
-    <button type="submit">保存</button>
-  </form>
-</div>
-
-<div class="card narrow">
-  <h2>AI 模型参考与批阅设置</h2>
+  <h2>常用批阅设置</h2>
   <p class="muted small">模型在「AI API 配置」中按每套配置单独指定，切换配置时互不影响。</p>
   <p class="muted small">批阅需要支持图片输入的多模态模型：会把学生作业与标准答案的每一页渲染成图片一起发送，不做切题；纯文本模型无法读取扫描件，输出上限建议 ≥32k。</p>
   <p class="muted small">下表按当前入口列出可用模型与单价，方便填写或核对模型名。</p>
   <form method="post" class="stack-form" style="margin-top:14px">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <section class="model-picker" aria-label="当前入口的模型与价格">
+    <details class="ui-fold" data-fold="model-catalog" {% if model_view.state and model_view.state.error %}open{% endif %}><summary>模型参考与价格{% if model_view.state and model_view.state.error %} · 同步失败{% endif %}</summary><section class="model-picker" aria-label="当前入口的模型与价格">
       <div class="model-picker-head">
         <div>
           <strong>{{ model_view.title }}</strong>
@@ -296,7 +270,7 @@
         <span class="muted small">每天自动同步一次；仅保留适合图片批改的视觉/多模态模型，纯文本、语音、生成类模型会自动过滤，价格同步自腾讯云 TokenHub 公开价目</span>
       </div>
       {% endif %}
-    </section>
+    </section></details>
     <label class="check-line">
       <input type="checkbox" name="ai_demo" value="1" {% if cfg.ai_demo == '1' %}checked{% endif %}
              style="width:auto">
@@ -312,7 +286,7 @@
       提示你在闲时（夜间、午休、周末）再操作。其他时间不受影响。
     </p>
 
-    <h3 style="margin-top:18px">AI 输出上限（max_tokens）</h3>
+    <details class="ui-fold" data-fold="output-limit"><summary>高级：AI 输出上限</summary>
     <p class="muted small">留空使用默认值；推理模型会把大量 token 花在思考上，遇到「输出被截断」时可调大对应场景的上限。
       注意：输出 token 越多费用越高，按需调整即可。</p>
     <table class="max-tokens-table">
@@ -333,7 +307,7 @@
       </tbody>
     </table>
 
-    <button type="submit">保存设置</button>
+    </details><button type="submit">保存设置</button>
   </form>
   <form method="post" action="{{ url_for('settings_test') }}" style="margin-top:10px">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
@@ -346,8 +320,7 @@
   </p>
 </div>
 
-<div class="card narrow">
-  <h2>价目表更新（截图识别）</h2>
+<details class="card narrow ui-fold" data-fold="prices" data-force-open="{{ 1 if price_import else 0 }}" {% if price_import %}open{% endif %}><summary><strong>价目表更新（截图识别）</strong></summary>
   <p class="muted small">
     TokenHub 没有公开的价目查询接口，价格通过上传官方价目截图识别更新：识别结果会先列出来，
     你核对无误后再保存。保存后对所有老师生效，并用于成本估算。
@@ -393,5 +366,6 @@
     </form>
   </div>
   {% endif %}
-</div>
+</details>
+</section></div>
 {% endblock %}

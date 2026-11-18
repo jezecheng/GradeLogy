@@ -179,6 +179,49 @@ class ReviewRegressionTest(unittest.TestCase):
             self.post("submission_report_publish", sid=30)
         self.assertEqual(self.db.execute("SELECT report_published FROM submissions WHERE id=30").fetchone()[0], 1)
 
+    def test_explicit_draft_hides_even_fully_reviewed_results(self):
+        with mock.patch.object(a, "generate_report", return_value="draft"):
+            response = self.client(2).post(self.url("submission_review_save", sid=30),
+                data={"_csrf": "test-token", "action": "draft", "note_40": "new draft"})
+        self.assertEqual(response.status_code, 302)
+        row = self.db.execute("SELECT status,report_published FROM submissions WHERE id=30").fetchone()
+        self.assertEqual(tuple(row), ("待批改", 0))
+        self.assertEqual(self.client(4).get(self.url("student_report", sid=30)).status_code, 404)
+
+    def test_report_preview_does_not_publish_draft(self):
+        self.db.execute("UPDATE submissions SET status='待批改',report_published=0")
+        self.db.commit()
+        with mock.patch.object(a, "generate_report", return_value="draft"):
+            self.client(2).post(self.url("submission_review_save", sid=30),
+                data={"_csrf": "test-token", "then": "report"})
+        self.assertEqual(self.db.execute("SELECT status FROM submissions WHERE id=30").fetchone()[0], "待批改")
+
+    def test_explicit_publication_requires_all_questions_and_no_running_grade(self):
+        def publish():
+            with mock.patch.object(a, "generate_report", return_value="draft"):
+                self.client(2).post(self.url("submission_review_save", sid=30),
+                    data={"_csrf": "test-token", "action": "publish"})
+            return self.db.execute("SELECT status FROM submissions WHERE id=30").fetchone()[0]
+        self.db.execute("UPDATE questions SET reviewed=0"); self.db.commit()
+        self.assertEqual(publish(), "待批改")
+        self.db.execute("UPDATE questions SET reviewed=1")
+        self.db.execute("INSERT INTO ai_operations(teacher_id,operation_type,submission_id,status,started_at) VALUES(2,'grade',30,'running',CURRENT_TIMESTAMP)")
+        self.db.commit()
+        self.assertEqual(publish(), "待批改")
+        self.db.execute("UPDATE ai_operations SET status='success'"); self.db.commit()
+        self.assertEqual(publish(), "已批改")
+
+    def test_workload_respects_course_enrollment_and_running_regrade(self):
+        from utilities.teacher_views import workload
+        self.assertEqual(workload(self.db, [11]), {})
+        self.db.execute("UPDATE submissions SET status='待批改'"); self.db.commit()
+        self.assertEqual(workload(self.db, [10])[10]['review'], 1)
+        self.db.execute("INSERT INTO ai_operations(teacher_id,operation_type,submission_id,status,started_at) VALUES(2,'grade',30,'running',CURRENT_TIMESTAMP)")
+        self.db.commit()
+        self.assertEqual(workload(self.db, [10], by_lecture=True)[20], {'pending': 0, 'review': 0, 'running': 1})
+        self.db.execute("DELETE FROM enrollments WHERE course_id=10"); self.db.commit()
+        self.assertEqual(workload(self.db, [10]), {})
+
     def test_markdown_links_escape_attributes_and_reject_script_schemes(self):
         class Parser(HTMLParser):
             def __init__(self):

@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}逐题批改 - {{ sub.display_name }}{% endblock %}
+{% block body_class %}review-workspace{% endblock %}
 {% block content %}
 {% set summary = sub.ai_summary|fromjson %}
 {% set job_status = grade_job.status if grade_job else '' %}
@@ -37,8 +38,8 @@
 {% endif %}
 
 {% if summary %}
-<div class="card ai-summary">
-  <h2>AI 汇总</h2>
+<details class="card ai-summary ui-fold" data-fold="review-summary">
+  <summary><h2>AI 汇总与失分归因</h2></summary>
   <p>正确率 <span class="score">{{ accuracy(n_right, n_partial, n_wrong)|default('—', true) }}</span>
     <span class="muted small">
       对 {{ n_right }} 题 · 半对 {{ n_partial }} 题 · 错 {{ n_wrong }} 题
@@ -56,7 +57,7 @@
   </ul>
   {% endif %}
   {% if summary.evaluation %}<p class="muted">总评：{{ summary.evaluation }}</p>{% endif %}
-</div>
+</details>
 {% endif %}
 
 {% if not questions %}
@@ -82,6 +83,13 @@
 </div>
 {% else %}
 <div class="card">
+  <div class="review-toolbar" aria-label="题目导航与筛选">
+    <button type="button" data-review-filter="pending" aria-pressed="true">待复核</button>
+    <button type="button" data-review-filter="all" aria-pressed="false">全部</button>
+    <button type="button" data-review-filter="unknown" aria-pressed="false">无法判定</button>
+    <label class="small">跳转题目<select id="review-jump" class="review-jump">{% for q in questions %}<option value="{{ q.id }}">{{ q.no }} · {{ '已复核' if q.reviewed else '待复核' }}</option>{% endfor %}</select></label>
+    <span id="review-filter-status" class="muted small" role="status"></span>
+  </div>
   <form method="post" action="{{ url_for('submission_review_save', sid=sub.id) }}"
         id="review-form" data-has-report="{{ '1' if sub.report_md else '0' }}">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
@@ -98,8 +106,9 @@
         <span class="note-preview muted small" data-note-preview>{{ (q.note or '')[:60] }}</span>
         <span class="save-hint small" data-save-hint style="display:none"></span>
       </summary>
-      <div class="review-row">
-        <div class="review-col">
+      <div class="review-pane-tabs" aria-label="本题对照内容"><button type="button" class="ghost" data-review-pane="student" aria-pressed="true">学生作答</button><button type="button" class="ghost" data-review-pane="answer" aria-pressed="false">标准答案</button></div>
+      <div class="review-row" data-pane="student">
+        <div class="review-col" data-pane-col="student">
           <div class="col-title">学生作答（OCR，可修正）</div>
           <div class="latex-edit">
             <textarea name="ocr_{{ q.id }}" rows="7" class="latex-source">{{ q.ocr_text }}</textarea>
@@ -118,7 +127,7 @@
           </div>
           <label>本题评语 <textarea name="note_{{ q.id }}" rows="2">{{ q.note }}</textarea></label>
         </div>
-        <div class="review-col">
+        <div class="review-col" data-pane-col="answer">
           <div class="col-title">标准答案（可修正）</div>
           <div class="latex-edit">
             <textarea name="standard_{{ q.id }}" rows="7" class="latex-source">{{ q.standard_answer }}</textarea>
@@ -170,7 +179,7 @@
           </span>
         </p>
         <p class="muted small" style="margin-top:6px">
-          按「完全答对的题数 ÷ 已判定题数」计算；半对与无法判定不计为正确。保存后学生即可看到每题判定与评语。
+          按「完全答对的题数 ÷ 已判定题数」计算。草稿不公开，全部复核后可公开逐题结果。
         </p>
       </div>
       <div class="review-col wide">
@@ -187,11 +196,13 @@
       </div>
     </div>
     <div class="save-bar">
-      <button type="submit">保存并发布给学生</button>
+      <span class="review-save-state" id="review-save-state" role="status">{{ '逐题结果已公开' if sub.status == '已批改' else '草稿 · 学生暂不可见' }}；报告另行公开。</span>
+      <button type="submit" name="action" value="draft" class="ghost">保存草稿</button>
+      <button type="submit" name="action" value="publish" id="review-publish" {% if not all_reviewed or job_status in ('queued','running') %}disabled{% endif %}>完成复核并公开逐题结果</button>
       <button type="submit" name="then" value="report" id="gen-report"
               class="ghost{% if not all_reviewed %} is-disabled{% endif %}"
-              data-blocked="{{ 0 if all_reviewed else 1 }}">生成批阅报告</button>
-      <span class="muted small">判定与评语已按 AI 建议预填，可直接修改。{% if sub.status != '已批改' %}保存前学生看不到本次结果；{% endif %}保存后学生即可看到每题判定、评语与总评。</span>
+              data-blocked="{{ 0 if all_reviewed else 1 }}">保存并预览报告</button>
+      <span class="muted small">单题修改自动保存；未完成复核不能公开。保存草稿会暂时隐藏已公开的逐题结果与报告。</span>
     </div>
   </form>
 </div>
@@ -209,6 +220,7 @@
 <aside id="pdf-panel" class="pdf-panel" hidden>
   <div class="pdf-panel-bar">
     <strong>原始扫描件</strong>
+    <label class="pdf-width-control">宽度<input id="pdf-width" type="range" min="28" max="55" value="40" aria-label="原卷面板宽度"></label>
     <span class="pdf-panel-actions">
       <a href="{{ pdf_url }}" target="_blank">新标签打开</a>
       <button type="button" id="pdf-close" class="small">关闭 Esc</button>
@@ -244,13 +256,34 @@
   var genBtn = document.getElementById('gen-overall');
   var genHint = document.getElementById('gen-overall-hint');
   var reportBtn = document.getElementById('gen-report');
+  var publishBtn = document.getElementById('review-publish');
+  var active = {{ 'true' if job_status in ('queued', 'running') else 'false' }};
+  var saves = new Map(), failed = new Set(), dirty = new Set();
+  var inFlight = 0;
+  var overallDirty = false;
+  var overallField = document.getElementById('overall');
+  if (overallField) overallField.addEventListener('input', function () { overallDirty = true; });
+  if (active && document.getElementById('review-form')) {
+    document.getElementById('review-form').querySelectorAll('input, textarea, select, button').forEach(function (el) { el.disabled = true; });
+    if (genBtn) genBtn.disabled = true;
+  }
+  window.flushReview = function () {
+    document.querySelectorAll('details.review-item[data-qid]').forEach(function (card) {
+      if (dirty.has(card) || failed.has(card)) autoSave(card);
+    });
+    return Promise.all(Array.from(saves.values())).then(function () { return failed.size === 0; });
+  };
+  window.addEventListener('beforeunload', function (e) {
+    if (!window.reviewSubmitting && (dirty.size || failed.size || inFlight || overallDirty)) { e.preventDefault(); e.returnValue = ''; }
+  });
   var verdictCls = {'对':'right','半对':'partial','错':'wrong','无法判定':'unknown'};
 
   function syncProgress() {
     var done = document.querySelectorAll('.reviewed-badge[data-reviewed="1"]').length;
     if (countEl) countEl.textContent = done;
     var all = total > 0 && done === total;
-    if (genBtn) genBtn.disabled = !all;
+    if (publishBtn) publishBtn.disabled = !all || active;
+    if (genBtn) genBtn.disabled = !all || active;
     if (reportBtn) {
       reportBtn.dataset.blocked = all ? '0' : '1';
       reportBtn.classList.toggle('is-disabled', !all);
@@ -260,17 +293,17 @@
         ? '已全部复核，可用 AI 重写总评（生成后仍可继续修改）'
         : '还有 ' + (total - done) + ' 题未复核，全部复核后才能生成总评';
     }
+    document.dispatchEvent(new Event('review-progress'));
   }
 
   // 按页面顺序找到当前题之后第一道尚未审核的题
   function nextUnreviewed(card) {
     var cards = document.querySelectorAll('details.review-item[data-qid]');
-    var seen = false;
-    for (var i = 0; i < cards.length; i++) {
-      if (cards[i] === card) { seen = true; continue; }
-      if (!seen) continue;
-      var badge = cards[i].querySelector('.reviewed-badge');
-      if (badge && badge.dataset.reviewed !== '1') return cards[i];
+    var start = Array.from(cards).indexOf(card);
+    for (var i = 1; i <= cards.length; i++) {
+      var candidate = cards[(start + i) % cards.length];
+      var badge = candidate.querySelector('.reviewed-badge');
+      if (badge && badge.dataset.reviewed !== '1') return candidate;
     }
     return null;
   }
@@ -301,15 +334,17 @@
     hint.style.color = isError ? '#c62828' : '#2e7d32';
     hint.style.display = '';
     clearTimeout(hint._timer);
-    hint._timer = setTimeout(function () { hint.style.display = 'none'; }, 2500);
+    if (!isError) hint._timer = setTimeout(function () { hint.style.display = 'none'; }, 2500);
   }
 
   // 核心：自动保存某题的所有字段到后端
   function autoSave(card, markReviewed) {
+    clearTimeout(card._saveTimer);
     var qid = card.dataset.qid;
     if (!qid) return Promise.resolve();
     var badge = card.querySelector('.reviewed-badge');
-    var reviewed = markReviewed !== undefined ? markReviewed
+    if (markReviewed !== undefined) card.dataset.desiredReviewed = markReviewed;
+    var reviewed = card.dataset.desiredReviewed !== undefined ? Number(card.dataset.desiredReviewed)
       : (badge && badge.dataset.reviewed === '1' ? 1 : 0);
     var payload = {
       reviewed: reviewed,
@@ -318,12 +353,15 @@
       standard_answer: (card.querySelector('[name="standard_' + qid + '"]') || {}).value || '',
       note: (card.querySelector('[name="note_' + qid + '"]') || {}).value || ''
     };
+    dirty.delete(card);
     showHint(card, '保存中…');
-    return fetch('/question/' + qid + '/reviewed', {
+    var previous = saves.get(qid) || Promise.resolve();
+    inFlight++;
+    var request = previous.then(function () { return fetch('/question/' + qid + '/reviewed', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
       body: JSON.stringify(payload)
-    }).then(function (r) {
+    }); }).then(function (r) {
       if (!r.ok) throw new Error(r.status);
       return r.json();
     }).then(function (d) {
@@ -342,16 +380,24 @@
         btn.classList.toggle('reviewed-on', !!d.reviewed);
       }
       showHint(card, '✓ 已自动保存');
+      failed.delete(card);
       syncProgress();
       return d;
     }).catch(function () {
-      showHint(card, '✗ 保存失败', true);
+      failed.add(card);
+      showHint(card, '保存失败，请重试或保存草稿；不要关闭页面', true);
+      return false;
     });
+    request = request.finally(function () { inFlight--; });
+    saves.set(qid, request);
+    return request;
   }
 
   // 遍历每道题，绑定自动保存事件
   document.querySelectorAll('details.review-item[data-qid]').forEach(function (card) {
     var qid = card.dataset.qid;
+    card.addEventListener('input', function () { dirty.add(card); });
+    if (active) card.querySelectorAll('input, textarea, select, button').forEach(function (el) { el.disabled = true; });
 
     // 判定下拉框：change 立即保存
     var verdictSel = card.querySelector('[name="verdict_' + qid + '"]');
@@ -365,7 +411,7 @@
       var timer = null;
       noteArea.addEventListener('input', function () {
         clearTimeout(timer);
-        timer = setTimeout(function () { autoSave(card); }, 800);
+        timer = card._saveTimer = setTimeout(function () { autoSave(card); }, 800);
       });
       // 失焦时立即保存（不等 debounce）
       noteArea.addEventListener('blur', function () {
@@ -394,6 +440,7 @@
           card.open = false;
           var target = nextUnreviewed(card);
           if (target) {
+            target.hidden = false;
             target.open = true;
             target.scrollIntoView({ behavior: 'smooth', block: 'start' });
           }
@@ -419,6 +466,7 @@
             alert('生成总评失败：' + (d.error || ''));
           } else if (d.text) {
             document.getElementById('overall').value = d.text;
+            overallDirty = true;
             genBtn.dataset.hasResult = '1';
             genHint.textContent = '已生成新的总评，可继续修改后保存';
           }
@@ -542,35 +590,34 @@
   var form = document.getElementById('review-form');
   if (!form) return;
   var total = {{ n_total }};
-  form.addEventListener('submit', function (e) {
+  form.addEventListener('submit', async function (e) {
+    e.preventDefault();
     var btn = e.submitter;
     if (!btn) return;
     if (btn.value === 'report' && btn.dataset.blocked === '1') {
-      e.preventDefault();
       var done = document.querySelectorAll('.reviewed-badge[data-reviewed="1"]').length;
       showReportBlocked(total - done);
       return;
     }
     if (btn.value === 'report' && form.dataset.hasReport === '1' && form.dataset.confirmed !== '1') {
-      e.preventDefault();
-      confirmDialog('生成批阅报告会覆盖现有报告内容（含手工修改的部分），确定继续吗？',
-                    '生成报告').then(function (ok) {
-        if (!ok) return;
-        form.dataset.confirmed = '1';
-        var hidden = document.createElement('input');
-        hidden.type = 'hidden';
-        hidden.name = 'then';
-        hidden.value = 'report';
-        form.appendChild(hidden);
-        busyOn(btn, '生成中…');
-        form.submit();
-      });
-      return;
+      if (!await confirmDialog('生成批阅报告会覆盖现有报告内容（含手工修改的部分），确定继续吗？', '生成报告')) return;
     }
+    if (form.dataset.saving === '1') return;
+    form.dataset.saving = '1';
+    if (window.flushReview && !await window.flushReview()) {
+      form.dataset.saving = '0';
+      alert('逐题修改尚未保存成功，请重试后再继续。'); return;
+    }
+    var hidden = document.createElement('input');
+    hidden.type = 'hidden'; hidden.name = btn.name; hidden.value = btn.value;
+    form.appendChild(hidden);
     busyOn(btn, btn.value === 'report' ? '生成中…' : '保存中…');
+    window.reviewSubmitting = true;
+    form.submit();
   });
 })();
 </script>
+<script src="{{ url_for('static', filename='review_ui.js') }}"></script>
 <script>
 // 后台批阅中：轮询状态，完成或失败后自动刷新
 (function () {

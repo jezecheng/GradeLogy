@@ -8,10 +8,15 @@
   <title>{% block title %}教学管理平台{% endblock %}</title>
   <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" sizes="any">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  {% if g.user and g.user.role == 'teacher' %}<link rel="stylesheet" href="{{ url_for('static', filename='teacher_ui.css') }}">{% endif %}
   <link rel="stylesheet" href="{{ url_for('static', filename='vendor/katex/katex.min.css') }}">
 </head>
-<body>
+<body class="{% if g.user and g.user.role == 'teacher' %}teacher-ui{% endif %} {% block body_class %}{% endblock %}" data-ui-user="{{ g.user.id if g.user else '' }}">
 {% if g.user %}
+{% if g.user.role == 'teacher' %}
+{% set teacher_page_title = self.title() %}
+{% include "_teacher_nav.html" %}
+{% else %}
 <nav class="nav">
   <a class="brand brand-home" href="{{ url_for('index') }}">
     <img class="nav-logo" src="{{ url_for('static', filename='gradelogy-mark.png') }}" alt="">
@@ -48,13 +53,14 @@
   </span>
 </nav>
 {% endif %}
+{% endif %}
 <main class="container">
   {% with msgs = get_flashed_messages() %}
     {% for m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}
   {% endwith %}
   {% block content %}{% endblock %}
   {% if ai_operations is defined and ai_operations and g.user and g.user.role == 'teacher' %}
-  <details class="card" id="ai-usage-history" open>
+  <details class="card ui-fold" id="ai-usage-history" data-fold="ai-usage">
     <summary class="card-head"><h2>AI 消耗记录</h2><span class="muted small">最近 {{ ai_operations|length }} 次操作</span></summary>
     {% for op in ai_operations %}
     <div style="padding:10px 0;{% if not loop.last %}border-bottom:1px solid #eef0f3{% endif %}">
@@ -102,6 +108,7 @@
 </dialog>
 
 <script src="{{ url_for('static', filename='ui.js') }}"></script>
+{% if g.user and g.user.role == 'teacher' %}<script src="{{ url_for('static', filename='teacher_ui.js') }}"></script>{% endif %}
 <script src="{{ url_for('static', filename='upload_draft.js') }}"></script>
 <script>
 (function () {
@@ -126,7 +133,7 @@
   if (!box) return;
   var list = box.querySelector('[data-grading-list]');
   var count = box.querySelector('[data-grading-count]');
-  var STORAGE_KEY = 'gradelogy.seen_finished_tasks';
+  var STORAGE_KEY = 'gradelogy.seen_finished_tasks.' + document.body.dataset.uiUser;
   var seenFinished = loadSeen();
 
   function loadSeen() {
@@ -180,10 +187,14 @@
   }
 
   function render(data) {
-    box.hidden = !data.active;
+    box.hidden = false;
+    box.querySelector('.grading-queue-dot').hidden = !data.active;
     if (!data.active) { count.hidden = true; }
     else { count.hidden = false; count.textContent = data.jobs.length; }
     list.textContent = '';
+    if (!data.jobs.length && !(data.recent || []).length) {
+      var empty = document.createElement('li'); empty.textContent = '暂无任务记录'; list.appendChild(empty);
+    }
 
     // 进行中/排队中
     data.jobs.forEach(function (job) {
@@ -248,8 +259,9 @@
   box.querySelector('.grading-queue-btn').addEventListener('click', function (e) {
     e.stopPropagation();
     box.classList.toggle('open');
+    this.setAttribute('aria-expanded', box.classList.contains('open'));
   });
-  document.addEventListener('click', function () { box.classList.remove('open'); });
+  document.addEventListener('click', function (e) { if (!e.target.closest('[data-open-tasks]')) { box.classList.remove('open'); box.querySelector('button').setAttribute('aria-expanded', 'false'); } });
   document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
   poll();
   setInterval(poll, 5000);

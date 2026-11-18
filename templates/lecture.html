@@ -8,6 +8,122 @@
 <h1>{{ hw.title }}</h1>
 <p class="muted">讲次{% if hw.deadline %} · 截止 {{ hw.deadline|legacytime }}{% endif %}{% if hw.description %} · {{ hw.description }}{% endif %}</p>
 
+<div class="ui-summary"><span>提交 {{ subs|length }} / {{ students|length }}</span><span>{{ "标准答案已上传" if hw.answer_pdf else "待上传标准答案" }}</span><span>{{ "已选 " ~ chosen|length ~ " 题" if chosen else "待划定范围" }}</span></div>
+<div class="card">
+  <div class="card-head">
+    <h2>提交与批阅（{{ subs|length }} 份）</h2>
+    <button type="button" class="small" data-dialog-open="upload-for-dialog">代学生上传</button>
+  </div>
+  {% if not grade_ready %}
+  <button type="button" class="ghost small" data-open-details="lecture-preparation">完成批阅准备</button>
+  <p class="muted small">{% if not hw.answer_pdf %}上传教师版标准答案 PDF 后才能使用 AI 批阅。{% elif not cands %}请先在「作业范围」选择教师版页码并保存，生成题目清单。{% else %}请先在「作业范围」勾选本讲题目并保存，AI 批阅才会执行。{% endif %}</p>
+  {% endif %}
+  <dialog id="upload-for-dialog" class="modal">
+    <h2>代学生上传作业</h2>
+    <p class="muted small">适用于学生把纸质作业交给老师的情况；上传后同样可以走 AI 批阅与报告。</p>
+    <form method="post" action="{{ url_for('lecture_upload_for', hid=hw.id) }}"
+          enctype="multipart/form-data" class="stack-form" data-draft-upload>
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <label>选择学生
+        <select name="student_id" required>
+          <option value="">请选择</option>
+          {% for st in students %}
+          <option value="{{ st.id }}">{{ st.display_name }}（{{ st.username }}）</option>
+          {% endfor %}
+        </select>
+      </label>
+      <input type="file" data-draft-picker accept=".png,.jpg,.jpeg,.webp,.pdf" multiple hidden>
+      <input type="file" data-draft-camera accept="image/*" capture="environment" hidden>
+      <div class="submit-actions">
+        <button type="button" class="small" data-draft-open="picker">选择图片 / PDF（可多选）</button>
+        <button type="button" class="small" data-draft-open="camera">拍照上传</button>
+      </div>
+      <p class="muted small">可一次选择多张图片或 PDF；手机上点「拍照上传」会直接打开相机。单个文件 ≤20MB，一次最多 20 个。</p>
+      <div class="draft-box" data-draft-box hidden>
+        <div class="draft-head">
+          <strong>草稿箱</strong>
+          <span class="muted small" data-draft-count></span>
+        </div>
+        <div class="draft-grid" data-draft-grid></div>
+        <div class="draft-foot">
+          <button type="button" class="small" data-draft-clear>清空</button>
+        </div>
+      </div>
+      <input type="file" name="files" data-draft-final multiple hidden>
+      <div class="modal-actions">
+        <button type="button" class="ghost" data-dialog-close>取消</button>
+        <button type="submit">确认上传</button>
+      </div>
+    </form>
+  </dialog>
+  <div class="ui-filter"><label>查找提交<input type="search" placeholder="学生姓名或账号" data-filter="[data-submission-row]" data-filter-status="submission-filter-status"></label><span class="muted small" id="submission-filter-status" role="status"></span></div>
+  {% if subs %}
+  {% for s in subs %}
+  <div class="sub-card" data-submission-row data-search="{{ s.display_name }} {{ s.username }}">
+    <div class="sub-head">
+      <strong>{{ s.display_name }}</strong>
+      <span class="muted">{{ s.username }} · {{ s.created_at|localtime }}</span>
+      <span class="tag tag-{{ s.status }}">{{ s.status }}</span>
+      {% if s.n_questions %}
+        <span class="review-state review-done" title="AI 已完成批阅">✓ AI 已批阅</span>
+        {% if s.n_reviewed >= s.n_questions %}
+        <span class="review-state review-done" title="所有题目均已审核">✓ 审核完成</span>
+        {% else %}
+        <span class="review-state review-pending"
+              title="还有 {{ s.n_questions - s.n_reviewed }} 道题未审核">⚠ 待审核 {{ s.n_reviewed }}/{{ s.n_questions }}</span>
+        {% endif %}
+      {% endif %}
+      {% set acc = acc_by.get(s.id) %}
+      {% if acc %}<span class="score" title="正确率">{{ acc }}</span>{% endif %}
+      {% set sfiles = s.file_path|file_list %}
+      {% for f in sfiles %}
+      <a class="btn-link" href="{{ url_for('uploaded_file', filename=f) }}"
+         data-pdf-toggle data-pdf-src="{{ url_for('uploaded_file', filename=f) }}"
+         data-pdf-title="{{ s.display_name }} · 扫描件{% if sfiles|length > 1 %} {{ loop.index }}{% endif %}">查看扫描件{% if sfiles|length > 1 %} {{ loop.index }}{% endif %}</a>
+      {% endfor %}
+      <a class="btn-link" href="{{ url_for('submission_review', sid=s.id) }}">逐题核对</a>
+      {% if s.report_md %}<a class="btn-link" href="{{ url_for('submission_report', sid=s.id) }}">批改报告</a>{% endif %}
+      {% if s.report_published %}
+        <span class="reviewed-badge">已发布给学生</span>
+      {% elif s.report_md %}
+        <span class="pending-badge">报告草稿</span>
+      {% endif %}
+      {% set job = grade_jobs.get(s.id) %}
+      {% set job_status = job.status if job else '' %}
+      <form method="post" action="{{ url_for('submission_grade', sid=s.id) }}" class="grade-form"
+            data-has-result="{{ '1' if (s.n_questions or s.status == '已批改') else '0' }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <button class="small" data-grade-btn="{{ s.id }}"
+                {% if not grade_ready or job_status in ('queued', 'running') %}disabled title="{% if job_status in ('queued', 'running') %}这份作业正在后台批阅{% else %}请先上传教师版答案并划定作业范围{% endif %}"{% endif %}>
+          {% if job_status == 'queued' %}排队中…
+          {% elif job_status == 'running' %}批阅中…
+          {% elif job_status == 'failed' %}重试批阅
+          {% else %}{{ '重新批阅' if s.status == '待批改' or s.feedback else 'AI 批阅' }}{% endif %}
+        </button>
+      </form>
+    </div>
+    <p class="muted small grade-hint" {% if job_status not in ('queued', 'running') %}hidden{% endif %}>
+      {% if job_status == 'queued' %}已加入批阅队列，等待后台处理；可以离开本页。{% else %}正在后台批阅，约 1~3 分钟；可以离开本页，稍后回来查看。{% endif %}
+    </p>
+    {% if job_status == 'failed' %}
+    <p class="muted small danger-text">上次后台批阅失败：{{ job.error }}</p>
+    {% endif %}
+    {% if s.grader %}<p class="muted small">批改来源：{{ s.grader }} · 更新于 {{ s.updated_at|localtime }}</p>{% endif %}
+    {% if s.feedback %}
+    <details class="sub-feedback-toggle">
+      <summary class="small" style="cursor:pointer; color:#4a6fa5; margin-top:4px; user-select:none">
+        展开总评 ▾
+      </summary>
+      <pre class="feedback">{{ s.feedback }}</pre>
+    </details>
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% else %}
+  <p class="muted">还没有学生提交。</p>
+  {% endif %}
+</div>
+<details class="card ui-fold" id="lecture-preparation" data-fold="preparation" data-force-open="{{ 0 if grade_ready else 1 }}" {% if not grade_ready %}open{% endif %}><summary><strong>讲次资料与批阅准备</strong><span class="muted small">　{{ "已配置，可展开修改" if grade_ready else "尚未完成" }}</span></summary>
 <div class="card">
   <div class="card-head">
     <h2>讲次信息</h2>
@@ -91,7 +207,7 @@
   </dialog>
 </div>
 
-<details class="card scope-card">
+<details class="card scope-card" data-fold="scope" data-force-open="{{ 0 if grade_ready else 1 }}" {% if not grade_ready and hw.answer_pdf %}open{% endif %}>
   <summary class="card-head">
     <h2>作业范围</h2>
     <span class="muted small scope-summary">
@@ -190,118 +306,7 @@
   {% endif %}
 </details>
 
-<div class="card">
-  <div class="card-head">
-    <h2>提交与批阅（{{ subs|length }} 份）</h2>
-    <button type="button" class="small" data-dialog-open="upload-for-dialog">代学生上传</button>
-  </div>
-  {% if not grade_ready %}
-  <p class="muted small">{% if not hw.answer_pdf %}上传教师版标准答案 PDF 后才能使用 AI 批阅。{% elif not cands %}请先在「作业范围」选择教师版页码并保存，生成题目清单。{% else %}请先在「作业范围」勾选本讲题目并保存，AI 批阅才会执行。{% endif %}</p>
-  {% endif %}
-  <dialog id="upload-for-dialog" class="modal">
-    <h2>代学生上传作业</h2>
-    <p class="muted small">适用于学生把纸质作业交给老师的情况；上传后同样可以走 AI 批阅与报告。</p>
-    <form method="post" action="{{ url_for('lecture_upload_for', hid=hw.id) }}"
-          enctype="multipart/form-data" class="stack-form" data-draft-upload>
-      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-      <label>选择学生
-        <select name="student_id" required>
-          <option value="">请选择</option>
-          {% for st in students %}
-          <option value="{{ st.id }}">{{ st.display_name }}（{{ st.username }}）</option>
-          {% endfor %}
-        </select>
-      </label>
-      <input type="file" data-draft-picker accept=".png,.jpg,.jpeg,.webp,.pdf" multiple hidden>
-      <input type="file" data-draft-camera accept="image/*" capture="environment" hidden>
-      <div class="submit-actions">
-        <button type="button" class="small" data-draft-open="picker">选择图片 / PDF（可多选）</button>
-        <button type="button" class="small" data-draft-open="camera">拍照上传</button>
-      </div>
-      <p class="muted small">可一次选择多张图片或 PDF；手机上点「拍照上传」会直接打开相机。单个文件 ≤20MB，一次最多 20 个。</p>
-      <div class="draft-box" data-draft-box hidden>
-        <div class="draft-head">
-          <strong>草稿箱</strong>
-          <span class="muted small" data-draft-count></span>
-        </div>
-        <div class="draft-grid" data-draft-grid></div>
-        <div class="draft-foot">
-          <button type="button" class="small" data-draft-clear>清空</button>
-        </div>
-      </div>
-      <input type="file" name="files" data-draft-final multiple hidden>
-      <div class="modal-actions">
-        <button type="button" class="ghost" data-dialog-close>取消</button>
-        <button type="submit">确认上传</button>
-      </div>
-    </form>
-  </dialog>
-  {% if subs %}
-  {% for s in subs %}
-  <div class="sub-card">
-    <div class="sub-head">
-      <strong>{{ s.display_name }}</strong>
-      <span class="muted">{{ s.username }} · {{ s.created_at|localtime }}</span>
-      <span class="tag tag-{{ s.status }}">{{ s.status }}</span>
-      {% if s.n_questions %}
-        <span class="review-state review-done" title="AI 已完成批阅">✓ AI 已批阅</span>
-        {% if s.n_reviewed >= s.n_questions %}
-        <span class="review-state review-done" title="所有题目均已审核">✓ 审核完成</span>
-        {% else %}
-        <span class="review-state review-pending"
-              title="还有 {{ s.n_questions - s.n_reviewed }} 道题未审核">⚠ 待审核 {{ s.n_reviewed }}/{{ s.n_questions }}</span>
-        {% endif %}
-      {% endif %}
-      {% set acc = acc_by.get(s.id) %}
-      {% if acc %}<span class="score" title="正确率">{{ acc }}</span>{% endif %}
-      {% set sfiles = s.file_path|file_list %}
-      {% for f in sfiles %}
-      <a class="btn-link" href="{{ url_for('uploaded_file', filename=f) }}"
-         data-pdf-toggle data-pdf-src="{{ url_for('uploaded_file', filename=f) }}"
-         data-pdf-title="{{ s.display_name }} · 扫描件{% if sfiles|length > 1 %} {{ loop.index }}{% endif %}">查看扫描件{% if sfiles|length > 1 %} {{ loop.index }}{% endif %}</a>
-      {% endfor %}
-      <a class="btn-link" href="{{ url_for('submission_review', sid=s.id) }}">逐题核对</a>
-      {% if s.report_md %}<a class="btn-link" href="{{ url_for('submission_report', sid=s.id) }}">批改报告</a>{% endif %}
-      {% if s.report_published %}
-        <span class="reviewed-badge">已发布给学生</span>
-      {% elif s.report_md %}
-        <span class="pending-badge">报告草稿</span>
-      {% endif %}
-      {% set job = grade_jobs.get(s.id) %}
-      {% set job_status = job.status if job else '' %}
-      <form method="post" action="{{ url_for('submission_grade', sid=s.id) }}" class="grade-form"
-            data-has-result="{{ '1' if (s.n_questions or s.status == '已批改') else '0' }}">
-        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-        <button class="small" data-grade-btn="{{ s.id }}"
-                {% if not grade_ready or job_status in ('queued', 'running') %}disabled title="{% if job_status in ('queued', 'running') %}这份作业正在后台批阅{% else %}请先上传教师版答案并划定作业范围{% endif %}"{% endif %}>
-          {% if job_status == 'queued' %}排队中…
-          {% elif job_status == 'running' %}批阅中…
-          {% elif job_status == 'failed' %}重试批阅
-          {% else %}{{ '重新批阅' if s.status == '待批改' or s.feedback else 'AI 批阅' }}{% endif %}
-        </button>
-      </form>
-    </div>
-    <p class="muted small grade-hint" {% if job_status not in ('queued', 'running') %}hidden{% endif %}>
-      {% if job_status == 'queued' %}已加入批阅队列，等待后台处理；可以离开本页。{% else %}正在后台批阅，约 1~3 分钟；可以离开本页，稍后回来查看。{% endif %}
-    </p>
-    {% if job_status == 'failed' %}
-    <p class="muted small danger-text">上次后台批阅失败：{{ job.error }}</p>
-    {% endif %}
-    {% if s.grader %}<p class="muted small">批改来源：{{ s.grader }} · 更新于 {{ s.updated_at|localtime }}</p>{% endif %}
-    {% if s.feedback %}
-    <details class="sub-feedback-toggle">
-      <summary class="small" style="cursor:pointer; color:#4a6fa5; margin-top:4px; user-select:none">
-        展开总评 ▾
-      </summary>
-      <pre class="feedback">{{ s.feedback }}</pre>
-    </details>
-    {% endif %}
-  </div>
-  {% endfor %}
-  {% else %}
-  <p class="muted">还没有学生提交。</p>
-  {% endif %}
-</div>
+</details>
 {% include "_pdf_panel.html" %}
 
 {% macro render_bar(right, partial, wrong, unknown, total) %}

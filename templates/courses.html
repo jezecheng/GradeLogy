@@ -1,31 +1,32 @@
 {% extends "base.html" %}
 {% block title %}我的课程{% endblock %}
 {% block content %}
-<h1>我的课程</h1>
-
-<div class="card">
+<div class="page-heading"><h1>我的课程</h1><button type="button" data-ui-dialog="course-create-dialog">新建课程</button></div>
+<dialog id="course-create-dialog" class="modal">
   <h2>新建课程</h2>
-  <form method="post" action="{{ url_for('course_create') }}" class="inline-form">
+  <form method="post" action="{{ url_for('course_create') }}" class="stack-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <input name="name" placeholder="课程名称，如：高二（1）班" required>
-    <input name="description" placeholder="简介（可选）">
-    <button type="submit">创建</button>
+    <label>课程名称<input name="name" placeholder="如：高二（1）班化学" required></label>
+    <label>简介（可选）<textarea name="description" rows="3"></textarea></label>
+    <div class="modal-actions"><button type="button" class="ghost" data-ui-close>取消</button><button type="submit">创建课程</button></div>
   </form>
-</div>
+</dialog>
 
 {% if courses %}
 <div class="grid">
   {% for c in courses %}
   <div class="card course-card">
-    <h3><a href="{{ url_for('course_detail', cid=c.id) }}">{{ c.name }}</a></h3>
+    <h3><a href="{{ url_for('course_detail', cid=c.id) }}#course-lectures">{{ c.name }}</a></h3>
     <p class="muted">{{ c.description or '暂无简介' }}</p>
     <p class="muted">{{ c.n_students }} 名学生 · {{ c.n_lectures }} 个讲次 · {{ c.n_exams }} 场考试{% if c.n_teachers > 1 %} · {{ c.n_teachers }} 位老师共同管理{% endif %}</p>
+    {% set todo = work.get(c.id, {}) %}
+    <a class="course-todo" href="{{ url_for('course_detail', cid=c.id) }}#course-lectures">待批阅 {{ todo.get('pending', 0) }} 份 · 待复核 {{ todo.get('review', 0) }} 份{% if todo.get('running') %} · 处理中 {{ todo.running }} 份{% endif %}</a>
     {% if c.is_owner %}
-    <form method="post" action="{{ url_for('course_delete', cid=c.id) }}"
+    <details class="course-more"><summary>更多操作</summary><form method="post" action="{{ url_for('course_delete', cid=c.id) }}"
           onsubmit="return confirm('删除课程会同时删除其学生关系、讲次、考试和教案，确定？')">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
       <button class="danger small">删除课程</button>
-    </form>
+    </form></details>
     {% endif %}
   </div>
   {% endfor %}

@@ -59,6 +59,7 @@ from utilities import knowledge_graph as kg_utils
 from utilities import kg_text
 from utilities import kg_transfer
 from utilities import tags as tag_utils
+from utilities.teacher_views import workload
 from utilities.report import _overall_text, build_report_md, render_markdown
 from utilities.sessions import session_epoch, revoke_sessions
 from utilities.uploads import (_student_files, _validate_upload, allowed_file, file_list,
@@ -1212,7 +1213,8 @@ def courses():
         FROM courses c
         JOIN course_teachers ct ON ct.course_id=c.id AND ct.teacher_id=?
         ORDER BY c.id DESC""", (g.user["id"], g.user["id"])).fetchall()
-    return render_template("courses.html", courses=rows)
+    work = workload(get_db(), [row["id"] for row in rows])
+    return render_template("courses.html", courses=rows, work=work)
 
 
 @_routes.route("/course/create", methods=["POST"])
@@ -1357,6 +1359,7 @@ def course_detail(cid):
     assigned_kg_ids = {r["graph_id"] for r in db.execute(
         "SELECT graph_id FROM course_knowledge_graphs WHERE course_id=?", (cid,))}
     return render_template("course.html", course=course, students=students,
+                           work=workload(db, [cid], by_lecture=True),
                            candidates=candidates, lectures=lectures, exams=exams,
                            plans=plans, teachers=teachers,
                            teacher_candidates=teacher_candidates,
@@ -2784,6 +2787,10 @@ def submission_review_save(sid):
     total = db.execute("SELECT COUNT(*) FROM questions WHERE submission_id=?", (sid,)).fetchone()[0]
     job = latest_operation(db, sid)
     reviewed = bool(total) and not pending and not (job and job["status"] in ("queued", "running"))
+    # 草稿保存和报告预览不隐式公开；旧客户端省略 action 时兼容原保存行为。
+    draft = request.form.get("action") == "draft" or (
+        request.form.get("then") == "report" and sub["status"] != "已批改")
+    reviewed = reviewed and not draft
     db.execute("UPDATE submissions SET score='', feedback=?, status=?, "
                "report_published=CASE WHEN ? THEN report_published ELSE 0 END,grader=?, "
                "updated_at=CURRENT_TIMESTAMP WHERE id=?",
@@ -2897,7 +2904,14 @@ def prompts_page():
     defaults = db.execute("SELECT * FROM prompts WHERE is_default=1 ORDER BY kind").fetchall()
     mine = db.execute("SELECT * FROM prompts WHERE teacher_id=? ORDER BY kind, id DESC",
                       (g.user["id"],)).fetchall()
+    usage = {}
+    for course in db.execute("SELECT c.* FROM courses c JOIN course_teachers ct "
+                             "ON ct.course_id=c.id WHERE ct.teacher_id=?", (g.user["id"],)):
+        for column in ("grade_prompt_id", "report_prompt_id", "tag_horizontal_prompt_id", "tag_vertical_prompt_id"):
+            if course[column]:
+                usage.setdefault(course[column], []).append({"id": course["id"], "name": course["name"]})
     return render_template("prompts.html", defaults=defaults, mine=mine,
+                           usage=usage,
                            kind_label=PROMPT_KIND_LABEL,
                            placeholder_hints=PROMPT_PLACEHOLDER_HINTS)
 
@@ -3588,7 +3602,10 @@ def knowledge_graph_detail(gid):
 def knowledge_graph_graph_data(gid):
     """知识星系数据：一次性下发全量节点、关系、分类与连接度。"""
     _kg_graph(gid)
-    return jsonify(kg_utils.graph_payload(get_db(), gid))
+    payload = kg_utils.graph_payload(get_db(), gid)
+    for node in payload["nodes"]:
+        node["url"] = url_for("knowledge_graph_concept", gid=gid, nid=node["id"])
+    return jsonify(payload)
 
 
 @_routes.route("/knowledge-graphs/<oid:gid>/neighbors.json")

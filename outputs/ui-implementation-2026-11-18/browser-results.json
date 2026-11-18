@@ -1,0 +1,697 @@
+[
+  {
+    "width": 1440,
+    "page": "courses",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": []
+  },
+  {
+    "width": 1440,
+    "page": "course",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "讲次（1）",
+        "y": 367
+      }
+    ]
+  },
+  {
+    "width": 1440,
+    "page": "lecture",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "提交与批阅（20 份）",
+        "y": 297
+      },
+      {
+        "text": "讲次信息",
+        "y": 2572
+      },
+      {
+        "text": "学生版讲义",
+        "y": 2766
+      },
+      {
+        "text": "标准答案（教师版）",
+        "y": 2910
+      },
+      {
+        "text": "作业范围",
+        "y": 3062
+      },
+      {
+        "text": "讲次汇总",
+        "y": 3572
+      },
+      {
+        "text": "知识点分析（全班）",
+        "y": 3711
+      },
+      {
+        "text": "每题判定分布",
+        "y": 3842
+      }
+    ]
+  },
+  {
+    "width": 1440,
+    "page": "review",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "AI 汇总与失分归因",
+        "y": 241
+      }
+    ]
+  },
+  {
+    "width": 1440,
+    "page": "graphs",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "化学",
+        "y": 217
+      }
+    ]
+  },
+  {
+    "width": 1440,
+    "page": "graph",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "知识星系 （2639 个概念 · 4753 条关系）",
+        "y": 623
+      },
+      {
+        "text": "概念节点 （等待选择星团）",
+        "y": 1502
+      },
+      {
+        "text": "关系边 （等待选择星团）",
+        "y": 1624
+      }
+    ]
+  },
+  {
+    "width": 1440,
+    "page": "prompts",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "批改提示词",
+        "y": 321
+      }
+    ]
+  },
+  {
+    "width": 1440,
+    "page": "settings",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "AI API 配置",
+        "y": 167
+      },
+      {
+        "text": "常用批阅设置",
+        "y": 167
+      }
+    ]
+  },
+  {
+    "width": 1920,
+    "page": "courses",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": []
+  },
+  {
+    "width": 1920,
+    "page": "course",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "讲次（1）",
+        "y": 367
+      }
+    ]
+  },
+  {
+    "width": 1920,
+    "page": "lecture",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "提交与批阅（20 份）",
+        "y": 297
+      },
+      {
+        "text": "讲次信息",
+        "y": 2572
+      },
+      {
+        "text": "学生版讲义",
+        "y": 2766
+      },
+      {
+        "text": "标准答案（教师版）",
+        "y": 2910
+      },
+      {
+        "text": "作业范围",
+        "y": 3062
+      },
+      {
+        "text": "讲次汇总",
+        "y": 3552
+      },
+      {
+        "text": "知识点分析（全班）",
+        "y": 3690
+      },
+      {
+        "text": "每题判定分布",
+        "y": 3821
+      }
+    ]
+  },
+  {
+    "width": 1920,
+    "page": "review",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "AI 汇总与失分归因",
+        "y": 241
+      }
+    ]
+  },
+  {
+    "width": 1920,
+    "page": "graphs",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "化学",
+        "y": 217
+      }
+    ]
+  },
+  {
+    "width": 1920,
+    "page": "graph",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "知识星系 （2639 个概念 · 4753 条关系）",
+        "y": 623
+      },
+      {
+        "text": "概念节点 （等待选择星团）",
+        "y": 1557
+      },
+      {
+        "text": "关系边 （等待选择星团）",
+        "y": 1679
+      }
+    ]
+  },
+  {
+    "width": 1920,
+    "page": "prompts",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "批改提示词",
+        "y": 321
+      }
+    ]
+  },
+  {
+    "width": 1920,
+    "page": "settings",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "AI API 配置",
+        "y": 167
+      },
+      {
+        "text": "常用批阅设置",
+        "y": 167
+      }
+    ]
+  },
+  {
+    "width": 390,
+    "page": "courses",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": []
+  },
+  {
+    "width": 390,
+    "page": "course",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "讲次（1）",
+        "y": 350
+      }
+    ]
+  },
+  {
+    "width": 390,
+    "page": "lecture",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "提交与批阅（20 份）",
+        "y": 320
+      },
+      {
+        "text": "讲次信息",
+        "y": 3388
+      },
+      {
+        "text": "学生版讲义",
+        "y": 3571
+      },
+      {
+        "text": "标准答案（教师版）",
+        "y": 3728
+      },
+      {
+        "text": "作业范围",
+        "y": 3913
+      },
+      {
+        "text": "讲次汇总",
+        "y": 4602
+      },
+      {
+        "text": "知识点分析（全班）",
+        "y": 4750
+      },
+      {
+        "text": "每题判定分布",
+        "y": 4909
+      }
+    ]
+  },
+  {
+    "width": 390,
+    "page": "review",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "AI 汇总与失分归因",
+        "y": 234
+      }
+    ]
+  },
+  {
+    "width": 390,
+    "page": "graphs",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "化学",
+        "y": 281
+      }
+    ]
+  },
+  {
+    "width": 390,
+    "page": "graph",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "知识星系 （2639 个概念 · 4753 条关系）",
+        "y": 634
+      },
+      {
+        "text": "概念节点 （等待选择星团）",
+        "y": 1277
+      },
+      {
+        "text": "关系边 （等待选择星团）",
+        "y": 1406
+      }
+    ]
+  },
+  {
+    "width": 390,
+    "page": "prompts",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "批改提示词",
+        "y": 405
+      }
+    ]
+  },
+  {
+    "width": 390,
+    "page": "settings",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "AI API 配置",
+        "y": 138
+      },
+      {
+        "text": "常用批阅设置",
+        "y": 765
+      }
+    ]
+  },
+  {
+    "width": 320,
+    "page": "courses",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": []
+  },
+  {
+    "width": 320,
+    "page": "course",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "讲次（1）",
+        "y": 350
+      }
+    ]
+  },
+  {
+    "width": 320,
+    "page": "lecture",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "提交与批阅（20 份）",
+        "y": 320
+      },
+      {
+        "text": "讲次信息",
+        "y": 5196
+      },
+      {
+        "text": "学生版讲义",
+        "y": 5379
+      },
+      {
+        "text": "标准答案（教师版）",
+        "y": 5527
+      },
+      {
+        "text": "作业范围",
+        "y": 5779
+      },
+      {
+        "text": "讲次汇总",
+        "y": 6677
+      },
+      {
+        "text": "知识点分析（全班）",
+        "y": 6845
+      },
+      {
+        "text": "每题判定分布",
+        "y": 7025
+      }
+    ]
+  },
+  {
+    "width": 320,
+    "page": "review",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "AI 汇总与失分归因",
+        "y": 256
+      }
+    ]
+  },
+  {
+    "width": 320,
+    "page": "graphs",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "化学",
+        "y": 347
+      }
+    ]
+  },
+  {
+    "width": 320,
+    "page": "graph",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "知识星系 （2639 个概念 · 4753 条关系）",
+        "y": 737
+      },
+      {
+        "text": "概念节点 （等待选择星团）",
+        "y": 1328
+      },
+      {
+        "text": "关系边 （等待选择星团）",
+        "y": 1457
+      }
+    ]
+  },
+  {
+    "width": 320,
+    "page": "prompts",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "批改提示词",
+        "y": 427
+      }
+    ]
+  },
+  {
+    "width": 320,
+    "page": "settings",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "AI API 配置",
+        "y": 138
+      },
+      {
+        "text": "常用批阅设置",
+        "y": 807
+      }
+    ]
+  },
+  {
+    "width": 900,
+    "page": "courses",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": []
+  },
+  {
+    "width": 900,
+    "page": "course",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "讲次（1）",
+        "y": 355
+      }
+    ]
+  },
+  {
+    "width": 900,
+    "page": "lecture",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "提交与批阅（20 份）",
+        "y": 285
+      },
+      {
+        "text": "讲次信息",
+        "y": 2600
+      },
+      {
+        "text": "学生版讲义",
+        "y": 2782
+      },
+      {
+        "text": "标准答案（教师版）",
+        "y": 2914
+      },
+      {
+        "text": "作业范围",
+        "y": 3058
+      },
+      {
+        "text": "讲次汇总",
+        "y": 3573
+      },
+      {
+        "text": "知识点分析（全班）",
+        "y": 3700
+      },
+      {
+        "text": "每题判定分布",
+        "y": 3839
+      }
+    ]
+  },
+  {
+    "width": 900,
+    "page": "review",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "AI 汇总与失分归因",
+        "y": 229
+      }
+    ]
+  },
+  {
+    "width": 900,
+    "page": "graphs",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "化学",
+        "y": 248
+      }
+    ]
+  },
+  {
+    "width": 900,
+    "page": "graph",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "知识星系 （2639 个概念 · 4753 条关系）",
+        "y": 599
+      },
+      {
+        "text": "概念节点 （等待选择星团）",
+        "y": 1398
+      },
+      {
+        "text": "关系边 （等待选择星团）",
+        "y": 1508
+      }
+    ]
+  },
+  {
+    "width": 900,
+    "page": "prompts",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "批改提示词",
+        "y": 330
+      }
+    ]
+  },
+  {
+    "width": 900,
+    "page": "settings",
+    "status": 200,
+    "errors": [],
+    "overflow": 0,
+    "headings": [
+      {
+        "text": "AI API 配置",
+        "y": 155
+      },
+      {
+        "text": "常用批阅设置",
+        "y": 722
+      }
+    ]
+  }
+]
