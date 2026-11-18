@@ -381,9 +381,9 @@ CREATE TABLE IF NOT EXISTS model_prices(
 
 def get_db():
     """Flask 请求上下文内的连接；同一请求复用，请求结束由 close_db 关闭。"""
-    from flask import g
+    from flask import current_app, g
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH, timeout=10)
+        g.db = sqlite3.connect(current_app.config.get("DB_PATH", DB_PATH), timeout=10)
         g.db.row_factory = sqlite3.Row
     return g.db
 
@@ -395,7 +395,12 @@ def close_db(_=None):
         db.close()
 
 
-def init_db(upload_migrator=None, default_prompts=(), default_passwords=()):
+def database_path():
+    from flask import current_app, has_app_context
+    return current_app.config.get("DB_PATH", DB_PATH) if has_app_context() else DB_PATH
+
+
+def init_db(upload_migrator=None, default_prompts=(), default_passwords=(), recover_interrupted=False):
     """建表 + 轻量迁移。
 
     upload_migrator: 附件目录迁移由调用方注入，避免 db 层依赖上传目录布局。
@@ -403,15 +408,16 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=()):
     default_passwords: 旧版初始密码清单，用于标记「登录后必须改密」。
     """
     # 旧版（无账号体系）数据库与本版不兼容，备份后重建；旧库当时仅有测试数据
-    con = sqlite3.connect(DB_PATH)
+    path = database_path()
+    con = sqlite3.connect(path)
     # WAL 允许读写并发（长批改占线程时页面仍可访问），busy_timeout 避免瞬时锁直接报错
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA busy_timeout=5000")
     cols = {r[1] for r in con.execute("PRAGMA table_info(homeworks)")}
     if "token" in cols:
         con.close()
-        os.replace(DB_PATH, DB_PATH + ".v1.bak")
-        con = sqlite3.connect(DB_PATH)
+        os.replace(path, path + ".v1.bak")
+        con = sqlite3.connect(path)
     # 课程下的「作业」更名为「讲次」：一次作业即一讲，旧数据直接改名沿用
     tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "homeworks" in tables and "lectures" not in tables:
@@ -584,28 +590,29 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=()):
             upload_migrator(con)
         except OSError:
             _log.exception("附件目录迁移失败，旧路径仍可用")
-    # 上次进程退出时未完成的操作标记失败；知识图谱随后由启动恢复自动续建
-    con.execute("UPDATE ai_operations SET status='failed', error=?, "
-                "finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running') "
-                "AND operation_type='kg_build'",
-                ("服务重启，知识图谱建图已中断，已自动重新排队，将从未完成块续建",))
-    con.execute("UPDATE ai_operations SET status='failed', error=?, "
-                "finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running') "
-                "AND operation_type<>'kg_build'",
-                ("服务重启，后台 AI 任务已中断，请重新提交",))
-    con.execute("""
-        UPDATE ai_usage_events SET status='error',
-          error=CASE WHEN EXISTS(
-            SELECT 1 FROM ai_operations o WHERE o.id=ai_usage_events.operation_id
-              AND o.operation_type='kg_build')
-            THEN '服务重启，知识图谱建图请求已中断'
-            ELSE '服务重启，本次 AI 请求已中断' END,
-          latency_ms=MAX(0, CAST(ROUND(
-            (julianday(CURRENT_TIMESTAMP)-julianday(created_at))*86400000) AS INTEGER))
-        WHERE status='running'""")
+    if recover_interrupted:
+        # 上次进程退出时未完成的操作标记失败；知识图谱随后由启动恢复自动续建
+        con.execute("UPDATE ai_operations SET status='failed', error=?, "
+                    "finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running') "
+                    "AND operation_type='kg_build'",
+                    ("服务重启，知识图谱建图已中断，已自动重新排队，将从未完成块续建",))
+        con.execute("UPDATE ai_operations SET status='failed', error=?, "
+                    "finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running') "
+                    "AND operation_type<>'kg_build'",
+                    ("服务重启，后台 AI 任务已中断，请重新提交",))
+        con.execute("""
+            UPDATE ai_usage_events SET status='error',
+              error=CASE WHEN EXISTS(
+                SELECT 1 FROM ai_operations o WHERE o.id=ai_usage_events.operation_id
+                  AND o.operation_type='kg_build')
+                THEN '服务重启，知识图谱建图请求已中断'
+                ELSE '服务重启，本次 AI 请求已中断' END,
+              latency_ms=MAX(0, CAST(ROUND(
+                (julianday(CURRENT_TIMESTAMP)-julianday(created_at))*86400000) AS INTEGER))
+            WHERE status='running'""")
     con.commit()
     con.close()
     try:
-        os.chmod(DB_PATH, 0o600)  # 数据库含账号哈希与 API Key，仅当前用户可读写
+        os.chmod(path, 0o600)  # 数据库含账号哈希与 API Key，仅当前用户可读写
     except OSError:
         pass

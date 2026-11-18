@@ -857,7 +857,8 @@ class KGRouteTest(unittest.TestCase):
             self.assertTrue(app_module._kg_start_build(graph["id"], 64, 2))
             self.assertFalse(app_module._kg_start_build(graph["id"], 64, 2))
         thread_class.assert_called_once_with(
-            target=app_module._kg_build_worker, args=(graph["id"], 64, 2), daemon=True)
+            target=app_module._kg_build_worker, args=(graph["id"], 64, 2),
+            kwargs={"application": app_module.app}, daemon=True)
         thread_class.return_value.start.assert_called_once_with()
 
     def test_build_worker_ignores_missing_or_terminal_material(self):

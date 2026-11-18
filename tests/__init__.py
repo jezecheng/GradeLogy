@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """测试辅助：把异步 AI 任务队列替换为同步执行，便于单元/集成测试断言。"""
+from tests import _env_bootstrap  # noqa: F401
 import app as app_module
+
+app_module.init_db()
 
 
 class SyncAiTaskQueue:

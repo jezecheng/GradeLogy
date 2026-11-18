@@ -70,8 +70,8 @@ def _validate_upload(file_storage):
         file_storage.stream.seek(0, os.SEEK_END)
         size = file_storage.stream.tell()
         file_storage.stream.seek(0)
-    if size > cfg.MAX_UPLOAD_MB * 1024 * 1024:
-        raise ValueError(f"单个文件不能超过 {cfg.MAX_UPLOAD_MB}MB")
+    if size > cfg.get("MAX_UPLOAD_MB") * 1024 * 1024:
+        raise ValueError(f"单个文件不能超过 {cfg.get("MAX_UPLOAD_MB")}MB")
     return f"{datetime.now():%Y%m%d%H%M%S}_{secrets.token_hex(3)}_{orig or 'file.' + ext}"
 
 
@@ -79,7 +79,7 @@ def save_upload(file_storage, course_id, lecture_id, student_id=0, filename=None
     """按 course/lecture[/student] 分层保存附件，返回相对路径（用 / 分隔）。"""
     fname = filename or _validate_upload(file_storage)
     rel_dir = _upload_rel_dir(course_id, lecture_id, student_id)
-    abs_dir = os.path.join(cfg.STORAGE_DIR, *rel_dir.split("/"))
+    abs_dir = os.path.join(cfg.get("STORAGE_DIR"), *rel_dir.split("/"))
     os.makedirs(abs_dir, exist_ok=True)
     file_storage.save(os.path.join(abs_dir, fname))
     return f"{rel_dir}/{fname}"
@@ -105,3 +105,38 @@ def _student_files(uid):
             WHERE h.student_pdf != ''""", (uid,)):
         paths.add(os.path.normpath(r["student_pdf"]).replace("\\", "/"))
     return paths
+
+
+def can_read_file(db, user, filename):
+    """按数据库中的资源归属授权；文件名和目录名本身不授予权限。"""
+    if user["role"] == "admin":
+        return True
+    wanted = os.path.normpath(filename).replace("\\", "/")
+    if user["role"] == "student":
+        return wanted in _student_files(user["id"])
+    if user["role"] != "teacher":
+        return False
+    uid = user["id"]
+    scope = ("SELECT c.id FROM courses c WHERE c.teacher_id=? OR EXISTS "
+             "(SELECT 1 FROM course_teachers ct WHERE ct.course_id=c.id AND ct.teacher_id=?)")
+    paths = set()
+    for row in db.execute(
+            f"SELECT student_pdf,answer_pdf FROM lectures WHERE course_id IN ({scope})",
+            (uid, uid)):
+        paths.update(p for p in row if p)
+    for row in db.execute(
+            f"SELECT s.file_path FROM submissions s JOIN lectures l ON l.id=s.lecture_id "
+            f"WHERE l.course_id IN ({scope})", (uid, uid)):
+        paths.update(file_list(row["file_path"]))
+    for row in db.execute(
+            f"SELECT q.image_path FROM questions q JOIN submissions s ON s.id=q.submission_id "
+            f"JOIN lectures l ON l.id=s.lecture_id WHERE l.course_id IN ({scope})",
+            (uid, uid)):
+        if row["image_path"]:
+            paths.add(row["image_path"])
+    for row in db.execute(
+            "SELECT m.stored_name FROM kg_materials m JOIN knowledge_graphs k ON k.id=m.graph_id "
+            "WHERE k.created_by=? OR EXISTS (SELECT 1 FROM kg_members km "
+            "WHERE km.graph_id=k.id AND km.user_id=?)", (uid, uid)):
+        paths.add(row["stored_name"])
+    return wanted in {os.path.normpath(p).replace("\\", "/") for p in paths}

@@ -3,7 +3,7 @@
 ## 架构总览
 
 ```
-本地改代码 → git push main → GitHub Actions SSH → 服务器 git pull + docker compose up
+本地改代码 → git push main → GitHub Actions SSH → 服务器同步 main + docker compose up
                                       ↓
                               腾讯云轻量 + Docker
                               （gunicorn 单进程 8 线程）
@@ -39,7 +39,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/jezecheng/GradeLogy/main/dep
 ```
 
 脚本会问你：
-- SECRET_KEY → 直接回车自动生成（**服务器上的密钥与本地不同，重启本地 app.py 时重新生成即可，不冲突**）
+- SECRET_KEY → 直接回车自动生成（服务器与本地可使用不同密钥；各自应持久保存，重启时复用）
 - AI 配置 → 可全部留空，之后在网页「AI 设置」里填
 
 完成后会显示健康检查通过和公网访问地址。验证一下：
@@ -71,7 +71,7 @@ cat ~/.ssh/gradelogy_deploy.pub >> ~/.ssh/authorized_keys
 | `SERVER_SSH_KEY` | `cat ~/.ssh/gradelogy_deploy` 的完整内容（私钥，以 `-----BEGIN OPENSSH...` 开头） |
 | `APP_DIR` | `/srv/gradelogy`（脚本默认的目录） |
 
-（可选）再加 `SECRET_KEY`、`AI_API_URL`、`AI_API_KEY`、`AI_MODEL`——填了会覆盖服务器上 `.env` 的值。
+当前工作流只读取以上部署凭据，不会把额外的 AI 或签名 Secrets 写入 `.env`。运行配置保存在服务器 `.env`：若填写 `AI_API_KEY`，须同时填写接口和模型；否则可在网页配置。
 
 ## 后续一键发布（每次）
 
@@ -79,13 +79,13 @@ cat ~/.ssh/gradelogy_deploy.pub >> ~/.ssh/authorized_keys
 git add . && git commit -m "fix: xxx" && git push
 ```
 
-之后**什么都不用做**。等 20~40 秒，GitHub Actions 自动完成：
+推送前完成本地验证和数据备份。GitHub Actions 随后自动完成以下操作，耗时取决于网络与镜像构建；当前流程没有测试关卡或自动回滚：
 - SSH 登录服务器
-- `git pull --depth=1`
+- 获取 `origin/main` 并重置服务器代码工作树（服务器本地代码修改会被覆盖）
 - `docker compose build && docker compose up -d`
 - 健康检查
 
-去 https://github.com/jezecheng/GradeLogy/actions 可以看到实时日志。
+在 [GitHub Actions](https://github.com/jezecheng/GradeLogy/actions) 查看日志和健康检查结果。Docker 使用 `wsgi:app` 显式初始化数据库及后台服务，保持单进程、多线程。旧的自定义 Gunicorn 命令也须从 `app:app` 改为 `wsgi:app`。
 
 ---
 

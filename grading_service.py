@@ -68,6 +68,8 @@ class GradingQueue:
                 teacher_id, "grade", self._get_setting(teacher_id, "ai_model"),
                 course_id=course_id, lecture_id=lecture_id,
                 submission_id=sid, status="queued")
+            db.execute("UPDATE submissions SET status='待批改',report_published=0 WHERE id=?", (sid,))
+            db.commit()
             self._pool.submit(self._execute, teacher_id, sid, operation)
         except Exception as e:
             log.exception("加入批阅队列失败 submission=%s", sid)

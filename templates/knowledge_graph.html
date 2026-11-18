@@ -473,7 +473,7 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
         onsubmit="this.querySelector('button').disabled = true; this.querySelector('button').textContent = '体检中…';">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <button class="ghost small">开始体检</button>
-    <span class="muted small">检查同义重复、方向错误与孤立概念；结果先预览，应用后可回滚。</span>
+    <span class="muted small">检查同义重复、方向错误与孤立概念；结果先预览，后续未建图或编辑时可回滚。</span>
   </form>
   {% endif %}
   {% if not audits %}
@@ -516,7 +516,7 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
     <div class="kg-audit-actions">
       <form method="post"
             action="{{ url_for('knowledge_graph_audit_apply', gid=graph.id, aid=a.id) }}"
-            onsubmit="return confirm('应用这些建议会修改图谱，应用后仍可回滚。继续？')">
+            onsubmit="return confirm('应用这些建议会修改图谱，后续未建图或编辑时可回滚。继续？')">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
         <button class="ghost small">应用建议</button>
       </form>
@@ -529,7 +529,7 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
     {% elif can_edit and a.status == '已应用' and a.has_snapshot %}
     <form method="post"
           action="{{ url_for('knowledge_graph_audit_rollback', gid=graph.id, aid=a.id) }}"
-          onsubmit="return confirm('回滚会用快照覆盖图谱当前状态。继续？')">
+          onsubmit="return confirm('回滚会检查后续变更；没有新建图或编辑时才恢复快照。继续？')">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
       <button class="ghost small">回滚</button>
     </form>
@@ -547,7 +547,7 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
         onsubmit="this.querySelector('button').disabled = true; this.querySelector('button').textContent = '整理中…';">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <button class="ghost small">用 AI 重整分类</button>
-    <span class="muted small">把「方法」「公式」等自由标签归并到 2~3 层学科路径；结果先预览，应用后可回滚。</span>
+    <span class="muted small">把「方法」「公式」等自由标签归并到 2~3 层学科路径；结果先预览，后续未建图或编辑时可回滚。</span>
   </form>
   {% endif %}
   {% if not cat_maps %}
@@ -570,7 +570,7 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
       {% if can_edit and m.status == '待确认' %}
       <form method="post"
             action="{{ url_for('knowledge_graph_category_apply', gid=graph.id, mid=m.id) }}"
-            onsubmit="return confirm('应用选中的映射会批量改写节点分类，应用后仍可回滚。继续？')">
+            onsubmit="return confirm('应用选中的映射会批量改写节点分类，后续未建图或编辑时可回滚。继续？')">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
         <div class="kg-table-wrap">
           <table class="kg">
@@ -634,7 +634,7 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
       {% if can_edit and m.status == '已应用' and m.has_snapshot %}
       <form method="post"
             action="{{ url_for('knowledge_graph_category_rollback', gid=graph.id, mid=m.id) }}"
-            onsubmit="return confirm('回滚会用快照覆盖图谱当前状态。继续？')">
+            onsubmit="return confirm('回滚会检查后续变更；没有新建图或编辑时才恢复快照。继续？')">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
         <button class="ghost small">回滚</button>
       </form>

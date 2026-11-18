@@ -5,6 +5,7 @@
 资料文件放在 uploads/kg/<graph_id>/，随现有备份包一起迁移。
 """
 import json
+import hashlib
 import logging
 import sqlite3
 
@@ -1183,8 +1184,24 @@ def reverse_edge(db, graph_id, edge_id):
     return True
 
 
-def apply_audit(db, graph_id, suggestions):
+def graph_state_token(db, graph_id):
+    """指纹覆盖节点、边、资料及文本块，用于拒绝过期整图回滚。"""
+    state = {"graph_id": graph_id, **snapshot_graph(db, graph_id)}
+    for table in ("kg_materials", "kg_chunks"):
+        state[table] = [dict(row) for row in db.execute(
+            f"SELECT * FROM {table} WHERE graph_id=? ORDER BY id", (graph_id,))]
+    payload = json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _lock_graph(db):
+    if not db.in_transaction:
+        db.execute("BEGIN IMMEDIATE")
+
+
+def apply_audit(db, graph_id, suggestions, commit=True):
     """按顺序应用已校验的建议，返回应用前快照。"""
+    _lock_graph(db)
     snapshot = snapshot_graph(db, graph_id)
     for item in suggestions or []:
         action = item.get("action")
@@ -1201,12 +1218,21 @@ def apply_audit(db, graph_id, suggestions):
                        (item.get("node_id"), graph_id))
     db.execute("UPDATE knowledge_graphs SET updated_at=CURRENT_TIMESTAMP WHERE id=?",
                (graph_id,))
-    db.commit()
+    snapshot["expected_state"] = graph_state_token(db, graph_id)
+    if commit:
+        db.commit()
     return snapshot
 
 
-def restore_snapshot(db, graph_id, snapshot):
+def restore_snapshot(db, graph_id, snapshot, commit=True):
     """回滚到快照：重建该图的节点与关系（保留原 ID）。"""
+    _lock_graph(db)
+    if not isinstance(snapshot, dict) or not snapshot.get("expected_state"):
+        raise ValueError("旧快照缺少版本校验，不能安全回滚；请从完整备份恢复或手工调整。")
+    if snapshot["expected_state"] != graph_state_token(db, graph_id):
+        raise ValueError("图谱之后已有建图或编辑，已取消回滚以保留后续成果。")
+    if not isinstance(snapshot.get("nodes"), list) or not isinstance(snapshot.get("edges"), list):
+        raise ValueError("快照格式无效，已取消回滚。")
     db.execute("DELETE FROM kg_edges WHERE graph_id=?", (graph_id,))
     db.execute("DELETE FROM kg_nodes WHERE graph_id=?", (graph_id,))
     for node in snapshot.get("nodes") or []:
@@ -1228,7 +1254,8 @@ def restore_snapshot(db, graph_id, snapshot):
              edge.get("confidence") or 0, edge.get("created_at")))
     db.execute("UPDATE knowledge_graphs SET updated_at=CURRENT_TIMESTAMP WHERE id=?",
                (graph_id,))
-    db.commit()
+    if commit:
+        db.commit()
 
 
 # ---------- 分类重构：把扁平的自由分类映射成 2~3 层学科树 ----------
@@ -1371,8 +1398,9 @@ def analyze_categories(db, graph_id, api_url, api_key, model, usage_hook=None,
     return validate_category_map(db, graph_id, data.get("mappings"))
 
 
-def apply_category_map(db, graph_id, mappings):
+def apply_category_map(db, graph_id, mappings, commit=True):
     """按映射批量改写节点分类，返回应用前快照。"""
+    _lock_graph(db)
     snapshot = snapshot_graph(db, graph_id)
     for item in mappings or []:
         target = str(item.get("to") or "").strip()
@@ -1390,6 +1418,8 @@ def apply_category_map(db, graph_id, mappings):
                 (target, graph_id))
     db.execute("UPDATE knowledge_graphs SET updated_at=CURRENT_TIMESTAMP WHERE id=?",
                (graph_id,))
-    db.commit()
+    snapshot["expected_state"] = graph_state_token(db, graph_id)
+    if commit:
+        db.commit()
     return snapshot
 

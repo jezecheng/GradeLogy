@@ -91,6 +91,7 @@ class AiTaskQueue:
                     db.commit()
                     runner(db, operation)
                 except Exception as e:  # noqa: BLE001 兜底：绝不让线程静默崩溃
+                    db.rollback()
                     log.exception("AI 后台任务异常 operation=%s type=%s",
                                   operation["id"], operation.get("operation_type"))
                     try:

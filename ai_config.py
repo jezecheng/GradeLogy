@@ -46,7 +46,7 @@ MAX_TOKENS_KEYS = tuple(MAX_TOKENS_SETTINGS.keys())
 
 
 def _connect():
-    con = sqlite3.connect(config.DB_PATH, timeout=10)
+    con = sqlite3.connect(config.get("DB_PATH"), timeout=10)
     con.row_factory = sqlite3.Row
     return con
 
@@ -82,9 +82,11 @@ def get_ai_setting(teacher_id, key, default="", db=None):
             con.close()
 
     # 环境变量接管了 Key 时，页面保存的多套配置整体让位，避免半套配置混用
-    env_takes_over = key in ("ai_api_url", "ai_api_key") and bool(
-        ENV_AI_SETTINGS.get("ai_api_key"))
-    row = None if env_takes_over else _active_key_row(db, teacher_id)
+    if ENV_AI_SETTINGS.get("ai_api_key"):
+        # 环境密钥接管整套配置；缺项留空并由调用方报错，不借用数据库凭据。
+        value = ENV_AI_SETTINGS.get(key) or ""
+        return value.rstrip("/") if key == "ai_api_url" else value
+    row = _active_key_row(db, teacher_id)
     if row is not None:
         value = {"ai_api_url": row[0], "ai_api_key": row[1], "ai_model": row[2]}[key] or ""
         if key == "ai_api_url":
@@ -102,7 +104,7 @@ def resolve(teacher_id=None, db=None):
     teacher_id 为空时沿用旧行为：取第一个配置过 Key 的老师，方便命令行直接跑。
     """
     if db is None:
-        if not os.path.exists(config.DB_PATH):
+        if not os.path.exists(config.get("DB_PATH")):
             return {"api_url": config.AI_API_URL.rstrip("/"), "api_key": config.AI_API_KEY,
                     "model": config.AI_MODEL, "extra": ""}
         con = _connect()

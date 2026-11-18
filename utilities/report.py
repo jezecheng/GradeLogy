@@ -5,6 +5,8 @@ build_report_md 负责逐题明细/失分归因/评价的排版，render_markdow
 Markdown（标题/表格/列表/粗体）渲染成 HTML，避免引入额外依赖。
 """
 import re
+from html import escape, unescape
+from urllib.parse import urlsplit
 
 try:
     from latex2mathml.converter import convert as _latex_to_mathml
@@ -179,13 +181,27 @@ def render_markdown(md):
     # 行内 $...$（不跨行、不含 $）
     text = re.sub(r"\$[^$\n]+\$", _stash, text)
 
-    esc = lambda s: (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+    esc = lambda s: escape(str(s), quote=True)
+
+    def link(match):
+        label, url = match.group(1), unescape(match.group(2))
+        # 链接属性和链接协议分别校验，阻止事件属性及 javascript/data 等 URL。
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            return label
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in url):
+            return label
+        if parts.scheme.lower() not in ("http", "https", "mailto", ""):
+            return label
+        if not parts.scheme and (url.startswith("//") or "\\" in url):
+            return label
+        return f'<a href="{escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">{label}</a>'
 
     def inline(text):
         s = esc(text)
         s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
-        s = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)",
-                   r'<a href="\2" target="_blank" rel="noopener">\1</a>', s)
+        s = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", link, s)
         s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
         return s
 

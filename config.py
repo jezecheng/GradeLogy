@@ -77,10 +77,18 @@ AUTO_GRADE = _env("AUTO_GRADE", "1").lower() not in ("0", "false", "no", "off")
 AUTO_GRADE_HOURS = float(_env("AUTO_GRADE_HOURS", "6"))
 
 
+def get(name, default=None):
+    """实例覆盖优先，模块默认值兼容命令行和现有测试。"""
+    from flask import current_app, has_app_context
+    if has_app_context() and name in current_app.config.get("GRADELOGY_SETTINGS", {}):
+        return current_app.config["GRADELOGY_SETTINGS"][name]
+    return globals().get(name, default)
+
+
 def ensure_dirs():
     """确保所有数据目录存在；容器首次启动、只读镜像下都靠它兜底。"""
-    for path in (DATA_DIR, STORAGE_DIR, LOG_DIR, BACKUP_DIR, EXPORT_DIR,
-                 os.path.dirname(DB_PATH)):
+    for path in (get("DATA_DIR"), get("STORAGE_DIR"), get("LOG_DIR"), get("BACKUP_DIR"), get("EXPORT_DIR"),
+                 os.path.dirname(get("DB_PATH"))):
         os.makedirs(path, exist_ok=True)
 
 

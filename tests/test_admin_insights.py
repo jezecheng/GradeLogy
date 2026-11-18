@@ -22,6 +22,7 @@ os.environ["AUTO_GRADE"] = "0"
 os.environ["SECRET_KEY"] = "admin-test-secret"
 
 import app as app_module  # noqa: E402
+app_module.init_db()
 from utilities import logview  # noqa: E402
 
 # 多个测试类共用同一套隔离数据目录，进程退出时再统一清理
@@ -343,7 +344,7 @@ class AdminInsightsTest(unittest.TestCase):
         con.close()
 
         teacher = self.login(2)
-        course_id = app_module._id_signer.dumps(10)
+        course_id = app_module.app.url_map.gradelogy_signer.dumps(10)
         resp = teacher.post(f"/course/{course_id}/lecture/create", data={
             "_csrf": "test-token", "title": "时区讲次", "description": "",
             "deadline": "2026-01-02T03:04"})
@@ -354,7 +355,7 @@ class AdminInsightsTest(unittest.TestCase):
         con.close()
         self.assertEqual(stored, "2026-01-02T11:04")
 
-        lecture_url = f"/lecture/{app_module._id_signer.dumps(lecture_id)}"
+        lecture_url = f"/lecture/{app_module.app.url_map.gradelogy_signer.dumps(lecture_id)}"
         html = teacher.get(lecture_url).get_data(as_text=True)
         self.assertIn("截止 2026-01-02 03:04", html)
         self.assertIn('value="2026-01-02T03:04"', html)
@@ -370,7 +371,7 @@ class AdminInsightsTest(unittest.TestCase):
 
         student = self.login(4)
         html = student.get(
-            f"/student/lecture/{app_module._id_signer.dumps(lecture_id)}").get_data(as_text=True)
+            f"/student/lecture/{app_module.app.url_map.gradelogy_signer.dumps(lecture_id)}").get_data(as_text=True)
         self.assertIn("截止 2026-01-03 13:05", html)
         self.assertIn("2026-01-03 13:05", student.get("/student").get_data(as_text=True))
 
@@ -535,7 +536,7 @@ class CourseExportTest(unittest.TestCase):
 
     @staticmethod
     def signed(cid):
-        return app_module._id_signer.dumps(cid)
+        return app_module.app.url_map.gradelogy_signer.dumps(cid)
 
     def post_export(self, uid=2, cid=30):
         return self.login(uid).post(f"/course/{self.signed(cid)}/export",
@@ -660,7 +661,7 @@ class LectureScopeTest(unittest.TestCase):
                 mock.patch.object(app_module, "analyze_answer_pdf",
                                   return_value=(questions, "")) as analyze:
             resp = self.login(2).post(
-                f"/lecture/{app_module._id_signer.dumps(100)}/answer/pages",
+                f"/lecture/{app_module.app.url_map.gradelogy_signer.dumps(100)}/answer/pages",
                 data={"_csrf": "test-token", "page": ["2", "3"]})
         self.assertEqual(resp.status_code, 302)
         analyze.assert_called_once()
@@ -676,11 +677,11 @@ class LectureScopeTest(unittest.TestCase):
 
         # 独立分析入口已合并，旧地址不再可用
         self.assertEqual(self.login(2).post(
-            f"/lecture/{app_module._id_signer.dumps(100)}/scope/analyze",
+            f"/lecture/{app_module.app.url_map.gradelogy_signer.dumps(100)}/scope/analyze",
             data={"_csrf": "test-token"}).status_code, 404)
 
         with mock.patch.object(app_module, "pdf_page_count", return_value=10):
-            page = self.login(2).get(f"/lecture/{app_module._id_signer.dumps(100)}")
+            page = self.login(2).get(f"/lecture/{app_module.app.url_map.gradelogy_signer.dumps(100)}")
         html = page.get_data(as_text=True)
         self.assertEqual(page.status_code, 200)
         self.assertIn("保存并生成题目列表", html)
@@ -953,8 +954,8 @@ class AsyncGradingTest(unittest.TestCase):
         con.close()
         self.settings = {"ai_api_url": "http://ai.local", "ai_api_key": "k",
                          "ai_model": "model-a"}
-        self.sid_url = app_module._id_signer.dumps(self.SID)
-        self.hid_url = app_module._id_signer.dumps(100)
+        self.sid_url = app_module.app.url_map.gradelogy_signer.dumps(self.SID)
+        self.hid_url = app_module.app.url_map.gradelogy_signer.dumps(100)
         self.client = app_module.app.test_client()
         with self.client.session_transaction() as sess:
             sess["uid"] = 2
@@ -1088,7 +1089,7 @@ class AsyncGradingTest(unittest.TestCase):
                         "VALUES(?,1,'running')", (operation_id,))
         con.commit()
         con.close()
-        app_module.init_db()
+        app_module.init_db(recover_interrupted=True)
         row = self.operation()
         self.assertEqual(row[0], "failed")
         self.assertIn("后台 AI 任务", row[1])

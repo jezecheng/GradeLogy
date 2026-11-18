@@ -289,15 +289,17 @@ def habit_stats(db, course_id, student_id):
     return [{"type": name, "count": count} for name, count in counts.items()]
 
 
-def latest_analysis(db, kind, lecture_id=0, student_id=0):
+def latest_analysis(db, kind, lecture_id=0, student_id=0, course_id=0):
     """取最近一次生成的横向/纵向分析，没有返回 None。"""
     if kind == "horizontal":
         return db.execute(
             "SELECT * FROM tag_analyses WHERE kind='horizontal' AND lecture_id=? "
             "ORDER BY id DESC LIMIT 1", (lecture_id,)).fetchone()
+    if kind != "vertical" or not course_id:
+        raise ValueError("纵向分析必须指定课程")
     return db.execute(
-        "SELECT * FROM tag_analyses WHERE kind='vertical' AND student_id=? "
-        "ORDER BY id DESC LIMIT 1", (student_id,)).fetchone()
+        "SELECT * FROM tag_analyses WHERE kind='vertical' AND student_id=? AND course_id=? "
+        "ORDER BY id DESC LIMIT 1", (student_id, course_id)).fetchone()
 
 
 def render_horizontal_md(result, stats=None):

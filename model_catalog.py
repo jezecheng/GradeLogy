@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from html.parser import HTMLParser
 
 import config as cfg
-from db import DB_PATH
+from db import DB_PATH, database_path
 from utilities import llm
 
 try:
@@ -420,7 +420,7 @@ def sync_models_for_teacher(teacher_id, force=False, fetch_models=None, fetch_pr
     if not _is_tokenhub_url(base_url):
         return 0, "当前入口不是腾讯云 TokenHub，跳过自动同步"
 
-    con = sqlite3.connect(DB_PATH, timeout=10)
+    con = sqlite3.connect(database_path(), timeout=10)
     con.row_factory = sqlite3.Row
     try:
         if not force:
@@ -430,7 +430,7 @@ def sync_models_for_teacher(teacher_id, force=False, fetch_models=None, fetch_pr
             if st and st["last"]:
                 try:
                     last = datetime.strptime(st["last"], "%Y-%m-%d %H:%M:%S")
-                    if datetime.now() - last < timedelta(hours=cfg.MODEL_SYNC_HOURS):
+                    if datetime.now() - last < timedelta(hours=cfg.get("MODEL_SYNC_HOURS")):
                         return -1, ""
                 except ValueError:
                     pass
@@ -491,7 +491,7 @@ def build_model_rows(teacher_id, base_url, con=None):
     """把「静态清单 + 接口同步结果 + 截图录入价目」合并成设置页展示的一行行模型。"""
     own = con is None
     if own:
-        con = sqlite3.connect(DB_PATH, timeout=10)
+        con = sqlite3.connect(database_path(), timeout=10)
         con.row_factory = sqlite3.Row
     try:
         entry = model_entry_for_url(base_url)
@@ -559,7 +559,7 @@ def _model_sync_loop():
     """每小时醒一次，按 MODEL_SYNC_HOURS 节流逐个老师同步可用模型。"""
     while True:
         try:
-            con = sqlite3.connect(DB_PATH, timeout=10)
+            con = sqlite3.connect(database_path(), timeout=10)
             try:
                 ids = [r[0] for r in con.execute(
                     "SELECT id FROM users WHERE role='teacher' AND active=1")]
@@ -582,12 +582,12 @@ _sync_lock_file = None
 def start_model_sync():
     """启动每日模型清单同步线程；多进程部署时只让抢到文件锁的进程跑。"""
     global _sync_thread_started, _sync_lock_file
-    if _sync_thread_started or not cfg.AUTO_MODEL_SYNC:
+    if _sync_thread_started or not cfg.get("AUTO_MODEL_SYNC"):
         return
     _sync_thread_started = True
     try:
-        os.makedirs(cfg.DATA_DIR, exist_ok=True)
-        _sync_lock_file = open(os.path.join(cfg.DATA_DIR, ".model_sync.lock"), "w")
+        os.makedirs(cfg.get("DATA_DIR"), exist_ok=True)
+        _sync_lock_file = open(os.path.join(cfg.get("DATA_DIR"), ".model_sync.lock"), "w")
         fcntl.flock(_sync_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         _sync_thread_started = False   # 别的进程已经在同步
@@ -595,7 +595,15 @@ def start_model_sync():
             _sync_lock_file.close()
             _sync_lock_file = None
         return
-    threading.Thread(target=_model_sync_loop, daemon=True, name="model-sync").start()
+    from flask import current_app, has_app_context
+    application = current_app._get_current_object() if has_app_context() else None
+    def run():
+        if application is None:
+            _model_sync_loop()
+        else:
+            with application.app_context():
+                _model_sync_loop()
+    threading.Thread(target=run, daemon=True, name="model-sync").start()
 
 
 # 一份典型作业（约 26 页图片 + 答案）的估算 token 量

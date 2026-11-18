@@ -31,12 +31,13 @@ try:
 except ImportError:  # pragma: no cover
     fcntl = None
 
-from flask import (Flask, abort, flash, g, has_request_context, jsonify, redirect,
+from flask import (Flask, abort, current_app, flash, g, has_app_context, has_request_context, jsonify, redirect,
                    render_template, request, send_file, send_from_directory, session, url_for)
 from itsdangerous import BadSignature, URLSafeSerializer
 from markupsafe import Markup
 from werkzeug.routing import BaseConverter, ValidationError
 from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.local import LocalProxy
 
 import ai_routes
 import config as cfg
@@ -52,15 +53,16 @@ from model_catalog import (EST_TOKENS_INPUT, EST_TOKENS_OUTPUT, MODEL_CATALOG,
                            fetch_tokenhub_prices, parse_tokenhub_prices,
                            start_model_sync, tokenhub_suitable_model_ids)
 from model_catalog import sync_models_for_teacher as _sync_models_for_teacher
-from utilities import assistant, course_export, llm, logview, roster, storage
+from utilities import assistant, course_export, deletion, llm, logview, roster, storage
 from utilities import ai_task_queue
 from utilities import knowledge_graph as kg_utils
 from utilities import kg_text
 from utilities import kg_transfer
 from utilities import tags as tag_utils
 from utilities.report import _overall_text, build_report_md, render_markdown
+from utilities.sessions import session_epoch, revoke_sessions
 from utilities.uploads import (_student_files, _validate_upload, allowed_file, file_list,
-                               save_upload)
+                               save_upload, can_read_file)
 from utilities.pdfgrade import (DEFAULT_GRADE_PROMPT, DEFAULT_REPORT_PROMPT,
                                 DEFAULT_TAG_HORIZONTAL_PROMPT,
                                 DEFAULT_TAG_VERTICAL_PROMPT,
@@ -70,12 +72,9 @@ from utilities.pdfgrade import (DEFAULT_GRADE_PROMPT, DEFAULT_REPORT_PROMPT,
                                 grade_pdf_submission, pdf_page_count,
                                 render_page_jpeg)
 
-cfg.ensure_dirs()
-cfg.setup_logging()
-
 BASE_DIR = cfg.BASE_DIR
-UPLOAD_DIR = cfg.STORAGE_DIR
-BACKUP_DIR = cfg.BACKUP_DIR
+UPLOAD_DIR = cfg.get("STORAGE_DIR")
+BACKUP_DIR = cfg.get("BACKUP_DIR")
 BACKUP_RE = re.compile(r"gradelogy_\d{8}_\d{6}\.zip")
 # 课程备份包：course_<课程ID>_<生成时间>[_序号].zip，保留 24 小时
 COURSE_EXPORT_RE = re.compile(r"course_(\d+)_(\d{8}_\d{6})(?:_(\d+))?\.zip")
@@ -115,7 +114,7 @@ def _offpeak_block_if_enabled(teacher_id):
 
 def load_secret_key():
     """密钥持久化，避免每次重启把所有人都登出（容器里通过 SECRET_KEY 环境变量注入）。"""
-    path = cfg.SECRET_KEY_FILE
+    path = cfg.get("SECRET_KEY_FILE")
     if os.path.exists(path):
         with open(path) as f:
             key = f.read().strip()
@@ -133,6 +132,22 @@ def load_secret_key():
     except OSError:
         pass
     return key
+
+
+def _db_path():
+    return current_app.config.get("DB_PATH", DB_PATH) if has_app_context() else DB_PATH
+
+
+def _upload_dir():
+    return current_app.config.get("GRADELOGY_SETTINGS", {}).get("STORAGE_DIR", UPLOAD_DIR) if has_app_context() else UPLOAD_DIR
+
+
+def _backup_dir():
+    return current_app.config.get("GRADELOGY_SETTINGS", {}).get("BACKUP_DIR", BACKUP_DIR) if has_app_context() else BACKUP_DIR
+
+
+def _setup_tmp_root():
+    return os.path.join(cfg.get("DATA_DIR"), "tmp_setup")
 
 
 class AppRoutes:
@@ -191,7 +206,6 @@ class AppRoutes:
 
 
 _routes = AppRoutes()
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 class SignedIdConverter(BaseConverter):
@@ -204,18 +218,17 @@ class SignedIdConverter(BaseConverter):
     def __init__(self, url_map):
         super().__init__(url_map)
         self.regex = r"[A-Za-z0-9_\-\.]+"
+        self.signer = url_map.gradelogy_signer
 
     def to_python(self, value):
         try:
-            return int(_id_signer.loads(value))
+            return int(self.signer.loads(value))
         except BadSignature:
             raise ValidationError()
 
     def to_url(self, value):
-        return _id_signer.dumps(int(value))
+        return self.signer.dumps(int(value))
 
-
-_id_signer = None   # 由 create_app() 按应用密钥初始化
 
 log = logging.getLogger("gradelogy.system")
 user_log = logging.getLogger("gradelogy.user")
@@ -348,13 +361,13 @@ def _zone(name):
 def _display_timezone_name():
     """当前请求的用户显示时区；无设置、非法旧值和未登录场景回退上海。"""
     if not has_request_context():
-        return cfg.DISPLAY_TIMEZONE if _is_valid_timezone(cfg.DISPLAY_TIMEZONE) else "Asia/Shanghai"
+        return cfg.get("DISPLAY_TIMEZONE") if _is_valid_timezone(cfg.get("DISPLAY_TIMEZONE")) else "Asia/Shanghai"
     cached = getattr(g, "_display_timezone_name", None)
     if cached:
         return cached
     user = getattr(g, "user", None)
     preferred = get_setting(user["id"], "display_timezone") if user else ""
-    for name in (preferred, cfg.DISPLAY_TIMEZONE, "Asia/Shanghai"):
+    for name in (preferred, cfg.get("DISPLAY_TIMEZONE"), "Asia/Shanghai"):
         if _is_valid_timezone(name):
             g._display_timezone_name = name
             return name
@@ -376,7 +389,7 @@ def _parse_display_time(value, source):
         if source == "UTC":
             dt = dt.replace(tzinfo=timezone.utc)
         else:
-            dt = dt.replace(tzinfo=_zone(cfg.LEGACY_TIMEZONE if source == "legacy" else source))
+            dt = dt.replace(tzinfo=_zone(cfg.get("LEGACY_TIMEZONE") if source == "legacy" else source))
     return dt
 
 
@@ -413,7 +426,7 @@ def _deadline_storage(value):
     dt = _parse_display_time(value, _display_timezone_name())
     if dt is None:
         return value
-    return dt.astimezone(_zone(cfg.LEGACY_TIMEZONE)).strftime("%Y-%m-%dT%H:%M")
+    return dt.astimezone(_zone(cfg.get("LEGACY_TIMEZONE"))).strftime("%Y-%m-%dT%H:%M")
 
 
 def csrf_token():
@@ -442,13 +455,13 @@ def _migrate_upload_layout(con):
         rel = str(name or "").replace("\\", "/").strip("/")
         if not rel or "/" in rel:
             return name
-        src = os.path.join(UPLOAD_DIR, rel)
+        src = os.path.join(_upload_dir(), rel)
         if not os.path.isfile(src):
             return name
         parts = [f"course_{course_id}", f"lecture_{lecture_id}"]
         if student_id:
             parts.append(f"student_{student_id}")
-        target_dir = os.path.join(UPLOAD_DIR, *parts)
+        target_dir = os.path.join(_upload_dir(), *parts)
         os.makedirs(target_dir, exist_ok=True)
         stem, ext = os.path.splitext(rel)
         dst_name, n = rel, 1
@@ -480,7 +493,7 @@ def _migrate_upload_layout(con):
         log.info("附件目录结构迁移：更新 %s 条记录", moved)
 
 
-def init_db():
+def init_db(recover_interrupted=False):
     """兼容入口：建表与迁移已收敛到 db.py，附件目录与提示词仍由本层提供。"""
     database.init_db(
         upload_migrator=_migrate_upload_layout,
@@ -490,7 +503,7 @@ def init_db():
                           DEFAULT_TAG_HORIZONTAL_PROMPT),
                          ("tag_vertical", "默认纵向知识点分析提示词",
                           DEFAULT_TAG_VERTICAL_PROMPT)),
-        default_passwords=DEFAULT_PASSWORDS)
+        default_passwords=DEFAULT_PASSWORDS, recover_interrupted=recover_interrupted)
 
 
 
@@ -660,6 +673,9 @@ def load_user():
     uid = session.get("uid")
     g.user = None
     if uid:
+        if session.get("auth_epoch", "0") != session_epoch(cfg.get("DATA_DIR")):
+            session.clear()
+            return
         g.user = get_db().execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
         if g.user is None or not g.user["active"]:
             # 账号被删除或停用后，已登录的会话立即失效
@@ -674,11 +690,11 @@ def limit_body_size():
     必须排在 CSRF 校验之前：CSRF 会解析表单，超大请求应在解析前就拒绝。
     """
     if request.endpoint in ("admin_restore", "knowledge_graph_import"):
-        cap = cfg.MAX_RESTORE_MB
+        cap = cfg.get("MAX_RESTORE_MB")
     elif request.endpoint == "knowledge_graph_upload":
-        cap = cfg.KG_MAX_UPLOAD_MB
+        cap = cfg.get("KG_MAX_UPLOAD_MB")
     else:
-        cap = cfg.MAX_UPLOAD_MB
+        cap = cfg.get("MAX_UPLOAD_MB")
     if (request.content_length or 0) > cap * 1024 * 1024:
         abort(413, description=f"上传内容超过 {cap}MB 限制。")
 
@@ -779,6 +795,7 @@ def login():
         elif user and check_password_hash(user["password_hash"], password):
             session.clear()
             session["uid"] = user["id"]
+            session["auth_epoch"] = session_epoch(cfg.get("DATA_DIR"))
             session.permanent = True  # 启用 8 小时空闲过期
             db = get_db()
             db.execute("UPDATE users SET last_login_at=CURRENT_TIMESTAMP WHERE id=?", (user["id"],))
@@ -933,7 +950,7 @@ def admin_users():
 @role_required("admin")
 def admin_logs_page():
     files = []
-    for item in logview.list_logs(cfg.LOG_DIR):
+    for item in logview.list_logs(cfg.get("LOG_DIR")):
         item = dict(item)
         item["size_text"] = storage.human_size(item["size"])
         item["mtime_text"] = datetime.fromtimestamp(item["mtime"]).strftime("%Y-%m-%d %H:%M:%S")
@@ -959,7 +976,7 @@ def admin_logs_tail():
         if cursor["offset"] < 0:
             abort(400, description="日志游标无效。")
     try:
-        result = logview.read_chunk(cfg.LOG_DIR, name, cursor)
+        result = logview.read_chunk(cfg.get("LOG_DIR"), name, cursor)
     except FileNotFoundError:
         abort(404)
     resp = jsonify(result)
@@ -971,7 +988,7 @@ def admin_logs_tail():
 @role_required("admin")
 def admin_logs_download(name):
     try:
-        path = logview.resolve_log(cfg.LOG_DIR, name)
+        path = logview.resolve_log(cfg.get("LOG_DIR"), name)
     except FileNotFoundError:
         security_log.warning("非法日志下载 user=%s#%s name=%s ip=%s",
                              g.user["username"], g.user["id"], name,
@@ -1151,27 +1168,7 @@ def admin_user_delete(uid):
         return redirect(url_for("admin_users"))
     db = get_db()
     target = db.execute("SELECT username, role FROM users WHERE id=?", (uid,)).fetchone()
-    db.execute("DELETE FROM enrollments WHERE student_id=?", (uid,))
-    db.execute("DELETE FROM submissions WHERE student_id=?", (uid,))
-    # 只解除共同管理关系；仍担任创建者的课程要转交，没人接手才整门删除
-    db.execute("DELETE FROM course_teachers WHERE teacher_id=?", (uid,))
-    for c in db.execute("SELECT id FROM courses WHERE teacher_id=?", (uid,)).fetchall():
-        heir = db.execute("SELECT teacher_id FROM course_teachers WHERE course_id=? LIMIT 1",
-                          (c["id"],)).fetchone()
-        if heir:
-            db.execute("UPDATE courses SET teacher_id=? WHERE id=?", (heir["teacher_id"], c["id"]))
-            continue
-        db.execute("DELETE FROM submissions WHERE lecture_id IN "
-                   "(SELECT id FROM lectures WHERE course_id=?)", (c["id"],))
-        db.execute("DELETE FROM lectures WHERE course_id=?", (c["id"],))
-        db.execute("DELETE FROM exam_scores WHERE exam_id IN "
-                   "(SELECT id FROM exams WHERE course_id=?)", (c["id"],))
-        db.execute("DELETE FROM exams WHERE course_id=?", (c["id"],))
-        db.execute("DELETE FROM enrollments WHERE course_id=?", (c["id"],))
-        db.execute("DELETE FROM lesson_plans WHERE course_id=?", (c["id"],))
-        db.execute("DELETE FROM course_knowledge_graphs WHERE course_id=?", (c["id"],))
-        db.execute("DELETE FROM courses WHERE id=?", (c["id"],))
-    db.execute("DELETE FROM users WHERE id=?", (uid,))
+    deletion.delete_user(db, uid, g.user["id"])
     db.commit()
     log.info("删除账号 operator=%s#%s user=%s role=%s uid=%s",
              g.user["username"], g.user["id"],
@@ -1253,11 +1250,11 @@ def course_edit(cid):
 
 def _prune_course_exports():
     """清理超过 24 小时的课程备份包。"""
-    if not os.path.isdir(cfg.EXPORT_DIR):
+    if not os.path.isdir(cfg.get("EXPORT_DIR")):
         return
     cutoff = time.time() - COURSE_EXPORT_KEEP_HOURS * 3600
-    for name in os.listdir(cfg.EXPORT_DIR):
-        path = os.path.join(cfg.EXPORT_DIR, name)
+    for name in os.listdir(cfg.get("EXPORT_DIR")):
+        path = os.path.join(cfg.get("EXPORT_DIR"), name)
         if COURSE_EXPORT_RE.fullmatch(name) and os.path.isfile(path) \
                 and os.path.getmtime(path) < cutoff:
             try:
@@ -1270,11 +1267,11 @@ def _course_exports(cid):
     """列出本课程仍可下载的备份包，新的在前，最多 10 个。"""
     _prune_course_exports()
     items = []
-    if not os.path.isdir(cfg.EXPORT_DIR):
+    if not os.path.isdir(cfg.get("EXPORT_DIR")):
         return items
-    for name in sorted(os.listdir(cfg.EXPORT_DIR), reverse=True):
+    for name in sorted(os.listdir(cfg.get("EXPORT_DIR")), reverse=True):
         match = COURSE_EXPORT_RE.fullmatch(name)
-        path = os.path.join(cfg.EXPORT_DIR, name)
+        path = os.path.join(cfg.get("EXPORT_DIR"), name)
         if not match or int(match.group(1)) != cid or not os.path.isfile(path):
             continue
         items.append({
@@ -1378,17 +1375,17 @@ def course_export_start(cid):
     """生成整个课程的备份 zip 并直接下载，服务器保留 24 小时。"""
     course = own_course(cid)
     _prune_course_exports()
-    os.makedirs(cfg.EXPORT_DIR, exist_ok=True)
+    os.makedirs(cfg.get("EXPORT_DIR"), exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     name, n = f"course_{cid}_{stamp}.zip", 2
-    path = os.path.join(cfg.EXPORT_DIR, name)
+    path = os.path.join(cfg.get("EXPORT_DIR"), name)
     while os.path.exists(path):
         name = f"course_{cid}_{stamp}_{n}.zip"
-        path = os.path.join(cfg.EXPORT_DIR, name)
+        path = os.path.join(cfg.get("EXPORT_DIR"), name)
         n += 1
     try:
         written, missing = course_export.build_course_zip(
-            path, course["name"], _course_export_lectures(cid), UPLOAD_DIR)
+            path, course["name"], _course_export_lectures(cid), _upload_dir())
     except Exception:  # noqa: BLE001 导出失败不应留下半截文件
         log.exception("课程备份导出失败 course=%s", cid)
         try:
@@ -1411,7 +1408,7 @@ def course_export_file(cid, name):
     match = COURSE_EXPORT_RE.fullmatch(name or "")
     if not match or int(match.group(1)) != cid:
         abort(404)
-    path = os.path.join(cfg.EXPORT_DIR, name)
+    path = os.path.join(cfg.get("EXPORT_DIR"), name)
     if not os.path.isfile(path):
         abort(404)
     download = (f"{course_export.safe_component(course['name'], '课程')}"
@@ -1466,15 +1463,7 @@ def course_delete(cid):
         flash("只有课程创建者可以删除课程")
         return redirect(url_for("course_detail", cid=cid))
     db = get_db()
-    db.execute("DELETE FROM submissions WHERE lecture_id IN "
-               "(SELECT id FROM lectures WHERE course_id=?)", (cid,))
-    for t in ("lectures", "enrollments", "lesson_plans", "course_teachers",
-              "course_knowledge_graphs"):
-        db.execute(f"DELETE FROM {t} WHERE course_id=?", (cid,))
-    db.execute("DELETE FROM exam_scores WHERE exam_id IN (SELECT id FROM exams WHERE course_id=?)",
-               (cid,))
-    db.execute("DELETE FROM exams WHERE course_id=?", (cid,))
-    db.execute("DELETE FROM courses WHERE id=?", (cid,))
+    deletion.delete_course(db, cid)
     db.commit()
     return redirect(url_for("courses"))
 
@@ -1508,20 +1497,7 @@ def course_unenroll(cid, sid):
     student = db.execute("SELECT username, display_name FROM users WHERE id=?", (sid,)).fetchone()
     if not student:
         abort(404)
-    cur = db.execute("""
-        DELETE FROM questions WHERE submission_id IN (
-          SELECT s.id FROM submissions s JOIN lectures h ON h.id=s.lecture_id
-          WHERE h.course_id=? AND s.student_id=?)""", (cid, sid))
-    n_questions = cur.rowcount
-    cur = db.execute("""
-        DELETE FROM submissions WHERE student_id=? AND lecture_id IN
-          (SELECT id FROM lectures WHERE course_id=?)""", (sid, cid))
-    n_subs = cur.rowcount
-    cur = db.execute("""
-        DELETE FROM exam_scores WHERE student_id=? AND exam_id IN
-          (SELECT id FROM exams WHERE course_id=?)""", (sid, cid))
-    n_scores = cur.rowcount
-    db.execute("DELETE FROM enrollments WHERE course_id=? AND student_id=?", (cid, sid))
+    n_subs, n_questions, n_scores = deletion.unenroll(db, cid, sid)
     db.commit()
     log.info("移出学生 course=%s operator=%s#%s student=%s#%s 提交=%s 题目=%s 成绩=%s",
              cid, g.user["username"], g.user["id"], student["username"], sid,
@@ -1624,7 +1600,7 @@ def lecture_detail(hid):
     n_reviewed = sum(1 for s in subs if s["n_questions"] and s["n_reviewed"] >= s["n_questions"])
 
     # 教师版 PDF 页数与已选页码：只把这些页发给模型，避免整份答案浪费 token
-    answer_total = pdf_page_count(os.path.join(UPLOAD_DIR, hw["answer_pdf"])) if hw["answer_pdf"] else 0
+    answer_total = pdf_page_count(os.path.join(_upload_dir(), hw["answer_pdf"])) if hw["answer_pdf"] else 0
     answer_picked = _page_list(hw["answer_pages"])
 
     acc_by = _accuracy_by_submission(db, [s["id"] for s in subs])
@@ -1791,15 +1767,15 @@ def _generate_question_tags(hw, keys):
     def runner(database, operation):
         try:
             rows, run_err = analyze_question_tags(
-                os.path.join(UPLOAD_DIR, answer_pdf), picked,
+                os.path.join(_upload_dir(), answer_pdf), picked,
                 api_url, api_key, model, pages=_page_list(answer_pages),
                 usage_hook=operation["usage_hook"], max_tokens=max_tokens)
         except Exception as e:  # noqa: BLE001
             _finish_ai_operation(operation, "failed", str(e))
             log.exception("生成知识点标签失败 lecture=%s", lecture_id)
             return
-        _finish_ai_operation(operation, "failed" if run_err else "success", run_err)
         if run_err:
+            _finish_ai_operation(operation, "failed", run_err)
             return
         database.execute("DELETE FROM question_tags WHERE lecture_id=? AND source='ai'",
                          (lecture_id,))
@@ -1811,7 +1787,7 @@ def _generate_question_tags(hw, keys):
                     "category,source) VALUES(?,?,?,?,?,'ai')",
                     (lecture_id, row["key"], row["no"], tag, row["category"]))
                 count += 1
-        database.commit()
+        _finish_ai_operation(operation, "success")
         log.info("生成知识点标签 lecture=%s 题数=%s 标签数=%s", lecture_id, len(rows), count)
 
     operation, queue_err = _ai_task_queue.submit(
@@ -1832,7 +1808,7 @@ def lecture_answer_pages(hid):
     if not hw:
         abort(404)
     own_course(hw["course_id"])
-    total = pdf_page_count(os.path.join(UPLOAD_DIR, hw["answer_pdf"])) if hw["answer_pdf"] else 0
+    total = pdf_page_count(os.path.join(_upload_dir(), hw["answer_pdf"])) if hw["answer_pdf"] else 0
     if not total:
         flash("请先上传教师版标准答案 PDF，再选择页码。")
         return redirect(url_for("lecture_detail", hid=hid))
@@ -1863,17 +1839,19 @@ def lecture_answer_pages(hid):
     def runner(database, operation):
         try:
             questions, err = analyze_answer_pdf(
-                os.path.join(UPLOAD_DIR, answer_pdf), api_url, api_key, model,
+                os.path.join(_upload_dir(), answer_pdf), api_url, api_key, model,
                 pages=picked, usage_hook=operation["usage_hook"], max_tokens=max_tokens)
         except Exception as e:  # noqa: BLE001
             _finish_ai_operation(operation, "failed", str(e))
             log.exception("生成题目清单失败 lecture=%s", hid)
             return
-        _finish_ai_operation(operation, "failed" if err else "success", err)
+        if err:
+            _finish_ai_operation(operation, "failed", err)
+            return
         if not err:
             database.execute("UPDATE lectures SET scope_candidates=?, scope_selected='' WHERE id=?",
                              (json.dumps(questions, ensure_ascii=False), hid))
-            database.commit()
+            _finish_ai_operation(operation, "success")
             log.info("作业范围题目清单生成成功 lecture=%s 题目=%s", hid, len(questions))
 
     log.info("分析作业范围 lecture=%s answer_pdf=%s pages=%s", hid, answer_pdf, picked)
@@ -1898,7 +1876,7 @@ def lecture_answer_preview(hid, no):
     own_course(hw["course_id"])
     if not hw["answer_pdf"]:
         abort(404)
-    data = render_page_jpeg(os.path.join(UPLOAD_DIR, hw["answer_pdf"]), no)
+    data = render_page_jpeg(os.path.join(_upload_dir(), hw["answer_pdf"]), no)
     if not data:
         abort(404)
     resp = send_file(io.BytesIO(data), mimetype="image/jpeg", max_age=3600)
@@ -2161,8 +2139,7 @@ def lecture_delete(hid):
     if not hw:
         abort(404)
     own_course(hw["course_id"])
-    db.execute("DELETE FROM submissions WHERE lecture_id=?", (hid,))
-    db.execute("DELETE FROM lectures WHERE id=?", (hid,))
+    deletion.delete_lecture(db, hid)
     db.commit()
     return redirect(url_for("course_detail", cid=hw["course_id"]))
 
@@ -2207,7 +2184,7 @@ def student_detail(cid, sid):
         lectures=lectures, exams=exams, acc_by=acc_by,
         weak_stats=weak_stats,
         vertical_kg_chains=vertical_kg_chains,
-        tag_analysis=tag_utils.latest_analysis(db, "vertical", student_id=sid))
+        tag_analysis=tag_utils.latest_analysis(db, "vertical", student_id=sid, course_id=cid))
 
 
 @_routes.route("/course/<oid:cid>/student/<oid:sid>/tag-analysis", methods=["POST"])
@@ -2372,6 +2349,8 @@ def _save_grading_result(db, sid, gen, answer_pages=None):
     answer_pages 为发送给模型的标准答案页码列表（1 起）；为空表示整份发送。
     用于把模型返回的 answer_page（在发送页中的序号）映射回 PDF 实际页码。
     """
+    db.execute("DELETE FROM student_question_reviews WHERE question_id IN "
+               "(SELECT id FROM questions WHERE submission_id=?)", (sid,))
     db.execute("DELETE FROM questions WHERE submission_id=?", (sid,))
     ap_list = list(answer_pages or [])
     for i, q in enumerate(gen["questions"], 1):
@@ -2392,7 +2371,8 @@ def _save_grading_result(db, sid, gen, answer_pages=None):
              q.get("verdict", ""), comment, apage,
              q.get("student_box", ""), q.get("answer_box", "")))
     summary = gen.get("summary") or {}
-    db.execute("UPDATE submissions SET status='待批改', ai_summary=?, "
+    db.execute("UPDATE submissions SET status='待批改', report_published=0, "
+               "report_md='',report_detail='',feedback='',grader='',score='',ai_summary=?, "
                "updated_at=CURRENT_TIMESTAMP WHERE id=?",
                (json.dumps(summary, ensure_ascii=False) if summary else "", sid))
     db.commit()
@@ -2403,7 +2383,8 @@ def _run_grading_job(teacher_id, sid, operation):
 
     去重状态由 GradingQueue 在任务结束后统一清理。
     """
-    with app.app_context():
+    with _service_app_context():
+        db = None
         try:
             db = get_db()
             db.execute("UPDATE ai_operations SET status='running', started_at=? "
@@ -2441,6 +2422,8 @@ def _run_grading_job(teacher_id, sid, operation):
             grading_log.info("后台批阅完成 submission=%s 题数=%s", sid, len(gen["questions"]))
         except Exception as e:
             grading_log.exception("后台批阅异常 submission=%s", sid)
+            if db is not None:
+                db.rollback()
             _finish_ai_operation(operation, "failed", str(e))
 
 
@@ -2454,29 +2437,32 @@ def _offpeak_for_service(teacher_id):
 
 
 def _service_app_context():
-    """延迟取当前 app 实例，便于 create_app() 在模块末尾才创建应用。"""
-    return app.app_context()
+    application = current_app._get_current_object() if has_app_context() else app
+    return application.app_context()
 
 
-_grading_queue = GradingQueue(
-    get_db=get_db,
-    get_setting=_settings_for_service,
-    start_operation=_start_ai_operation,
-    finish_operation=_finish_ai_operation,
-    run_job=_run_grading_job,
-    app_context=_service_app_context,
-    offpeak_block=_offpeak_for_service,
-)
+def _instance_service(name):
+    application = current_app._get_current_object() if has_app_context() else app
+    return application.extensions[name]
 
 
-# 通用 AI 异步任务队列：讲次汇总、知识点分析、图谱体检、总评生成等长耗时操作
-_ai_task_queue = ai_task_queue.AiTaskQueue(
-    get_db=get_db,
-    close_db=close_db,
-    start_operation=_start_ai_operation,
-    finish_operation=_finish_ai_operation,
-    app_context=_service_app_context,
-)
+_grading_queue = LocalProxy(lambda: _instance_service("grading_queue"))
+_ai_task_queue = LocalProxy(lambda: _instance_service("ai_task_queue"))
+
+
+def _configure_queues(application):
+    def run_job(*args):
+        with application.app_context():
+            return _run_grading_job(*args)
+    application.extensions["kg_state"] = {
+        "build_lock": threading.Lock(), "schedule_lock": threading.Lock(), "enqueued": set()}
+    application.extensions["grading_queue"] = GradingQueue(
+        get_db=get_db, get_setting=_settings_for_service,
+        start_operation=_start_ai_operation, finish_operation=_finish_ai_operation,
+        run_job=run_job, app_context=application.app_context, offpeak_block=_offpeak_for_service)
+    application.extensions["ai_task_queue"] = ai_task_queue.AiTaskQueue(
+        get_db=get_db, close_db=close_db, start_operation=_start_ai_operation,
+        finish_operation=_finish_ai_operation, app_context=application.app_context)
 
 
 def _enqueue_grading(teacher_id, sid, course_id, lecture_id):
@@ -2700,8 +2686,8 @@ def _auto_grade_scan():
 
 def start_auto_grade():
     """启动自动批阅线程；多进程部署时只让抢到文件锁的进程跑。"""
-    _grading_queue.start(enabled=cfg.AUTO_GRADE, interval_hours=cfg.AUTO_GRADE_HOURS,
-                         lock_dir=cfg.DATA_DIR)
+    _grading_queue.start(enabled=cfg.get("AUTO_GRADE"), interval_hours=cfg.get("AUTO_GRADE_HOURS"),
+                         lock_dir=cfg.get("DATA_DIR"))
 
 
 def _resolve_student_page(files, global_page):
@@ -2716,7 +2702,7 @@ def _resolve_student_page(files, global_page):
     for fp in files:
         ext = os.path.splitext(fp)[1].lower()
         if ext == ".pdf":
-            full = os.path.join(UPLOAD_DIR, fp)
+            full = os.path.join(_upload_dir(), fp)
             try:
                 count = pdf_page_count(full)
             except Exception:
@@ -2793,14 +2779,22 @@ def submission_review_save(sid):
         sets = ", ".join(f"{k}=?" for k in fields)
         db.execute(f"UPDATE questions SET {sets} WHERE id=?", (*fields.values(), qid))
     # 作业只统计正确率，不再保存总分；清空历史遗留的分数串
-    db.execute("UPDATE submissions SET score='', feedback=?, status='已批改', grader=?, "
+    pending = db.execute("SELECT COUNT(*) FROM questions WHERE submission_id=? AND reviewed=0",
+                         (sid,)).fetchone()[0]
+    total = db.execute("SELECT COUNT(*) FROM questions WHERE submission_id=?", (sid,)).fetchone()[0]
+    job = latest_operation(db, sid)
+    reviewed = bool(total) and not pending and not (job and job["status"] in ("queued", "running"))
+    db.execute("UPDATE submissions SET score='', feedback=?, status=?, "
+               "report_published=CASE WHEN ? THEN report_published ELSE 0 END,grader=?, "
                "updated_at=CURRENT_TIMESTAMP WHERE id=?",
                (request.form.get("overall", "").strip(),
+                "已批改" if reviewed else "待批改", reviewed,
                 f"{g.user['display_name']} 逐题批改", sid))
     db.commit()
     # 更新学生个人薄弱点图谱（失败不影响批改保存）
     try:
-        _update_student_weak_points(db, sub)
+        if reviewed:
+            _update_student_weak_points(db, sub)
     except Exception:
         log.exception("更新学生薄弱点失败 submission=%s student=%s", sid, sub["student_id"])
     if (request.form.get("then") or "") == "report":
@@ -2816,7 +2810,7 @@ def submission_review_save(sid):
     if (request.form.get("then") or "") == "report":
         flash("批改已保存，报告已按最新结果刷新，可继续修改后发布。")
         return redirect(url_for("submission_report", sid=sid))
-    flash("批改已保存，学生可以查看")
+    flash("批改已保存，学生可以查看" if reviewed else "草稿已保存，全部题目复核后再保存即可公开。")
     return redirect(url_for("submission_review", sid=sid))
 
 
@@ -3184,9 +3178,9 @@ def _kg_metrics(db, graph_id):
 
 
 # 多份资料集中上传时串行建图，避免同时打满模型限流；集合防止重复入队
-_kg_build_lock = threading.Lock()
-_kg_schedule_lock = threading.Lock()
-_kg_enqueued = set()
+_kg_build_lock = LocalProxy(lambda: _instance_service("kg_state")["build_lock"])
+_kg_schedule_lock = LocalProxy(lambda: _instance_service("kg_state")["schedule_lock"])
+_kg_enqueued = LocalProxy(lambda: _instance_service("kg_state")["enqueued"])
 
 
 def _kg_start_build(graph_id, material_id, teacher_id):
@@ -3197,7 +3191,9 @@ def _kg_start_build(graph_id, material_id, teacher_id):
         _kg_enqueued.add(material_id)
     try:
         threading.Thread(target=_kg_build_worker,
-                         args=(graph_id, material_id, teacher_id), daemon=True).start()
+                         args=(graph_id, material_id, teacher_id),
+                         kwargs={"application": current_app._get_current_object() if has_app_context() else app},
+                         daemon=True).start()
     except Exception:
         with _kg_schedule_lock:
             _kg_enqueued.discard(material_id)
@@ -3205,10 +3201,16 @@ def _kg_start_build(graph_id, material_id, teacher_id):
     return True
 
 
-def _kg_build_worker(graph_id, material_id, teacher_id):
+def _kg_build_worker(graph_id, material_id, teacher_id, application=None):
+    application = application or (current_app._get_current_object() if has_app_context() else app)
+    with application.app_context():
+        return _kg_build_worker_in_context(graph_id, material_id, teacher_id)
+
+
+def _kg_build_worker_in_context(graph_id, material_id, teacher_id):
     try:
         with _kg_build_lock:
-            with app.app_context():
+            with _service_app_context():
                 db = get_db()
                 try:
                     material = db.execute(
@@ -3254,7 +3256,7 @@ def _kg_build_worker(graph_id, material_id, teacher_id):
 
 def start_kg_recovery():
     """服务启动后按上传顺序恢复中断及等待中的资料，成功块由建图逻辑直接复用。"""
-    with app.app_context():
+    with _service_app_context():
         try:
             rows = get_db().execute(
                 "SELECT id,graph_id,uploaded_by FROM kg_materials "
@@ -3279,7 +3281,7 @@ def knowledge_graphs():
           (SELECT COUNT(*) FROM kg_edges e WHERE e.graph_id=g.id) AS n_edges
         FROM knowledge_graphs g ORDER BY g.subject, g.name""").fetchall()
     return render_template("knowledge_graphs.html", graphs=rows,
-                           max_import_mb=cfg.MAX_RESTORE_MB)
+                           max_import_mb=cfg.get("MAX_RESTORE_MB"))
 
 
 @_routes.route("/knowledge-graphs/create", methods=["POST"])
@@ -3309,11 +3311,11 @@ def knowledge_graph_export(gid):
     """导出迁移包；scope=graph 时仅导出图谱结构，不含原始资料文件。"""
     graph = _kg_graph(gid, manage=True)
     scope = "graph" if request.args.get("scope") == "graph" else "full"
-    os.makedirs(cfg.EXPORT_DIR, exist_ok=True)
-    fd, path = tempfile.mkstemp(prefix=f"kg_{gid}_", suffix=".zip", dir=cfg.EXPORT_DIR)
+    os.makedirs(cfg.get("EXPORT_DIR"), exist_ok=True)
+    fd, path = tempfile.mkstemp(prefix=f"kg_{gid}_", suffix=".zip", dir=cfg.get("EXPORT_DIR"))
     os.close(fd)
     try:
-        kg_transfer.export_graph(get_db(), gid, UPLOAD_DIR, path, scope=scope)
+        kg_transfer.export_graph(get_db(), gid, _upload_dir(), path, scope=scope)
     except Exception:  # noqa: BLE001 半截导出文件不能留在服务器
         kg_log.exception("知识图谱迁移包导出失败 user=%s#%s graph=%s scope=%s",
                          g.user["username"], g.user["id"], gid, scope)
@@ -3349,7 +3351,7 @@ def knowledge_graph_import():
         flash("迁移包必须是 ZIP 文件")
         return redirect(url_for("knowledge_graphs"))
     tmp = tempfile.NamedTemporaryFile(
-        prefix=".kg_import_", suffix=".zip", dir=cfg.DATA_DIR, delete=False)
+        prefix=".kg_import_", suffix=".zip", dir=cfg.get("DATA_DIR"), delete=False)
     package_path = tmp.name
     try:
         size = 0
@@ -3359,11 +3361,11 @@ def knowledge_graph_import():
                 if not chunk:
                     break
                 size += len(chunk)
-                if size > cfg.MAX_RESTORE_MB * 1024 * 1024:
-                    raise ValueError(f"迁移包超过 {cfg.MAX_RESTORE_MB}MB 限制")
+                if size > cfg.get("MAX_RESTORE_MB") * 1024 * 1024:
+                    raise ValueError(f"迁移包超过 {cfg.get("MAX_RESTORE_MB")}MB 限制")
                 tmp.write(chunk)
         result = kg_transfer.import_graph(
-            get_db(), package_path, UPLOAD_DIR, g.user["id"], name=name)
+            get_db(), package_path, _upload_dir(), g.user["id"], name=name)
     except (ValueError, zipfile.BadZipFile) as e:
         kg_log.warning("知识图谱迁移包导入被拒绝 user=%s#%s file=%s error=%s",
                        g.user["username"], g.user["id"], package.filename, e)
@@ -3576,7 +3578,7 @@ def knowledge_graph_detail(gid):
         members=members, teacher_candidates=teacher_candidates,
         role=role, role_label=KG_ROLE_LABEL.get(role, "只读"),
         role_labels=KG_ROLE_LABEL,
-        max_upload_mb=cfg.KG_MAX_UPLOAD_MB,
+        max_upload_mb=cfg.get("KG_MAX_UPLOAD_MB"),
         can_edit=role in ("manage", "edit"),
         can_manage=role == "manage")
 
@@ -3738,7 +3740,7 @@ def knowledge_graph_upload(gid):
         flash("请选择要上传的资料文件")
         return redirect(url_for("knowledge_graph_detail", gid=gid))
     db = get_db()
-    abs_dir = os.path.join(UPLOAD_DIR, "kg", str(gid))
+    abs_dir = os.path.join(_upload_dir(), "kg", str(gid))
     os.makedirs(abs_dir, exist_ok=True)
     queued = 0
     for item in files:
@@ -3758,14 +3760,14 @@ def knowledge_graph_upload(gid):
                 if not chunk:
                     break
                 size += len(chunk)
-                if size > cfg.KG_MAX_UPLOAD_MB * 1024 * 1024:
+                if size > cfg.get("KG_MAX_UPLOAD_MB") * 1024 * 1024:
                     too_big = True
                     break
                 digest.update(chunk)
                 fh.write(chunk)
         if too_big:
             os.remove(abs_path)
-            flash(f"「{filename}」超过 {cfg.KG_MAX_UPLOAD_MB}MB，已跳过")
+            flash(f"「{filename}」超过 {cfg.get("KG_MAX_UPLOAD_MB")}MB，已跳过")
             continue
         sha = digest.hexdigest()
         duplicate = db.execute(
@@ -3837,7 +3839,7 @@ def knowledge_graph_material_delete(mid):
         abort(404)
     _kg_graph(material["graph_id"], edit=True)
     try:
-        os.remove(os.path.join(UPLOAD_DIR, material["stored_name"]))
+        os.remove(os.path.join(_upload_dir(), material["stored_name"]))
     except OSError:
         pass
     kg_utils.delete_material(db, material)
@@ -4007,7 +4009,7 @@ def knowledge_graph_audit_apply(gid, aid):
     if not items:
         flash("没有可应用的建议")
         return redirect(url_for("knowledge_graph_detail", gid=gid))
-    snapshot = kg_utils.apply_audit(db, gid, items)
+    snapshot = kg_utils.apply_audit(db, gid, items, commit=False)
     db.execute("UPDATE kg_audits SET status=?, snapshot=?, applied_at=CURRENT_TIMESTAMP"
                " WHERE id=?",
                (kg_utils.AUDIT_APPLIED,
@@ -4015,7 +4017,7 @@ def knowledge_graph_audit_apply(gid, aid):
     db.commit()
     kg_log.info("应用知识图谱体检 user=%s#%s graph=%s audit=%s 建议=%s",
              g.user["username"], g.user["id"], gid, aid, len(items))
-    flash(f"已应用 {len(items)} 条体检建议，可随时回滚")
+    flash(f"已应用 {len(items)} 条体检建议；后续没有建图或编辑时可回滚。")
     return redirect(url_for("knowledge_graph_detail", gid=gid))
 
 
@@ -4038,7 +4040,12 @@ def knowledge_graph_audit_rollback(gid, aid):
         snapshot = json.loads(audit["snapshot"])
     except (TypeError, ValueError):
         snapshot = {}
-    kg_utils.restore_snapshot(db, gid, snapshot)
+    try:
+        kg_utils.restore_snapshot(db, gid, snapshot, commit=False)
+    except ValueError as exc:
+        db.rollback()
+        flash(str(exc))
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
     db.execute("UPDATE kg_audits SET status=? WHERE id=?",
                (kg_utils.AUDIT_ROLLED_BACK, aid))
     db.commit()
@@ -4164,7 +4171,7 @@ def knowledge_graph_category_apply(gid, mid):
         rejected = json.loads(record["rejected"] or "[]")
     except (TypeError, ValueError):
         rejected = []
-    snapshot = kg_utils.apply_category_map(db, gid, chosen)
+    snapshot = kg_utils.apply_category_map(db, gid, chosen, commit=False)
     db.execute(
         "UPDATE kg_category_maps SET status=?, snapshot=?, mappings=?, rejected=?, "
         "applied_at=CURRENT_TIMESTAMP WHERE id=?",
@@ -4200,7 +4207,12 @@ def knowledge_graph_category_rollback(gid, mid):
         snapshot = json.loads(record["snapshot"])
     except (TypeError, ValueError):
         snapshot = {}
-    kg_utils.restore_snapshot(db, gid, snapshot)
+    try:
+        kg_utils.restore_snapshot(db, gid, snapshot, commit=False)
+    except ValueError as exc:
+        db.rollback()
+        flash(str(exc))
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
     db.execute("UPDATE kg_category_maps SET status=? WHERE id=?",
                (kg_utils.CATEGORY_ROLLED_BACK, mid))
     db.commit()
@@ -4244,7 +4256,7 @@ def knowledge_graph_delete(gid):
     db.execute("DELETE FROM course_knowledge_graphs WHERE graph_id=?", (gid,))
     db.execute("DELETE FROM knowledge_graphs WHERE id=?", (gid,))
     db.commit()
-    shutil.rmtree(os.path.join(UPLOAD_DIR, "kg", str(gid)), ignore_errors=True)
+    shutil.rmtree(os.path.join(_upload_dir(), "kg", str(gid)), ignore_errors=True)
     kg_log.info("删除知识图谱 user=%s#%s id=%s name=%s",
              g.user["username"], g.user["id"], gid, graph["name"])
     flash(f"已删除知识图谱「{graph['name']}」")
@@ -4497,11 +4509,11 @@ def run_grading(teacher_id, file_name, answer_pdf="", scope="", answer_pages=Non
                 "error": "尚未配置 AI 接口。可以先勾选「演示模式」体验完整流程，或到「AI 设置」填写接口地址、密钥与模型。"}
 
     extra = scope or ""
-    student_paths = [os.path.join(UPLOAD_DIR, p) for p in
+    student_paths = [os.path.join(_upload_dir(), p) for p in
                      (file_name if isinstance(file_name, (list, tuple)) else [file_name])]
     gen = grade_pdf_submission(
         student_paths,
-        os.path.join(UPLOAD_DIR, answer_pdf) if answer_pdf else "",
+        os.path.join(_upload_dir(), answer_pdf) if answer_pdf else "",
         api_url, api_key, model,
         extra=extra, answer_pages=answer_pages, prompt=prompt, usage_hook=usage_hook,
         max_tokens=_get_max_tokens(teacher_id, "max_tokens_grading"))
@@ -4551,6 +4563,7 @@ def generate_report(db, sub_id, teacher_id, reuse=False, operation=None):
         return ""
     questions = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
                            (sub_id,)).fetchall()
+    completion_error = None
     summary = _json_or_none(sub["ai_summary"]) or {}
     detail = _json_or_none(sub["report_detail"]) or {} if reuse else {}
     if not detail and questions and get_setting(teacher_id, "ai_demo") != "1":
@@ -4561,7 +4574,7 @@ def generate_report(db, sub_id, teacher_id, reuse=False, operation=None):
             api_key = get_setting(teacher_id, "ai_api_key")
             model = get_setting(teacher_id, "ai_model")
             course = db.execute("SELECT c.report_prompt_id FROM courses c "
-                                "JOIN lectures l ON l.id=c.id WHERE l.id=?",
+                                "JOIN lectures l ON l.course_id=c.id WHERE l.id=?",
                                 (sub["lecture_id"],)).fetchone()
             if api_url and api_key and model:
                 if operation is None:
@@ -4579,12 +4592,11 @@ def generate_report(db, sub_id, teacher_id, reuse=False, operation=None):
                         max_tokens=_get_max_tokens(teacher_id, "max_tokens_report"),
                         kg_context=kg_context)
                 except Exception as e:
-                    _finish_ai_operation(operation, "failed", str(e))
+                    completion_error = str(e)
                     log.exception("生成报告评语异常 submission=%s by=%s", sub_id, teacher_id)
                     # 不中断报告生成：AI 评语失败时，报告仍包含表格与统计
                     detail = {}
-                error = "" if detail else "AI 未返回可用的报告评价"
-                _finish_ai_operation(operation, "success" if detail else "failed", error)
+                completion_error = completion_error or ("" if detail else "AI 未返回可用的报告评价")
     try:
         stamp = datetime.strptime(str(sub["created_at"])[:10], "%Y-%m-%d")
         date_label = f"{stamp.month}月{stamp.day}日"
@@ -4595,7 +4607,10 @@ def generate_report(db, sub_id, teacher_id, reuse=False, operation=None):
                          kg_diagnosis=_kg_diagnosis(db, sub))
     db.execute("UPDATE submissions SET report_md=?, report_detail=? WHERE id=?",
                (md, json.dumps(detail, ensure_ascii=False) if detail else "", sub_id))
-    db.commit()
+    if completion_error is not None:
+        _finish_ai_operation(operation, "failed" if completion_error else "success", completion_error)
+    else:
+        db.commit()
     return md
 
 
@@ -4945,6 +4960,15 @@ def submission_report_build(sid):
 def submission_report_publish(sid):
     sub, hw, _ = own_submission(sid)
     db = get_db()
+    if not sub["report_published"]:
+        rows = db.execute("SELECT COUNT(*),SUM(reviewed=0) FROM questions WHERE submission_id=?",
+                          (sid,)).fetchone()
+        if not rows[0] or rows[1]:
+            flash("全部题目复核后才能发布报告。")
+            return redirect(url_for("submission_review", sid=sid))
+        if latest_operation(db, sid) and latest_operation(db, sid)["status"] in ("queued", "running"):
+            flash("批阅任务尚未完成，请稍后复核新结果。")
+            return redirect(url_for("submission_review", sid=sid))
     if not sub["report_md"]:
         generate_report(db, sid, g.user["id"])
     publish = 0 if sub["report_published"] else 1
@@ -4997,11 +5021,13 @@ def submission_report_comment(sid):
             log.exception("生成总评异常 submission=%s", sid)
             return
         error = "" if detail else "AI 生成总评失败，请稍后重试"
-        _finish_ai_operation(operation, "success" if detail else "failed", error)
+        if not detail:
+            _finish_ai_operation(operation, "failed", error)
+            return
         if detail:
             database.execute("UPDATE submissions SET report_detail=? WHERE id=?",
                              (json.dumps(detail, ensure_ascii=False), sid))
-            database.commit()
+            _finish_ai_operation(operation, "success")
             log.info("总评生成成功 submission=%s", sid)
 
     operation, queue_err = _ai_task_queue.submit(
@@ -5095,6 +5121,7 @@ def _weak_point_groups(db, student_id):
     rows = db.execute(
         "SELECT w.*, c.name AS course_name FROM student_weak_points w "
         "JOIN courses c ON c.id=w.course_id "
+        "JOIN enrollments e ON e.course_id=w.course_id AND e.student_id=w.student_id "
         "WHERE w.student_id=? AND w.status<>'removed' ORDER BY c.name, w.tag",
         (student_id,)).fetchall()
     groups = {}
@@ -5465,7 +5492,7 @@ def _consistency_issues():
 
     def missing(rows, col):
         return [r for r in rows
-                if r[col] and not os.path.exists(os.path.join(UPLOAD_DIR, r[col]))]
+                if r[col] and not os.path.exists(os.path.join(_upload_dir(), r[col]))]
 
     add("orphan_questions", "error", "题目记录指向已删除的提交",
         [(r["id"],) for r in db.execute(
@@ -5475,7 +5502,7 @@ def _consistency_issues():
     add("missing_submission_file", "error", "提交记录对应的学生文件已丢失",
         [(r["id"],) for r in db.execute("SELECT id, file_path FROM submissions").fetchall()
          if file_list(r["file_path"])
-         and not all(os.path.exists(os.path.join(UPLOAD_DIR, p))
+         and not all(os.path.exists(os.path.join(_upload_dir(), p))
                      for p in file_list(r["file_path"]))],
         detail="原文件不可下载，批改结果仍在")
 
@@ -5492,9 +5519,9 @@ def consistency_page():
     stats = {t: get_db().execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
              for t in ("users", "courses", "lectures", "exams", "submissions", "questions")}
     backups = []
-    if os.path.isdir(BACKUP_DIR):
-        for name in sorted(os.listdir(BACKUP_DIR), reverse=True):
-            path = os.path.join(BACKUP_DIR, name)
+    if os.path.isdir(_backup_dir()):
+        for name in sorted(os.listdir(_backup_dir()), reverse=True):
+            path = os.path.join(_backup_dir(), name)
             if BACKUP_RE.fullmatch(name):
                 backups.append({
                     "name": name,
@@ -5502,8 +5529,8 @@ def consistency_page():
                     "mtime": datetime.fromtimestamp(os.path.getmtime(path))
                     .strftime("%Y-%m-%d %H:%M")})
     return render_template("consistency.html", issues=_consistency_issues(), stats=stats,
-                           data_dir=cfg.DATA_DIR, db_path=DB_PATH, backups=backups,
-                           auto_backup=cfg.AUTO_BACKUP, backup_keep=cfg.BACKUP_KEEP)
+                           data_dir=cfg.get("DATA_DIR"), db_path=_db_path(), backups=backups,
+                           auto_backup=cfg.get("AUTO_BACKUP"), backup_keep=cfg.get("BACKUP_KEEP"))
 
 
 @_routes.route("/admin/consistency/fix", methods=["POST"])
@@ -5522,7 +5549,7 @@ def _build_backup_zip(dest):
     """把数据库在线快照 + 全部附件 + manifest 打包到 dest，返回 manifest。"""
     snap = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False)
     snap.close()
-    src = sqlite3.connect(DB_PATH)
+    src = sqlite3.connect(_db_path())
     dst = sqlite3.connect(snap.name)
     try:
         with dst:
@@ -5531,7 +5558,7 @@ def _build_backup_zip(dest):
         src.close()
         dst.close()
 
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(_db_path())
     try:
         counts = {t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
                   for t in ("users", "courses", "lectures", "exams", "submissions",
@@ -5545,10 +5572,10 @@ def _build_backup_zip(dest):
     try:
         with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
             z.write(snap.name, "data.sqlite")
-            for root, _, files in os.walk(UPLOAD_DIR):
+            for root, _, files in os.walk(_upload_dir()):
                 for name in files:
                     full = os.path.join(root, name)
-                    z.write(full, os.path.join("uploads", os.path.relpath(full, UPLOAD_DIR)))
+                    z.write(full, os.path.join("uploads", os.path.relpath(full, _upload_dir())))
             z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
     finally:
         os.remove(snap.name)
@@ -5557,24 +5584,24 @@ def _build_backup_zip(dest):
 
 def _prune_backups():
     """只保留最近 BACKUP_KEEP 份自动/手动备份（不含恢复前的 pre_restore 快照）。"""
-    os.makedirs(BACKUP_DIR, exist_ok=True)
-    items = sorted((os.path.join(BACKUP_DIR, n) for n in os.listdir(BACKUP_DIR)
+    os.makedirs(_backup_dir(), exist_ok=True)
+    items = sorted((os.path.join(_backup_dir(), n) for n in os.listdir(_backup_dir())
                     if BACKUP_RE.fullmatch(n)), key=os.path.getmtime, reverse=True)
-    for path in items[cfg.BACKUP_KEEP:]:
+    for path in items[cfg.get("BACKUP_KEEP"):]:
         try:
             os.remove(path)
         except OSError:
             pass
-    return items[:cfg.BACKUP_KEEP]
+    return items[:cfg.get("BACKUP_KEEP")]
 
 
 def _run_auto_backup():
     """当天还没有备份就生成一份；命名为 gradelogy_YYYYMMDD_HHMMSS.zip。"""
-    os.makedirs(BACKUP_DIR, exist_ok=True)
+    os.makedirs(_backup_dir(), exist_ok=True)
     today = datetime.now().strftime("%Y%m%d")
-    if any(n.startswith(f"gradelogy_{today}_") for n in os.listdir(BACKUP_DIR)):
+    if any(n.startswith(f"gradelogy_{today}_") for n in os.listdir(_backup_dir())):
         return None
-    path = os.path.join(BACKUP_DIR, datetime.now().strftime("gradelogy_%Y%m%d_%H%M%S.zip"))
+    path = os.path.join(_backup_dir(), datetime.now().strftime("gradelogy_%Y%m%d_%H%M%S.zip"))
     _build_backup_zip(path)
     _prune_backups()
     log.info("自动备份完成：%s", path)
@@ -5597,19 +5624,23 @@ def _backup_loop():
 def start_auto_backup():
     """启动每日自动备份线程；多进程部署时用文件锁保证只有一个进程执行。"""
     global _backup_lock, _backup_started
-    if _backup_started or not cfg.AUTO_BACKUP:
+    if _backup_started or not cfg.get("AUTO_BACKUP"):
         return
     _backup_started = True
     try:
-        os.makedirs(BACKUP_DIR, exist_ok=True)
+        os.makedirs(_backup_dir(), exist_ok=True)
         if fcntl is not None:
-            _backup_lock = open(os.path.join(BACKUP_DIR, ".auto.lock"), "w")
+            _backup_lock = open(os.path.join(_backup_dir(), ".auto.lock"), "w")
             fcntl.flock(_backup_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         log.info("自动备份未启动：另一个进程已在执行")
         return
-    threading.Thread(target=_backup_loop, daemon=True, name="auto-backup").start()
-    log.info("自动备份已启用：每 30 分钟检查一次，保留最近 %s 份", cfg.BACKUP_KEEP)
+    application = current_app._get_current_object() if has_app_context() else app
+    def run():
+        with application.app_context():
+            _backup_loop()
+    threading.Thread(target=run, daemon=True, name="auto-backup").start()
+    log.info("自动备份已启用：每 30 分钟检查一次，保留最近 %s 份", cfg.get("BACKUP_KEEP"))
 
 
 @_routes.route("/admin/export")
@@ -5628,7 +5659,7 @@ def admin_export():
 @role_required("admin")
 def admin_backup_now():
     """立即生成一份备份，存到数据目录的 backups/ 下。"""
-    path = os.path.join(BACKUP_DIR, datetime.now().strftime("gradelogy_%Y%m%d_%H%M%S.zip"))
+    path = os.path.join(_backup_dir(), datetime.now().strftime("gradelogy_%Y%m%d_%H%M%S.zip"))
     try:
         _build_backup_zip(path)
     except Exception:
@@ -5646,7 +5677,7 @@ def admin_backup_now():
 def admin_backup_download(name):
     if not BACKUP_RE.fullmatch(name or ""):
         abort(404)
-    path = os.path.join(BACKUP_DIR, name)
+    path = os.path.join(_backup_dir(), name)
     if not os.path.exists(path):
         abort(404)
     return send_file(path, as_attachment=True, download_name=name)
@@ -5657,7 +5688,7 @@ def _extract_backup_zip(zpath, extract_root):
     if not zipfile.is_zipfile(zpath):
         return None, "不是有效的 zip 备份包"
     os.makedirs(extract_root, exist_ok=True)
-    limit = cfg.MAX_RESTORE_MB * 1024 * 1024
+    limit = cfg.get("MAX_RESTORE_MB") * 1024 * 1024
     total = 0
     with zipfile.ZipFile(zpath) as z:
         members = z.infolist()
@@ -5670,7 +5701,7 @@ def _extract_backup_zip(zpath, extract_root):
                 return None, "备份包包含非法路径，已拒绝导入"
             total += info.file_size
             if total > limit:
-                return None, f"备份包解压后超过 {cfg.MAX_RESTORE_MB}MB 上限，已拒绝导入"
+                return None, f"备份包解压后超过 {cfg.get("MAX_RESTORE_MB")}MB 上限，已拒绝导入"
         z.extractall(extract_root)
 
     src_db = os.path.join(extract_root, "data.sqlite")
@@ -5697,13 +5728,15 @@ def _apply_restore(extract_root):
     src_db = os.path.join(extract_root, "data.sqlite")
     # 破坏性操作前，先把当前数据完整备份一份，失败可人工回退
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    bdir = os.path.join(cfg.DATA_DIR, "backups")
+    bdir = os.path.join(cfg.get("DATA_DIR"), "backups")
     os.makedirs(bdir, exist_ok=True)
-    cur = sqlite3.connect(DB_PATH, timeout=10)
+    cur = sqlite3.connect(_db_path(), timeout=10)
     bk = sqlite3.connect(os.path.join(bdir, f"pre_restore_{ts}.sqlite"))
     src = sqlite3.connect(f"file:{src_db}?mode=ro", uri=True)
     try:
         cur.backup(bk)
+        # 先撤销所有旧会话，避免数据库编号重用后 Cookie 变成另一个账号。
+        revoke_sessions(cfg.get("DATA_DIR"))
         src.backup(cur)  # 用 backup API 覆盖，避免替换文件句柄影响正在处理的请求
     finally:
         src.close()
@@ -5711,11 +5744,11 @@ def _apply_restore(extract_root):
         cur.close()
 
     # 附件整体替换：旧目录先移入备份，再把包内的 uploads 放回原位
-    if os.path.isdir(UPLOAD_DIR):
-        shutil.move(UPLOAD_DIR, os.path.join(bdir, f"uploads_{ts}"))
+    if os.path.isdir(_upload_dir()):
+        shutil.move(_upload_dir(), os.path.join(bdir, f"uploads_{ts}"))
     new_uploads = os.path.join(extract_root, "uploads")
     if os.path.isdir(new_uploads):
-        shutil.move(new_uploads, UPLOAD_DIR)
+        shutil.move(new_uploads, _upload_dir())
     cfg.ensure_dirs()
     # 旧备份可能缺后续版本新增的列/表，恢复后立刻跑一次迁移
     init_db()
@@ -5737,7 +5770,7 @@ def admin_restore():
         flash("请选择此前导出的 zip 备份文件")
         return redirect(url_for("consistency_page"))
 
-    tmpdir = tempfile.mkdtemp(prefix=".restore_", dir=cfg.DATA_DIR)
+    tmpdir = tempfile.mkdtemp(prefix=".restore_", dir=cfg.get("DATA_DIR"))
     try:
         zpath = os.path.join(tmpdir, "backup.zip")
         up.save(zpath)
@@ -5755,14 +5788,14 @@ def admin_restore():
         return redirect(url_for("consistency_page"))
     except OSError:
         log.exception("恢复失败（磁盘/权限）")
-        flash(f"恢复失败，当前数据已备份到 {os.path.join(cfg.DATA_DIR, 'backups')}，请检查磁盘与权限")
+        flash(f"恢复失败，当前数据已备份到 {os.path.join(cfg.get("DATA_DIR"), 'backups')}，请检查磁盘与权限")
         return redirect(url_for("consistency_page"))
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 # ---------- 初始化导入向导（仅全新空系统可用） ----------
-SETUP_TMP_ROOT = os.path.join(cfg.DATA_DIR, "tmp_setup")
+SETUP_TMP_ROOT = os.path.join(cfg.get("DATA_DIR"), "tmp_setup")
 
 
 def _is_pristine():
@@ -5785,7 +5818,7 @@ def _purge_setup_stash():
     if not stash:
         return
     path = os.path.abspath(stash.get("dir") or "")
-    root = os.path.abspath(SETUP_TMP_ROOT)
+    root = os.path.abspath(_setup_tmp_root())
     if path.startswith(root + os.sep):
         shutil.rmtree(path, ignore_errors=True)
 
@@ -5852,8 +5885,8 @@ def setup_upload():
         return redirect(url_for("setup_import"))
 
     _purge_setup_stash()
-    os.makedirs(SETUP_TMP_ROOT, exist_ok=True)
-    tmpdir = tempfile.mkdtemp(prefix="import_", dir=SETUP_TMP_ROOT)
+    os.makedirs(_setup_tmp_root(), exist_ok=True)
+    tmpdir = tempfile.mkdtemp(prefix="import_", dir=_setup_tmp_root())
     try:
         zpath = os.path.join(tmpdir, "backup.zip")
         up.save(zpath)
@@ -5894,7 +5927,7 @@ def setup_confirm():
         flash("上传的备份已失效，请重新选择")
         return redirect(url_for("setup_import"))
     tmpdir = stash["dir"]
-    if not os.path.abspath(tmpdir).startswith(os.path.abspath(SETUP_TMP_ROOT) + os.sep):
+    if not os.path.abspath(tmpdir).startswith(os.path.abspath(_setup_tmp_root()) + os.sep):
         _purge_setup_stash()
         abort(400)
     if not _is_pristine():
@@ -5930,13 +5963,11 @@ def setup_cancel():
 @_routes.route("/files/<path:filename>")
 @login_required
 def uploaded_file(filename):
-    if g.user["role"] == "student":
-        wanted = os.path.normpath(filename).replace("\\", "/")
-        if wanted not in _student_files(g.user["id"]):
-            security_log.warning("越权访问文件 student=%s path=%s", g.user["id"], wanted)
-            abort(403)
-    full = os.path.abspath(os.path.join(UPLOAD_DIR, filename))
-    if not full.startswith(os.path.abspath(UPLOAD_DIR) + os.sep):
+    if not can_read_file(get_db(), g.user, filename):
+        security_log.warning("越权访问文件 user=%s path=%s", g.user["id"], filename)
+        abort(403)
+    full = os.path.abspath(os.path.join(_upload_dir(), filename))
+    if not full.startswith(os.path.abspath(_upload_dir()) + os.sep):
         abort(404)
     # 手机端 PDF 预览：iframe 在 iOS 上只能显示第一页，改由服务端逐页渲染成图片
     if request.args.get("meta"):
@@ -5957,7 +5988,7 @@ def uploaded_file(filename):
         if not data:
             abort(404)
         return send_file(io.BytesIO(data), mimetype="image/jpeg", max_age=3600)
-    return send_from_directory(UPLOAD_DIR, filename)
+    return send_from_directory(_upload_dir(), filename)
 
 
 @_routes.route("/healthz")
@@ -5970,7 +6001,7 @@ def healthz():
     except Exception as e:  # noqa: BLE001 健康检查需要兜住一切异常
         checks["db"] = f"error: {e}"
         ok = False
-    checks["storage"] = "ok" if os.access(UPLOAD_DIR, os.W_OK) else "readonly"
+    checks["storage"] = "ok" if os.access(_upload_dir(), os.W_OK) else "readonly"
     ok = ok and checks["storage"] == "ok"
     return {"status": "ok" if ok else "degraded",
             "version": cfg.APP_VERSION, "checks": checks}, (200 if ok else 503)
@@ -6028,13 +6059,25 @@ def _ai_route_deps():
     }
 
 
-def create_app():
+def create_app(config_overrides=None):
     """应用工厂：集中创建 Flask 实例，并挂载路由、请求钩子与模板扩展。"""
-    global _id_signer
     app = Flask(__name__)
-    app.config["SECRET_KEY"] = cfg.SECRET_KEY or load_secret_key()
-    app.config["MAX_CONTENT_LENGTH"] = max(
-        cfg.MAX_UPLOAD_MB, cfg.MAX_RESTORE_MB, cfg.KG_MAX_UPLOAD_MB) * 1024 * 1024
+    overrides = dict(config_overrides or {})
+    if "DATA_DIR" in overrides:
+        root = os.path.abspath(overrides["DATA_DIR"])
+        overrides["DATA_DIR"] = root
+        for key, name in (("DB_PATH", "data.sqlite"), ("STORAGE_DIR", "uploads"),
+                          ("BACKUP_DIR", "backups"), ("EXPORT_DIR", "exports"),
+                          ("LOG_DIR", "logs"), ("SECRET_KEY_FILE", ".secret_key")):
+            overrides.setdefault(key, os.path.join(root, name))
+    app.config["GRADELOGY_SETTINGS"] = overrides
+    app.config.update(overrides)
+    with app.app_context():
+        cfg.ensure_dirs()
+        app.config["SECRET_KEY"] = overrides.get("SECRET_KEY") or cfg.SECRET_KEY or load_secret_key()
+        cfg.setup_logging()
+        app.config["MAX_CONTENT_LENGTH"] = max(
+            cfg.get("MAX_UPLOAD_MB"), cfg.get("MAX_RESTORE_MB"), cfg.get("KG_MAX_UPLOAD_MB")) * 1024 * 1024
     # Cookie 加固：禁止 JS 读取；SameSite 阻断跨站携带；HTTPS 部署时用 COOKIE_SECURE=1 打开 Secure
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
@@ -6042,13 +6085,17 @@ def create_app():
     # 会话空闲 8 小时过期：每次请求自动续期，长时间不操作需重新登录
     app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=8)
     app.config["SESSION_REFRESH_EACH_REQUEST"] = True
+    app.config.update(overrides)
     app.teardown_appcontext(close_db)
 
-    _id_signer = URLSafeSerializer(app.config["SECRET_KEY"], salt="gradelogy-url-id")
+    app.url_map.gradelogy_signer = URLSafeSerializer(app.config["SECRET_KEY"], salt="gradelogy-url-id")
     app.url_map.converters["oid"] = SignedIdConverter
 
-    ai_routes.register(_routes, _ai_route_deps())
-    _routes.apply(app)
+    routes = AppRoutes()
+    routes._items = list(_routes._items)
+    ai_routes.register(routes, _ai_route_deps())
+    routes.apply(app)
+    _configure_queues(app)
 
     app.jinja_env.filters["fromjson"] = _json_or_none
     app.jinja_env.filters["file_list"] = file_list
@@ -6062,16 +6109,24 @@ def create_app():
     return app
 
 
-# 模块导入时即完成建表与迁移，gunicorn 直接加载 app:app 也能拿到完整 schema
+def initialize_app(application, start_workers=True):
+    """显式运行迁移与后台启动；读取 app 模块不迁移数据库或启动任务。"""
+    with application.app_context():
+        init_db(recover_interrupted=start_workers)
+        if start_workers:
+            start_kg_recovery()
+            start_auto_backup()
+            start_model_sync()
+            start_auto_grade()
+    return application
+
+
+# 保留 app 对象供测试和工具使用；生产启动由 wsgi.py 负责。
 app = create_app()
-init_db()
-start_kg_recovery()
-start_auto_backup()
-start_model_sync()
-start_auto_grade()
 
 
 if __name__ == "__main__":
+    initialize_app(app)
     host = cfg.HOST
     port = cfg.PORT
     ip = _lan_ip()

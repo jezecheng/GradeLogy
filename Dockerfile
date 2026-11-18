@@ -63,4 +63,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 # 单进程多线程：SQLite 写入不跨进程，长批改也不会被 worker 超时杀掉
 # 批阅单次上限 300 秒，worker 超时留一倍余量即可
 CMD ["gunicorn", "-w", "1", "--threads", "8", "--timeout", "600", \
-     "-b", "0.0.0.0:5000", "--access-logfile", "-", "app:app"]
+     "-b", "0.0.0.0:5000", "--access-logfile", "-", "wsgi:app"]

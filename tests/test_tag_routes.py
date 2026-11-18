@@ -507,6 +507,9 @@ class TagRouteTest(unittest.TestCase):
         self.assertEqual(status, "weak")
 
     def _review_save(self):
+        self.client.post(self.url("question_reviewed", qid=40),
+                         json={"reviewed": True, "verdict": "错"},
+                         headers={"X-CSRF-Token": "test-token"})
         return self._post("submission_review_save", {
             "verdict_40": "错", "ocr_40": "第3题作答", "standard_40": "标准答案",
             "note_40": "", "overall": "继续加油"}, sid=30)
@@ -571,7 +574,7 @@ class TagRouteTest(unittest.TestCase):
             "INSERT INTO submissions(id,lecture_id,student_id,file_path,status)"
             " VALUES(31,21,4,'b.pdf','待批改')")
         con.execute(
-            "INSERT INTO questions(id,submission_id,no,verdict) VALUES(50,31,'1','错')")
+            "INSERT INTO questions(id,submission_id,no,verdict,reviewed) VALUES(50,31,'1','错',1)")
         con.execute(
             "INSERT INTO question_tags(lecture_id,question_key,question_no,tag,source)"
             " VALUES(21,'q0','1','氧化还原反应','ai')")
