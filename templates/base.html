@@ -133,6 +133,7 @@
   if (!box) return;
   var list = box.querySelector('[data-grading-list]');
   var count = box.querySelector('[data-grading-count]');
+  var usageUrl = {{ url_for('teacher_ai_usage')|tojson }};
   var STORAGE_KEY = 'gradelogy.seen_finished_tasks.' + document.body.dataset.uiUser;
   var seenFinished = loadSeen();
 
@@ -167,10 +168,8 @@
     body.textContent = job.title + (job.error ? '：' + job.error : '');
     toast.appendChild(title);
     toast.appendChild(body);
-    if (job.url) {
-      toast.style.cursor = 'pointer';
-      toast.addEventListener('click', function () { window.location.href = job.url; });
-    }
+    toast.style.cursor = 'pointer';
+    toast.addEventListener('click', function () { window.location.href = usageUrl; });
     container.appendChild(toast);
     setTimeout(function () {
       toast.classList.add('ai-toast-out');
@@ -200,8 +199,8 @@
     data.jobs.forEach(function (job) {
       var li = document.createElement('li');
       li.className = 'grading-queue-item';
-      var item = document.createElement(job.url ? 'a' : 'span');
-      if (job.url) item.href = job.url;
+      var item = document.createElement('a');
+      item.href = usageUrl;
       var state = document.createElement('span');
       state.className = 'grading-queue-state ' + job.status;
       state.textContent = job.status === 'running' ? '进行中' : '排队中';
@@ -221,8 +220,8 @@
     (data.recent || []).forEach(function (job) {
       var li = document.createElement('li');
       li.className = 'grading-queue-item grading-queue-item-finished';
-      var item = document.createElement(job.url ? 'a' : 'span');
-      if (job.url) item.href = job.url;
+      var item = document.createElement('a');
+      item.href = usageUrl;
       var state = document.createElement('span');
       state.className = 'grading-queue-state ' + job.status;
       state.textContent = job.status === 'success' ? '完成' : '失败';

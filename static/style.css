@@ -562,6 +562,7 @@ button.btn-link:hover { text-decoration: underline; }
 .request-detail dt { margin-top: 6px; color: #8a8f99; }
 .request-detail dd { margin: 1px 0 0; overflow-wrap: anywhere; }
 .request-log-note { margin: 12px 0 0; }
+.ai-usage-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 14px; }
 .ai-business-details > summary { color: inherit; }
 .ai-business-details[open] > summary { margin-bottom: 18px; padding-bottom: 12px;
                                        border-bottom: 1px solid #eef0f3; }

@@ -9,7 +9,7 @@
       <form method="post" action="{{ url_for('submission_report_build', sid=sub.id) }}"
             class="report-build-form" data-has-result="{{ '1' if md else '0' }}">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-        <button class="small ghost">{{ '生成批改报告' if not md else '重新生成' }}</button>
+        <button class="small ghost">{{ '生成评阅报告' if not md else '重新生成报告' }}</button>
       </form>
       {% if md %}
       <form method="post" action="{{ url_for('submission_report_publish', sid=sub.id) }}">
@@ -57,7 +57,7 @@
   {% endif %}
   {% else %}
   <p class="muted" style="margin-top:16px">
-    还没有生成报告。完成逐题核对并保存后，点右上角「生成批改报告」。
+    还没有评阅报告。完成逐题复核后，点右上角「生成评阅报告」；已有报告可在此重新生成。
   </p>
   {% endif %}
 </div>

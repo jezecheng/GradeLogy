@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """AI 设置与用量路由。
 
-老师端「AI 设置」页（API Key 管理、模型同步、价目截图识别、连通性测试）与管理员
-「AI 用量」页集中在这里。路由只依赖 Flask 与 utilities.llm；设置读写、API Key 操作、
+老师端「AI 设置」页（API Key 管理、模型同步、价目截图识别、连通性测试）、老师自用量页
+与管理员「AI 用量」页集中在这里。路由只依赖 Flask 与 utilities.llm；设置读写、API Key 操作、
 用量聚合等能力由 app.py 在 register() 时注入，避免与 app.py 形成循环导入。
 
 app.py 注入的依赖是惰性包装，调用时才去取模块全局，因此测试中
@@ -130,6 +130,54 @@ def register(registry, deps):
                                dimension_labels=dimension_labels,
                                dimension_links=dimension_links,
                                **ai_dashboard_data(filters))
+
+    @registry.route("/ai-usage")
+    @role_required("teacher")
+    def teacher_ai_usage():
+        """教师查看自己的模型请求与逐请求用量明细。"""
+        db = get_db()
+        teacher_id = g.user["id"]
+        summary = db.execute("""
+            SELECT COUNT(e.id) AS request_count,
+              SUM(e.prompt_tokens) AS prompt_tokens,
+              SUM(e.completion_tokens) AS completion_tokens,
+              SUM(e.total_tokens) AS total_tokens,
+              SUM(e.cached_tokens) AS cached_tokens,
+              SUM(e.reasoning_tokens) AS reasoning_tokens,
+              SUM(e.estimated_cost) AS estimated_cost
+            FROM ai_operations o
+            LEFT JOIN ai_usage_events e ON e.operation_id=o.id
+            WHERE o.teacher_id=?
+        """, (teacher_id,)).fetchone()
+        operations = db.execute("SELECT COUNT(*) FROM ai_operations WHERE teacher_id=?",
+                                (teacher_id,)).fetchone()[0]
+        page_size = 100
+        pages = max(1, (summary["request_count"] + page_size - 1) // page_size)
+        page = request.args.get("page", 1, type=int) or 1
+        page = max(1, min(page, pages))
+        requests = db.execute("""
+            SELECT e.id,e.operation_id,e.chunk_id,e.attempt,e.provider_request_id,
+              COALESCE(NULLIF(e.model,''),NULLIF(o.model,''),'未指定模型') AS model,
+              e.prompt_tokens,e.completion_tokens,e.total_tokens,e.cached_tokens,
+              e.reasoning_tokens,e.latency_ms,e.estimated_cost,e.finish_reason,
+              e.pricing_json,e.usage_json,e.status AS event_status,e.error AS event_error,
+              e.created_at,o.operation_type,o.status AS operation_status,
+              o.started_at,o.finished_at,o.error AS operation_error,c.name AS course_name,
+              l.title AS lecture_title,u.display_name AS student_name
+            FROM ai_usage_events e
+            JOIN ai_operations o ON o.id=e.operation_id
+            LEFT JOIN courses c ON c.id=o.course_id
+            LEFT JOIN submissions s ON s.id=o.submission_id
+            LEFT JOIN lectures l ON l.id=COALESCE(o.lecture_id,s.lecture_id)
+            LEFT JOIN users u ON u.id=s.student_id
+            WHERE o.teacher_id=?
+            ORDER BY e.id DESC LIMIT ? OFFSET ?
+        """, (teacher_id, page_size, (page - 1) * page_size)).fetchall()
+        return render_template("teacher_ai_usage.html", summary=summary,
+                               operations=operations, requests=requests,
+                               page=page, pages=pages, page_size=page_size,
+                               ai_operation_label=ai_operation_label,
+                               ai_status_label=ai_status_label)
 
     # ---------- 老师：AI 设置 ----------
     def settings_context(extra=None):

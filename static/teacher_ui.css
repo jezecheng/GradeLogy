@@ -104,7 +104,7 @@
   .teacher-tools button { padding: 8px 10px; font-size: 14px; }
   .teacher-account { display: none; }
   .teacher-bottom-nav { display: flex; position: fixed; bottom: 0; left: 0; right: 0; z-index: 66; background: #fff; border-top: 1px solid var(--ui-border); padding: 6px 12px calc(6px + env(safe-area-inset-bottom)); justify-content: space-around; }
-  .teacher-bottom-nav a, .teacher-bottom-nav button { background: transparent; border: 0; color: #526078; font: inherit; min-height: 44px; min-width: 64px; text-align: center; display: grid; place-items: center; padding: 8px; }
+  .teacher-bottom-nav a, .teacher-bottom-nav button { flex: 1; background: transparent; border: 0; color: #526078; font: inherit; min-height: 44px; min-width: 0; text-align: center; display: grid; place-items: center; padding: 8px; white-space: nowrap; }
   .teacher-bottom-nav [aria-current] { color: #1456f0; background: #edf3ff; border-radius: 8px; }
   .teacher-ui .card { padding: 16px; }
   .teacher-ui input, .teacher-ui textarea, .teacher-ui select, .teacher-ui .prompt-body textarea { font-size: 16px; }

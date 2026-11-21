@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}AI 用量{% endblock %}
+{% macro token_text(value) -%}
+  {%- if value is not none %}{{ '{:,}'.format(value) }}{% else %}—{% endif -%}
+{%- endmacro %}
+{% macro cost_text(value) -%}
+  {%- if value is not none %}¥{{ '%.4f'|format(value) }}{% else %}—{% endif -%}
+{%- endmacro %}
+{% block content %}
+<header class="page-heading">
+  <div>
+    <h1>AI 用量</h1>
+    <p class="muted">查看与你的操作关联的模型请求、Token 用量、费用估算和请求详情。</p>
+  </div>
+</header>
+
+<section class="monitor-kpis" aria-label="个人 AI 用量概览">
+  <article class="monitor-kpi is-primary">
+    <div class="monitor-kpi-label">模型请求</div>
+    <span class="monitor-kpi-num">{{ summary.request_count }}</span>
+    <div class="monitor-kpi-foot">覆盖 {{ operations }} 次 AI 操作</div>
+  </article>
+  <article class="monitor-kpi">
+    <div class="monitor-kpi-label">总 Tokens</div>
+    <span class="monitor-kpi-num">{{ token_text(summary.total_tokens) }}</span>
+    <div class="monitor-kpi-foot">输入 {{ token_text(summary.prompt_tokens) }} · 输出 {{ token_text(summary.completion_tokens) }}</div>
+  </article>
+  <article class="monitor-kpi">
+    <div class="monitor-kpi-label">缓存 / 推理 Tokens</div>
+    <span class="monitor-kpi-num">{{ token_text(summary.cached_tokens) }} / {{ token_text(summary.reasoning_tokens) }}</span>
+    <div class="monitor-kpi-foot">以服务商返回的数据为准</div>
+  </article>
+  <article class="monitor-kpi">
+    <div class="monitor-kpi-label">预估费用</div>
+    <span class="monitor-kpi-num">{{ cost_text(summary.estimated_cost) }}</span>
+    <div class="monitor-kpi-foot">实际费用以服务商账单为准</div>
+  </article>
+</section>
+
+<section class="card request-log-card">
+  <div class="card-head">
+    <div><h2>模型请求</h2><span class="muted small">每次调用和重试分别记录</span></div>
+    <span class="monitor-log-count">{% if summary.request_count > 0 %}显示第 {{ (page - 1) * page_size + 1 }}–{{ (page - 1) * page_size + requests|length }} 条 / 共 {{ summary.request_count }} 条{% else %}共 0 条{% endif %}</span>
+  </div>
+  {% if requests %}
+  <div class="table-scroll ai-request-table">
+    <table>
+      <thead>
+        <tr><th>请求时间</th><th>请求 ID</th><th>模型</th><th>操作</th><th>状态</th><th class="right">总 Tokens</th><th class="right">输入</th><th class="right">输出</th><th class="right">耗时</th><th class="right">费用</th><th>详情</th></tr>
+      </thead>
+      <tbody>
+        {% for row in requests %}
+        <tr>
+          <td class="nowrap">{{ row.created_at|localtime }}</td>
+          <td>
+            {% if row.provider_request_id %}<code class="request-id" title="{{ row.provider_request_id }}">{{ row.provider_request_id[:16] }}{% if row.provider_request_id|length > 16 %}…{% endif %}</code>
+            {% else %}<span class="muted">内部 #{{ row.id }}</span>{% endif %}
+            <div class="muted small">第 {{ row.attempt }} 次尝试{% if row.chunk_id %} · 分块 {{ row.chunk_id }}{% endif %}</div>
+          </td>
+          <td class="request-model">{{ row.model }}</td>
+          <td>{{ ai_operation_label.get(row.operation_type, row.operation_type) }} <span class="muted">#{{ row.operation_id }}</span><div class="muted small">{{ row.course_name or '未关联课程' }}{% if row.lecture_title %} · {{ row.lecture_title }}{% endif %}{% if row.student_name %} · {{ row.student_name }}{% endif %}</div></td>
+          <td>{% if row.event_status == 'success' %}<span class="request-status is-success">成功</span>{% elif row.event_status == 'error' %}<span class="request-status is-error">失败</span>{% else %}<span class="request-status">{{ row.event_status }}</span>{% endif %}<div class="muted small">操作{{ ai_status_label.get(row.operation_status, row.operation_status) }}</div></td>
+          <td class="right nowrap">{{ token_text(row.total_tokens) }}</td>
+          <td class="right nowrap">{{ token_text(row.prompt_tokens) }}</td>
+          <td class="right nowrap">{{ token_text(row.completion_tokens) }}</td>
+          <td class="right nowrap">{% if row.latency_ms is not none %}{{ '%.1f'|format(row.latency_ms / 1000) }}s{% else %}—{% endif %}</td>
+          <td class="right nowrap">{{ cost_text(row.estimated_cost) }}</td>
+          <td>
+            <details class="request-detail">
+              <summary>查看</summary>
+              <dl>
+                <dt>完整请求 ID</dt><dd>{{ row.provider_request_id or '服务商未返回' }}</dd>
+                <dt>结束原因</dt><dd>{{ row.finish_reason or '—' }}</dd>
+                <dt>操作错误</dt><dd>{% if row.operation_error %}<span class="danger-text">{{ row.operation_error }}</span>{% else %}—{% endif %}</dd>
+                <dt>请求错误</dt><dd>{% if row.event_error %}<span class="danger-text">{{ row.event_error }}</span>{% else %}—{% endif %}</dd>
+              </dl>
+              <details><summary>服务商用量原始数据</summary><pre>{{ row.usage_json or '服务商没有返回用量数据' }}</pre></details>
+              <details><summary>计价快照</summary><pre>{{ row.pricing_json or '没有计价快照' }}</pre></details>
+            </details>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if pages > 1 %}
+  <nav class="ai-usage-pagination" aria-label="模型请求分页">
+    {% if page > 1 %}<a class="btn-link" href="{{ url_for('teacher_ai_usage', page=page - 1) }}">上一页</a>{% endif %}
+    <span class="muted small">第 {{ page }} / {{ pages }} 页</span>
+    {% if page < pages %}<a class="btn-link" href="{{ url_for('teacher_ai_usage', page=page + 1) }}">下一页</a>{% endif %}
+  </nav>
+  {% endif %}
+  {% else %}<p class="muted">暂时没有与你的账号关联的模型请求。</p>{% endif %}
+  <p class="muted small request-log-note">“—”表示服务商未返回或缺少价格，不代表 0。用量数据按当前账号隔离，预估费用仅供参考。</p>
+</section>
+{% endblock %}

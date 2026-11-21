@@ -985,7 +985,7 @@ class AsyncGradingTest(unittest.TestCase):
         return {"questions": [{"no": "1", "ocr": "答案", "verdict": "对", "comment": "很好"}],
                 "summary": {"evaluation": "完成度不错"}, "error": ""}
 
-    def test_submit_returns_immediately_and_result_is_saved(self):
+    def test_submit_returns_immediately_saves_result_without_report(self):
         with mock.patch.object(app_module, "get_setting", side_effect=self.setting), \
                 mock.patch.object(app_module, "file_list", return_value=[]), \
                 mock.patch.object(app_module, "run_grading",
@@ -999,7 +999,7 @@ class AsyncGradingTest(unittest.TestCase):
             row = self.wait_for_finish()
         self.assertEqual(row[0], "success")
         run.assert_called_once()
-        report.assert_called_once()
+        report.assert_not_called()
 
         con = sqlite3.connect(app_module.DB_PATH)
         n_questions = con.execute("SELECT COUNT(*) FROM questions WHERE submission_id=?",

@@ -2418,10 +2418,6 @@ def _run_grading_job(teacher_id, sid, operation):
                 return
             _save_grading_result(db, sid, gen, answer_pages=_page_list(hw["answer_pages"]))
             _finish_ai_operation(operation, "success")
-            try:
-                generate_report(db, sid, teacher_id)
-            except Exception:  # 报告生成失败不影响批阅结果本身
-                log.exception("生成批改报告失败 submission=%s", sid)
             grading_log.info("后台批阅完成 submission=%s 题数=%s", sid, len(gen["questions"]))
         except Exception as e:
             grading_log.exception("后台批阅异常 submission=%s", sid)
@@ -2514,11 +2510,7 @@ def submission_grade(sid):
             flash(str(e))
             return _back_to_page()
         _save_grading_result(db, sid, gen, answer_pages=_page_list(hw["answer_pages"]))
-        try:
-            generate_report(db, sid, g.user["id"])
-        except Exception:
-            log.exception("生成批改报告失败 submission=%s", sid)
-        flash(f"演示模式：未调用 AI，已生成 {len(gen['questions'])} 道题，请逐题修正内容")
+        flash(f"演示模式：未调用 AI，已生成 {len(gen['questions'])} 道题，请逐题复核后手动生成报告")
         return _back_to_page()
 
     _, err = _enqueue_grading(g.user["id"], sid, hw["course_id"], hw["id"])
@@ -2805,17 +2797,30 @@ def submission_review_save(sid):
     except Exception:
         log.exception("更新学生薄弱点失败 submission=%s student=%s", sid, sub["student_id"])
     if (request.form.get("then") or "") == "report":
+        if job and job["status"] in ("queued", "running"):
+            flash("批阅任务尚未完成，请稍后再复核并生成报告。")
+            return redirect(url_for("submission_review", sid=sid))
         pending = db.execute("SELECT COUNT(*) c FROM questions WHERE submission_id=? AND reviewed=0",
                              (sid,)).fetchone()["c"]
         if pending:
             flash(f"生成批阅报告前需要人工审核每一道题，还有 {pending} 题未审核")
             return redirect(url_for("submission_review", sid=sid))
-    try:
-        generate_report(db, sid, g.user["id"], reuse=True)
-    except Exception:  # 报告刷新失败不影响批改保存
-        log.exception("刷新批改报告失败 submission=%s", sid)
     if (request.form.get("then") or "") == "report":
-        flash("批改已保存，报告已按最新结果刷新，可继续修改后发布。")
+        current = db.execute("SELECT report_md FROM submissions WHERE id=?", (sid,)).fetchone()
+        if current and current["report_md"]:
+            flash("批改已保存，已打开现有报告；如需同步本次修改，请在报告页重新生成。")
+            return redirect(url_for("submission_report", sid=sid))
+        try:
+            generate_report(db, sid, g.user["id"], reuse=True)
+        except Exception:  # 报告生成失败不影响批改保存，可在报告页重试
+            log.exception("生成批改报告失败 submission=%s", sid)
+            flash("批改已保存，但报告生成失败；可稍后在报告页重试。")
+            return redirect(url_for("submission_report", sid=sid))
+        generated = db.execute("SELECT report_md FROM submissions WHERE id=?", (sid,)).fetchone()
+        if not generated or not generated["report_md"]:
+            flash("批改已保存，但报告评价生成失败；可稍后在报告页重试。")
+            return redirect(url_for("submission_report", sid=sid))
+        flash("批改已保存，报告已生成，可继续修改后发布。")
         return redirect(url_for("submission_report", sid=sid))
     flash("批改已保存，学生可以查看" if reviewed else "草稿已保存，全部题目复核后再保存即可公开。")
     return redirect(url_for("submission_review", sid=sid))
@@ -4622,11 +4627,12 @@ def generate_report(db, sub_id, teacher_id, reuse=False, operation=None):
     md = build_report_md(sub["display_name"], sub["lecture_title"], date_label,
                          questions, summary, detail,
                          kg_diagnosis=_kg_diagnosis(db, sub))
-    db.execute("UPDATE submissions SET report_md=?, report_detail=? WHERE id=?",
-               (md, json.dumps(detail, ensure_ascii=False) if detail else "", sub_id))
     if completion_error is not None:
+        # AI 评价请求失败时保留旧报告；没有旧报告时保持空值，供界面显示“生成”。
         _finish_ai_operation(operation, "failed" if completion_error else "success", completion_error)
     else:
+        db.execute("UPDATE submissions SET report_md=?, report_detail=? WHERE id=?",
+                   (md, json.dumps(detail, ensure_ascii=False) if detail else "", sub_id))
         db.commit()
     return md
 
@@ -4942,6 +4948,17 @@ def submission_report(sid):
 def submission_report_build(sid):
     sub, hw, course = own_submission(sid)
     teacher_id = g.user["id"]
+    db = get_db()
+    rows = db.execute(
+        "SELECT COUNT(*) AS total, SUM(reviewed=0) AS pending "
+        "FROM questions WHERE submission_id=?", (sid,)).fetchone()
+    active = latest_operation(db, sid)
+    if not rows["total"] or rows["pending"]:
+        flash("请先完成全部题目的逐题复核，再生成或重新生成报告。")
+        return redirect(url_for("submission_review", sid=sid))
+    if active and active["status"] in ("queued", "running"):
+        flash("批阅任务尚未完成，请稍后再复核并生成报告。")
+        return redirect(url_for("submission_review", sid=sid))
     model = get_setting(teacher_id, "ai_model") or "report"
 
     def runner(database, operation):
@@ -4987,7 +5004,8 @@ def submission_report_publish(sid):
             flash("批阅任务尚未完成，请稍后复核新结果。")
             return redirect(url_for("submission_review", sid=sid))
     if not sub["report_md"]:
-        generate_report(db, sid, g.user["id"])
+        flash("请先生成批改报告，再发布给学生。")
+        return redirect(url_for("submission_report", sid=sid))
     publish = 0 if sub["report_published"] else 1
     db.execute("UPDATE submissions SET report_published=? WHERE id=?", (publish, sid))
     db.commit()

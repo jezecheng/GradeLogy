@@ -1,9 +1,9 @@
 {% set endpoint = request.endpoint or '' %}
-{% set area = 'graphs' if endpoint.startswith('knowledge_graph') else 'prompts' if endpoint.startswith('prompt') else 'settings' if endpoint.startswith('settings') else 'courses' %}
+{% set area = 'graphs' if endpoint.startswith('knowledge_graph') else 'prompts' if endpoint.startswith('prompt') else 'settings' if endpoint.startswith('settings') else 'ai_usage' if endpoint == 'teacher_ai_usage' else 'courses' %}
 <aside class="teacher-sidebar">
   <a class="teacher-brand" href="{{ url_for('courses') }}"><img src="{{ url_for('static', filename='gradelogy-mark.png') }}" alt="">GradeLogy</a>
   <nav aria-label="教师导航">
-    {% for key, endpoint, label in [('courses','courses','我的课程'),('graphs','knowledge_graphs','知识图谱'),('prompts','prompts_page','我的提示词'),('settings','settings_page','AI 设置')] %}
+    {% for key, endpoint, label in [('courses','courses','我的课程'),('graphs','knowledge_graphs','知识图谱'),('prompts','prompts_page','我的提示词'),('settings','settings_page','AI 设置'),('ai_usage','teacher_ai_usage','AI 用量')] %}
     <a href="{{ url_for(endpoint) }}" {% if area == key %}aria-current="page"{% endif %}>{{ label }}</a>
     {% endfor %}
   </nav>
@@ -24,20 +24,20 @@
         <p class="muted small">任务在后台执行；最近完成和失败记录也会保留在这里。</p>
       </div>
     </span>
-    <button type="button" class="ghost teacher-account" data-ui-dialog="teacher-more">更多 · {{ g.user.display_name }}</button>
+    <button type="button" class="ghost teacher-account" data-ui-dialog="teacher-more">更多</button>
   </div>
 </header>
 <nav class="teacher-bottom-nav" aria-label="手机导航">
   <a href="{{ url_for('courses') }}" {% if area == 'courses' %}aria-current="page"{% endif %}>课程</a>
   <a href="{{ url_for('knowledge_graphs') }}" {% if area == 'graphs' %}aria-current="page"{% endif %}>图谱</a>
+  <a href="{{ url_for('teacher_ai_usage') }}" {% if area == 'ai_usage' %}aria-current="page"{% endif %}>AI 用量</a>
   <button type="button" data-open-tasks>任务</button>
   <button type="button" data-ui-dialog="teacher-more" {% if area in ['prompts','settings'] %}aria-current="page"{% endif %}>更多</button>
 </nav>
 <dialog id="teacher-more" class="modal">
   <h2>更多</h2><div class="teacher-more-links">
-    <a href="{{ url_for('courses') }}">我的课程</a><a href="{{ url_for('knowledge_graphs') }}">知识图谱</a>
-    <a href="{{ url_for('prompts_page') }}">我的提示词</a><a href="{{ url_for('settings_page') }}">AI 设置</a>
-    <a href="{{ url_for('change_password') }}">账号与密码</a><button type="button" class="ghost" data-about-open>使用帮助</button>
+    <a href="{{ url_for('change_password') }}">账号与密码</a>
     <a href="{{ url_for('logout') }}">退出登录</a>
+    <button type="button" class="ghost" data-about-open>帮助</button>
   </div><div class="modal-actions"><button type="button" data-ui-close>关闭</button></div>
 </dialog>
