@@ -25,7 +25,7 @@
 .teacher-ui .grading-queue-count { background: #edf3ff; }
 .teacher-more-links { display: grid; gap: 8px; margin: 16px 0; }
 .teacher-more-links a { padding: 10px 12px; border-radius: 8px; background: #f4f7fb; }
-.teacher-ui .assistant-fab, .teacher-ui .assistant-callout { display: none !important; }
+.teacher-ui .assistant-fab, .teacher-ui .assistant-callout { z-index: 70; }
 .teacher-ui .assistant-panel { top: 84px; bottom: auto; max-height: calc(100dvh - 100px); }
 .teacher-ui .ai-toast-container { top: 84px; }
 .page-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
@@ -109,7 +109,9 @@
   .teacher-ui .card { padding: 16px; }
   .teacher-ui input, .teacher-ui textarea, .teacher-ui select, .teacher-ui .prompt-body textarea { font-size: 16px; }
   .teacher-ui .grading-queue-pop { position: fixed; top: 70px; left: 12px; right: 12px; width: auto; max-width: none; }
-  .teacher-ui .assistant-panel { top: 76px; bottom: calc(76px + env(safe-area-inset-bottom)); max-height: none; width: auto; left: 12px; right: 12px; }
+  .teacher-ui .assistant-fab { bottom: calc(92px + env(safe-area-inset-bottom)); }
+  .teacher-ui .assistant-callout { bottom: calc(160px + env(safe-area-inset-bottom)); }
+  .teacher-ui .assistant-panel { top: 76px; bottom: calc(76px + env(safe-area-inset-bottom)); height: auto; max-height: none; width: auto; left: 12px; right: 12px; }
   .ui-tabs { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 5px; }
   .ui-tabs button { flex: none; }
   .ui-filter input { max-width: none; }

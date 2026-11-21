@@ -94,7 +94,7 @@ GradeLogy/
 ├── config.py            # 配置中心：路径、端口、密钥、AI 全部走环境变量
 ├── utilities/           # pdfgrade（整份 PDF 批阅）/ knowledge_graph / kg_text / roster / storage / llm
 ├── templates/           # 登录、三端页面、批阅复核页、系统维护
-├── static/              # style.css
+├── static/              # style.css 与页面交互脚本（ui.js、teacher_ui.js、assistant.js 等）
 ├── docs/                # 管理员 / 老师 / 学生操作手册
 ├── Dockerfile           # 单进程 gunicorn 多线程镜像，数据卷 /data
 ├── docker-compose.yml   # 一条命令起服务，数据落 ./data

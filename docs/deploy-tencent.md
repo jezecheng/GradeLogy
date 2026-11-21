@@ -149,7 +149,7 @@ cd /srv/gradelogy
 export GIT_COMMIT="$(git rev-parse --short HEAD)"
 export GIT_BRANCH=main
 docker compose build
-docker compose up -d
+docker compose up -d --remove-orphans
 sleep 10
 curl -fsS http://127.0.0.1:5000/healthz
 docker compose ps
@@ -163,7 +163,7 @@ http://SERVER_IP:5000/login
 
 首次登录使用 `admin / admin123`，系统会要求立即修改密码。
 
-> 当前地址是 HTTP，不是 HTTPS。测试可以使用临时数据；正式录入真实学生资料或 AI Key 前，应配置域名和 HTTPS，并将 `.env` 中的 `COOKIE_SECURE` 改为 `1`，再运行 `docker compose up -d`。
+> 当前地址是 HTTP，不是 HTTPS。测试可以使用临时数据；正式录入真实学生资料或 AI Key 前，应配置域名和 HTTPS，并将 `.env` 中的 `COOKIE_SECURE` 改为 `1`，再运行 `docker compose up -d --remove-orphans`。
 
 ## 6. 配置 GitHub Actions 自动部署
 
@@ -265,6 +265,19 @@ curl -v --max-time 5 http://127.0.0.1:5000/healthz
 ```
 
 先看日志中的第一段 Python Traceback，不要只根据最后的 `Worker failed to boot` 判断。
+
+### 提示 `Bind for 0.0.0.0:5000 failed: port is already allocated`
+
+先确认占用 5000 端口的容器或进程；不要直接清理所有 Docker 容器：
+
+```bash
+docker ps --filter publish=5000 --format 'table {{.ID}}\t{{.Names}}\t{{.Ports}}'
+sudo ss -ltnp 'sport = :5000'
+```
+
+如果占用者是本项目旧部署留下的容器，回到当前项目目录执行 `docker compose up -d --remove-orphans`，Compose 会移除同一项目下已不再定义的服务容器并启动当前服务。若另一个旧项目目录中的 GradeLogy 容器仍占用端口，请在那个旧目录执行 `docker compose down --remove-orphans`，再回来启动；该命令不带 `-v`，不会删除项目的 `data/`。若 `docker ps` 显示的是其他仍在使用的容器，先确认它可以停止，再只停止并移除列出的那个容器（`docker stop <容器名或ID>`，然后 `docker rm <容器名或ID>`）。如果是宿主机程序占用端口，应先正常停止该程序。
+
+GitHub Actions 部署也会对当前 Compose 项目使用 `--remove-orphans`。它不会擅自停止其他 Compose 项目或宿主机程序；若端口仍被外部实例占用，部署会失败并保留诊断线索，按上面的步骤处理后重新运行 Action。
 
 ### 当前终端没有 Docker 权限
 

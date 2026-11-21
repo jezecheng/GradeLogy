@@ -62,7 +62,13 @@ jobs:
             export GIT_COMMIT_DATE="$(git log -1 --format=%cd --date=format:'%Y-%m-%d %H:%M')"
             echo "=== docker compose up ($GIT_COMMIT) ==="
             docker compose build
-            docker compose up -d
+            # Remove only stale containers belonging to this Compose project.
+            # Do not forcibly remove unrelated containers that may own port 5000.
+            if ! docker compose up -d --remove-orphans; then
+              echo "Compose startup failed. Active containers publishing port 5000:"
+              docker ps --filter publish=5000 --format 'table {{.ID}}\t{{.Names}}\t{{.Ports}}' || true
+              exit 1
+            fi
             echo "=== health check ==="
             sleep 8
             curl -sf http://127.0.0.1:5000/healthz || {

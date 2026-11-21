@@ -75,7 +75,7 @@ templates
 3. 在打开的窗口中输入下面这条命令，然后按回车：
 
 ```bash
-docker compose up -d --build
+docker compose up -d --build --remove-orphans
 ```
 
 ### macOS
@@ -86,7 +86,7 @@ docker compose up -d --build
 4. 输入下面这条命令，然后按回车：
 
 ```bash
-docker compose up -d --build
+docker compose up -d --build --remove-orphans
 ```
 
 ### 等待启动完成
@@ -211,7 +211,7 @@ docker compose rm -f
 6. 在新项目文件夹中打开终端，运行：
 
 ```bash
-docker compose up -d --build
+docker compose up -d --build --remove-orphans
 ```
 
 7. 打开网页，确认账号、课程、作业和成绩都在。
@@ -244,7 +244,13 @@ docker compose logs --tail=100
 
 ### 提示 5000 端口被占用
 
-通常是旧实例仍在运行。先在 Docker Desktop 中停止旧的 `gradelogy`，再启动新实例。
+通常是旧实例仍在运行。先查看 Docker Desktop 的 **Containers** 页面，确认哪个容器发布了 `5000` 端口；也可以在终端运行：
+
+```bash
+docker ps --filter publish=5000 --format 'table {{.ID}}\t{{.Names}}\t{{.Ports}}'
+```
+
+若是旧项目文件夹启动的 GradeLogy，请在那个文件夹的终端中运行 `docker compose down --remove-orphans`，再到新项目文件夹启动。该命令不带 `-v`，不会删除项目中的 `data/`。若旧容器已不属于可用的 Compose 项目，在 Docker Desktop 中确认后只停止并删除该旧容器；不要批量删除容器、卷或数据目录。若占用端口的是其他仍在使用的应用，停止该应用或为其改用其他端口后再启动 GradeLogy。
 
 ### 忘记管理员密码或需要迁移整台电脑
 

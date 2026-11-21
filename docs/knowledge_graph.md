@@ -265,6 +265,7 @@ erDiagram
 | `kg_nodes` | 概念节点 | `UNIQUE(graph_id, normalized)`；保存定义、别名、出处和置信度 |
 | `kg_edges` | 有向关系边 | `UNIQUE(graph_id, src_id, dst_id, relation)`；保存依据、出处和置信度 |
 | `kg_audits` | 图谱体检记录 | 保存模型、建议 JSON、未通过校验的原因、应用前快照、`operation_id` 与状态 |
+| `kg_category_maps` | 分类重构记录 | 保存模型生成的分类映射、校验未通过项、应用前快照、`operation_id` 与状态 |
 | `kg_members` | 图谱协作成员 | 复合主键 `(graph_id, user_id)`；`role` 为 `manage/edit/use` |
 | `course_knowledge_graphs` | 课程与图谱多对多关联 | 复合主键 `(course_id, graph_id)` |
 
@@ -325,7 +326,7 @@ erDiagram
 | 角色 | 能力 |
 | --- | --- |
 | `manage` | 改名、删除图谱、分配/移除成员；创建者和管理员自动拥有 |
-| `edit` | 上传/删除资料、反向/删除关系、执行体检并应用建议 |
+| `edit` | 上传/重试/删除资料、反向/删除关系、执行体检并应用建议、执行分类重构并应用建议 |
 | `use` | 把自己的课程关联到该图谱 |
 | 只读 | 查看图谱、概念邻域与运营指标 |
 
@@ -344,6 +345,7 @@ erDiagram
 | GET | `/knowledge-graphs/<oid:gid>/export` | 导出指定图谱的迁移包；`scope=graph` 时仅导出知识图谱；包内不保留图谱名称 | ZIP 下载 |
 | POST | `/knowledge-graphs/import` | 导入迁移包并新建图谱；表单 `package/name`，名称由导入者指定 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/materials` | 上传一份或多份资料；表单字段 `files` | 重定向 |
+| POST | `/knowledge-graphs/materials/<oid:mid>/retry` | 重试失败资料的建图；复用成功文本块，仅重新处理未完成块 | 重定向 |
 | POST | `/knowledge-graphs/materials/<oid:mid>/delete` | 删除资料并回收其独有节点和边 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/edit` | 修改名称和说明；表单 `name/description` | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/delete` | 删除整张图谱、关联和原始文件 | 重定向 |
@@ -353,6 +355,10 @@ erDiagram
 | POST | `/knowledge-graphs/<oid:gid>/audit/<oid:aid>/apply` | 应用体检建议并保存应用前快照 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/audit/<oid:aid>/rollback` | 从快照回滚已应用的建议 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/audit/<oid:aid>/discard` | 忽略一次体检结果 | 重定向 |
+| POST | `/knowledge-graphs/<oid:gid>/categories/analyze` | 异步分析并预览分类重构建议 | 重定向 |
+| POST | `/knowledge-graphs/<oid:gid>/categories/<oid:mid>/apply` | 应用所选分类映射；表单 `selected` 为所选映射索引 | 重定向 |
+| POST | `/knowledge-graphs/<oid:gid>/categories/<oid:mid>/rollback` | 从应用前快照回滚分类重构 | 重定向 |
+| POST | `/knowledge-graphs/<oid:gid>/categories/<oid:mid>/discard` | 忽略一次待处理的分类重构建议 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/members` | 新增或调整协作老师；表单 `user_id/role` | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/members/<oid:uid>/remove` | 移除协作老师 | 重定向 |
 | POST | `/course/<oid:cid>/knowledge-graphs` | 整体替换课程关联；表单 `graph_ids` 可多选 | 重定向 |
