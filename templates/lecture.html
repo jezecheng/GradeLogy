@@ -76,13 +76,15 @@
       {% set acc = acc_by.get(s.id) %}
       {% if acc %}<span class="score" title="正确率">{{ acc }}</span>{% endif %}
       {% set sfiles = s.file_path|file_list %}
-      {% for f in sfiles %}
-      <a class="btn-link" href="{{ url_for('uploaded_file', filename=f) }}"
-         data-pdf-toggle data-pdf-src="{{ url_for('uploaded_file', filename=f) }}"
-         data-pdf-title="{{ s.display_name }} · 扫描件{% if sfiles|length > 1 %} {{ loop.index }}{% endif %}">查看扫描件{% if sfiles|length > 1 %} {{ loop.index }}{% endif %}</a>
-      {% endfor %}
-      <a class="btn-link" href="{{ url_for('submission_review', sid=s.id) }}">逐题核对</a>
-      {% if s.report_md %}<a class="btn-link" href="{{ url_for('submission_report', sid=s.id) }}">批改报告</a>{% endif %}
+      <div class="submission-actions" aria-label="{{ s.display_name }}的提交操作">
+        {% for f in sfiles %}
+        <a class="submission-action" href="{{ url_for('uploaded_file', filename=f) }}"
+           data-pdf-toggle data-pdf-src="{{ url_for('uploaded_file', filename=f) }}"
+           data-pdf-title="{{ s.display_name }} · 扫描件{% if sfiles|length > 1 %} {{ loop.index }}{% endif %}">查看扫描件{% if sfiles|length > 1 %} {{ loop.index }}{% endif %}</a>
+        {% endfor %}
+        <a class="submission-action" href="{{ url_for('submission_review', sid=s.id) }}">逐题核对</a>
+        {% if s.report_md %}<a class="submission-action" href="{{ url_for('submission_report', sid=s.id) }}">批改报告</a>{% endif %}
+      </div>
       {% if s.report_published %}
         <span class="reviewed-badge">已发布给学生</span>
       {% elif s.report_md %}
