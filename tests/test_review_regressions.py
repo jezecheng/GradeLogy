@@ -234,6 +234,17 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertIn("| 例6 | 速率常数求算 | ⚠️ |", md)
         self.assertIn("前置薄弱：初始速率", md)
 
+    def test_review_uses_manual_review_label_and_report_button_is_conditional(self):
+        html = self.client(2).get(self.url("submission_review", sid=30)).get_data(as_text=True)
+        self.assertIn("人工复核：Student", html)
+        self.assertIn('class="report-open-button"', html)
+        self.assertIn("打开评阅报告", html)
+        self.db.execute("UPDATE submissions SET report_md='' WHERE id=30")
+        self.db.commit()
+        html_without_report = self.client(2).get(
+            self.url("submission_review", sid=30)).get_data(as_text=True)
+        self.assertNotIn("打开评阅报告", html_without_report)
+
     def test_explicit_draft_hides_even_fully_reviewed_results(self):
         with mock.patch.object(a, "generate_report", return_value="draft"):
             response = self.client(2).post(self.url("submission_review_save", sid=30),

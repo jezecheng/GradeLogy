@@ -28,7 +28,7 @@
     {% if sub.report_published %}<span class="reviewed-badge">已发布</span>
     {% elif is_teacher and md %}<span class="pending-badge">草稿（学生不可见）</span>{% endif %}
     {% if is_teacher %}
-      · <a href="{{ url_for('submission_review', sid=sub.id) }}">返回逐题核对</a>
+      · <a href="{{ url_for('submission_review', sid=sub.id) }}">返回人工复核</a>
       · <a href="{{ url_for('lecture_detail', hid=hw.id) }}">返回讲次</a>
     {% endif %}
   </p>

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}逐题批改 - {{ sub.display_name }}{% endblock %}
+{% block title %}人工复核 - {{ sub.display_name }}{% endblock %}
 {% block body_class %}review-workspace{% endblock %}
 {% block content %}
 {% set summary = sub.ai_summary|fromjson %}
@@ -15,7 +15,7 @@
 {% set pdf_files = sub.file_path|file_list %}
 {% set pdf_url = url_for('uploaded_file', filename=pdf_files[0]) %}
 <p><a href="{{ url_for('lecture_detail', hid=hw.id) }}">← 返回 {{ hw.title }}</a></p>
-<h1>逐题批改：{{ sub.display_name }}</h1>
+<h1>人工复核：{{ sub.display_name }}</h1>
 <p class="muted">
   {{ sub.username }} · {{ hw.title }} · 提交于 {{ sub.created_at|localtime }}
   · <a href="{{ pdf_url }}" target="_blank" data-pdf-toggle>查看原始扫描件{% if pdf_files|length > 1 %}（1/{{ pdf_files|length }}）{% endif %}</a>
@@ -209,7 +209,7 @@
       <button type="submit" name="action" value="draft" class="ghost">保存草稿</button>
       <button type="submit" name="action" value="publish" id="review-publish" {% if not all_reviewed or job_status in ('queued','running') %}disabled{% endif %}>完成人工复核并公开逐题结果</button>
       {% if sub.report_md %}
-      <a class="btn-link ghost" href="{{ url_for('submission_report', sid=sub.id) }}">打开评阅报告</a>
+       <a class="report-open-button" href="{{ url_for('submission_report', sid=sub.id) }}">打开评阅报告</a>
       {% else %}
       <button type="submit" name="then" value="report" id="gen-report"
               class="ghost{% if not all_reviewed or job_status in ('queued','running') %} is-disabled{% endif %}"
