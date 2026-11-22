@@ -304,6 +304,9 @@ details summary { cursor: pointer; color: #1456f0; }
              border-radius: 8px; padding: 14px; margin-top: 12px; }
 .save-bar { display: flex; gap: 12px; align-items: center; margin-top: 16px; }
 .qa-item { border-bottom: 1px dashed #eef0f3; padding: 6px 0; font-size: 14px; }
+.qa-item:target { scroll-margin-top: 24px; background: #fffbe6; outline: 2px solid #f0c75e;
+                  outline-offset: 4px; border-radius: 4px; }
+.qa-stem { margin: 6px 0; white-space: pre-wrap; line-height: 1.55; }
 
 /* 逐题折叠：标题栏显示题号、AI 判定、审核状态与得分 */
 .review-item { border-bottom: 1px solid #eef0f3; }

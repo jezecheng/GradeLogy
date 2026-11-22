@@ -64,7 +64,8 @@ class TagRouteTest(unittest.TestCase):
             "INSERT INTO course_teachers(course_id,teacher_id) VALUES(?,?)",
             [(10, 2), (11, 3)])
         con.execute("INSERT INTO enrollments(course_id,student_id) VALUES(10,4)")
-        cands = [{"key": "q0", "no": "3", "max": 5, "hint": "配平"},
+        cands = [{"key": "q0", "no": "3", "max": 5, "hint": "配平",
+                  "stem": "在反应方程式中配平并说明电子转移数。"},
                  {"key": "q1", "no": "4", "max": 5, "hint": "平衡"}]
         con.execute(
             "INSERT INTO lectures(id,course_id,title,answer_pdf,answer_pages,"
@@ -654,6 +655,16 @@ class TagRouteTest(unittest.TestCase):
         self.assertIn("错 1", html)
         self.assertIn("半对 1", html)
         self.assertIn("未复习 2", html)
+
+    def test_wrong_question_link_jumps_to_visible_question_stem(self):
+        self._reveal_submission()
+        student = self.login(4)
+        html = student.get(self.url("student_wrong_questions")).get_data(as_text=True)
+        self.assertIn(f"{self.url('student_lecture_page', hid=20)}#question-40", html)
+        lecture = student.get(self.url("student_lecture_page", hid=20)).get_data(as_text=True)
+        self.assertIn('id="question-40"', lecture)
+        self.assertIn("题干", lecture)
+        self.assertIn("在反应方程式中配平并说明电子转移数。", lecture)
 
     def test_wrong_questions_hides_unpublished_results(self):
         html = self.login(4).get(

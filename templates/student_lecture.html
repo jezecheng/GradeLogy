@@ -79,11 +79,13 @@
   {% if items %}
   <h2 style="margin-top:16px">逐题批改明细</h2>
   {% for q in items %}
-  <div class="qa-item">
+  <div class="qa-item" id="question-{{ q.id }}" tabindex="-1">
     <strong>第 {{ q.no }} 题</strong>
     {% if q.verdict %}
     <span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">{{ q.verdict }}</span>
     {% endif %}
+    {% if q.stem %}<p class="qa-stem"><span class="muted small">题干</span><br>{{ q.stem }}</p>{% endif %}
+    {% if q.ocr_text %}<p class="muted small">我的作答：{{ q.ocr_text }}</p>{% endif %}
     {% if q.note %} — {{ q.note }}{% endif %}
   </div>
   {% endfor %}

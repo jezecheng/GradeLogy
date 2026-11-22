@@ -223,16 +223,26 @@ class ReviewRegressionTest(unittest.TestCase):
 
     def test_report_knowledge_graph_matrix_is_a_question_by_concept_table(self):
         md = a.build_report_md(
-            "学生", "讲次", "6月1日", [], {}, {},
+            "学生", "讲次", "6月1日", [], {},
+            {"knowledge_summary": [{"knowledge_points": ["速率常数", "初始速率"],
+                                    "questions": ["例6", "例7"],
+                                    "summary": "两题均有薄弱表现，需结合初始速率补强。"}]},
             kg_diagnosis={"matrix": {
-                "columns": [{"tag": "速率常数", "name": "速率常数"}],
+                "columns": [{"tag": "速率常数", "name": "速率常数"},
+                            {"tag": "初始速率", "name": "初始速率"}],
                 "rows": [{"no": "例6", "brief": "速率常数求算",
-                          "cells": {"速率常数": "⚠️"},
-                          "analysis": "速率常数掌握不完整；前置薄弱：初始速率"}],
+                          "cells": {"速率常数": "⚠️", "初始速率": "⚠️"},
+                          "analysis": "速率常数掌握不完整；前置薄弱：初始速率"},
+                         {"no": "例7", "brief": "放射性年代计算",
+                          "cells": {"速率常数": "🔴", "初始速率": "⚠️"},
+                          "analysis": "计算题未完成，需关注相关前置知识"}],
             }, "diagnoses": []})
-        self.assertIn("| 题号 | 题目简述 | 速率常数 | 知识点点评 |", md)
+        self.assertIn("| 题号 | 题目简述 | 速率常数 | 初始速率 | 知识点点评 |", md)
         self.assertIn("| 例6 | 速率常数求算 | ⚠️ |", md)
         self.assertIn("前置薄弱：初始速率", md)
+        self.assertIn("纵向批阅", md)
+        self.assertIn("速率常数：例6⚠️、例7🔴", md)
+        self.assertIn("纵向点评：两题均有薄弱表现", md)
 
     def test_review_uses_manual_review_label_and_report_button_is_conditional(self):
         html = self.client(2).get(self.url("submission_review", sid=30)).get_data(as_text=True)

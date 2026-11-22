@@ -4999,8 +4999,23 @@ def student_lecture_page(hid):
     revealed = bool(latest) and (latest["status"] == "已批改" or latest["report_published"])
     items = []
     if revealed:
-        items = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
-                           (latest["id"],)).fetchall()
+        items = [dict(row) for row in db.execute(
+            "SELECT * FROM questions WHERE submission_id=? ORDER BY id",
+            (latest["id"],)).fetchall()]
+        try:
+            candidates = json.loads(hw["scope_candidates"] or "[]")
+            selected = set(json.loads(hw["scope_selected"] or "[]"))
+        except (TypeError, ValueError):
+            candidates, selected = [], set()
+        stems_by_no = {}
+        for candidate in candidates:
+            if not isinstance(candidate, dict) or str(candidate.get("key")) not in selected:
+                continue
+            no, stem = str(candidate.get("no") or ""), str(candidate.get("stem") or "").strip()
+            if no and stem:
+                stems_by_no.setdefault(no, stem)
+        for item in items:
+            item["stem"] = stems_by_no.get(str(item.get("no") or ""), "")
     locked = bool(latest) and _submission_grade_active(db, latest["id"])
     return render_template("student_lecture.html", hw=hw, subs=subs, items=items,
                            revealed=revealed, locked=locked,
@@ -5614,10 +5629,12 @@ def _kg_diagnosis(db, sub):
 
 
 def _kg_diagnosis_text(diagnoses):
-    """把 KG 诊断结果转成简洁文本，注入 AI 报告 prompt。"""
+    """把 KG 诊断与题目矩阵转成证据文本，注入评阅报告 prompt。"""
     if not diagnoses:
         return ""
+    matrix = None
     if isinstance(diagnoses, dict):
+        matrix = diagnoses.get("matrix") or None
         diagnoses = diagnoses.get("diagnoses") or []
     lines = []
     for d in diagnoses:
@@ -5633,6 +5650,20 @@ def _kg_diagnosis_text(diagnoses):
         if d["untested_prereqs"]:
             line += f"\n  本次未考的前置知识：{'、'.join(x['name'] for x in d['untested_prereqs'])}"
         lines.append(line)
+    if matrix and matrix.get("columns"):
+        lines.extend([
+            "逐题知识点表现矩阵（✅=本题表现正常，⚠️=部分掌握/待关注，🔴=可能存在问题，—=本题不涉及）：",
+        ])
+        for row in matrix.get("rows") or []:
+            cells = [f"{column['name']} {row.get('cells', {}).get(column['tag'], '—')}"
+                     for column in matrix["columns"]
+                     if row.get("cells", {}).get(column["tag"], "—") != "—"]
+            detail = "；".join(cells) if cells else "无匹配知识点"
+            lines.append(f"- {row.get('no', '')}（{row.get('brief', '')}）：{detail}。"
+                         f"逐题点评：{row.get('analysis', '')}")
+        lines.append(
+            "请据此纵向比较同一/相近知识点跨题表现，只把含⚠️或🔴的知识点写入 knowledge_summary，"
+            "注明对应题号；全✅知识点跳过，相近或有前置关系的知识点可合并。")
     return "\n".join(lines)
 
 

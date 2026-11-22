@@ -59,7 +59,8 @@
     {% for q in lecture.questions %}
     <div class="wq-item">
       <div class="wq-head">
-        <strong>第 {{ q.no }} 题</strong>
+        <strong><a class="wq-question-link"
+                   href="{{ url_for('student_lecture_page', hid=lecture.id) }}#question-{{ q.id }}">第 {{ q.no }} 题 ↗</a></strong>
         <span class="verdict verdict-{{ 'wrong' if q.verdict == '错' else 'partial' }}">{{ q.verdict }}</span>
         {% for t in q.tags %}<span class="chip">{{ t }}</span>{% endfor %}
         {% if q.reviewed %}<span class="tag tag-已提交">已复习</span>{% endif %}
@@ -133,6 +134,8 @@
 .wq-item { border: 1px solid #e3e7ee; border-radius: 8px; padding: 10px 12px;
            margin: 8px 0 10px; }
 .wq-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.wq-question-link { color: inherit; text-decoration: none; }
+.wq-question-link:hover { color: #1456f0; text-decoration: underline; }
 .wq-block { margin: 6px 0; }
 .wq-label { display: block; font-size: 12px; color: #8a8f99; margin-bottom: 2px; }
 .wq-text { margin: 0; white-space: pre-wrap; word-break: break-word;
