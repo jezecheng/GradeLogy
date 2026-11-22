@@ -19,12 +19,17 @@
           <span><i class="wp-lit-mastered"></i>已掌握</span>
           <span><i class="wp-lit-context"></i>背景知识</span>
         </div>
+        <div class="wp-galaxy-views" role="group" aria-label="显示方式">
+          <button type="button" class="wp-galaxy-view is-active" data-view="chart">星图</button>
+          <button type="button" class="wp-galaxy-view" data-view="list">列表</button>
+        </div>
         <span class="kg-galaxy-hint">点击亮点可定位到下方卡片 · 滚轮缩放 · 拖拽平移</span>
       </div>
       <div class="wp-galaxy-courses" id="wp-galaxy-courses"></div>
     </div>
     <div class="kg-galaxy wp-galaxy" id="wp-galaxy" role="img"
          aria-label="薄弱知识点星图"></div>
+    <div class="wp-galaxy-list" id="wp-galaxy-list" hidden></div>
     <div class="kg-galaxy-loading" id="wp-galaxy-loading">正在点亮薄弱知识点…</div>
     <div class="kg-galaxy-error" id="wp-galaxy-error" hidden>
       星图加载失败，可先查看下方薄弱点列表。
@@ -76,9 +81,9 @@
       <span style="color:#18794e">✓对 {{ w.right_count }}</span> ·
       <span style="color:#b25e09">◐半对 {{ w.partial_count }}</span> ·
       <span style="color:#c93338">✗错 {{ w.wrong_count }}</span>
-      <span class="muted">（共 {{ w.total_count }} 题）</span>
+      <span class="muted">（共 {{ w.total_count }} 题{% if w.total_count %} · 错误率 {{ ((w.wrong_count + w.partial_count * 0.5) / w.total_count * 100) | round | int }}%{% endif %}）</span>
       {% if w.last_seen_at %}
-      <span class="muted">· 最近出现 {{ w.last_seen_at[:10] }}</span>
+      <span class="muted">· 最近出现 {{ w.last_seen_at | localtime }}</span>
       {% endif %}
     </div>
     {% if w.tags | length > 1 %}
@@ -186,6 +191,22 @@
                     color: #7dd3fc; cursor: pointer; }
 .wp-galaxy-course.is-active { background: #7dd3fc; border-color: #7dd3fc;
                               color: #082f49; font-weight: 600; }
+.wp-galaxy-views { display: inline-flex; border: 1px solid rgba(125, 211, 252, .3);
+                   border-radius: 999px; overflow: hidden; }
+.wp-galaxy-view { border: 0; background: transparent; color: #7dd3fc;
+                  padding: 3px 12px; font: inherit; font-size: 12px; cursor: pointer; }
+.wp-galaxy-view + .wp-galaxy-view { border-left: 1px solid rgba(125, 211, 252, .3); }
+.wp-galaxy-view.is-active { background: #7dd3fc; color: #082f49; font-weight: 600; }
+.wp-galaxy-list { padding: 8px 12px 14px; max-height: min(56vh, 520px); overflow: auto; }
+.wp-galaxy-list-item { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+                       padding: 8px 10px; border-bottom: 1px solid rgba(148, 163, 184, .16);
+                       color: #cbd5e1; font-size: 13px; cursor: pointer; }
+.wp-galaxy-list-item:last-child { border-bottom: 0; }
+.wp-galaxy-list-item:hover { background: rgba(56, 189, 248, .08); }
+.wp-galaxy-list-item .wp-gl-name { font-weight: 600; color: #e2e8f0; }
+.wp-galaxy-list-item .wp-gl-meta { color: #94a3b8; font-size: 12px; }
+.wp-galaxy-list-item .wp-gl-rate { margin-left: auto; font-weight: 600; }
+.wp-galaxy-list-empty { color: #94a3b8; font-size: 13px; padding: 10px; }
 .kg-galaxy-legend i.wp-lit-weak,
 .kg-galaxy-legend i.wp-lit-reviewed,
 .kg-galaxy-legend i.wp-lit-mastered,

@@ -343,10 +343,13 @@
   </form>
 </div>
 
-<div class="card">
+<div class="card" id="knowledge-graph">
   <div class="card-head">
     <h2>关联知识图谱</h2>
-    <a class="btn-link" href="{{ url_for('knowledge_graphs') }}">管理知识图谱 →</a>
+    <div>
+      <a class="btn-link" href="{{ url_for('course_tag_links', cid=course.id) }}">知识点标签绑定 →</a>
+      <a class="btn-link" href="{{ url_for('knowledge_graphs') }}">管理知识图谱 →</a>
+    </div>
   </div>
   <p class="muted small">为课程关联一个或多个学科知识图谱。关联后可在后续的知识点分析与根因诊断中作为概念和前置关系的参照；不关联不影响批改与报告。</p>
   {% if kg_options %}

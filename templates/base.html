@@ -306,7 +306,8 @@
 // 不依赖 defer 脚本的 onload（iOS Safari 下不可靠），改用轮询等待 renderMathInElement。
 (function () {
   var SELECTORS = '.report-body,.lecture-summary-body,.tag-analysis-body,'
-                + '.knowledge-graph-analysis,.markdown-body,.question-comment';
+                + '.knowledge-graph-analysis,.markdown-body,.question-comment,'
+                + '.question-stem';
   var rendered = new WeakSet();
 
   // 渲染单个元素；可重复调用，供动态内容使用

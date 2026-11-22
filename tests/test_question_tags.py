@@ -196,6 +196,92 @@ class TagStatsTest(unittest.TestCase):
         self.assertNotIn("作答习惯提醒", vertical)
 
 
+class ManualTagEditTest(unittest.TestCase):
+    """老师手动编辑标签：整组替换、清空、校验上限与长度。"""
+
+    def setUp(self):
+        self.con = sqlite3.connect(":memory:")
+        self.con.row_factory = sqlite3.Row
+        self.con.executescript(SCHEMA)
+        self.con.execute("INSERT INTO courses(id,name,teacher_id) VALUES(10,'化学',1)")
+        self.con.execute("INSERT INTO lectures(id,course_id,title) VALUES(20,10,'第一讲')")
+        self.con.executemany(
+            "INSERT INTO question_tags(lecture_id,question_key,question_no,tag,source)"
+            " VALUES(?,?,?,?,'ai')",
+            [(20, "q0", "3", "氧化还原反应"),
+             (20, "q0", "3", "离子方程式"),
+             (20, "q1", "4", "化学平衡")])
+
+    def tearDown(self):
+        self.con.close()
+
+    def _rows(self, no=None):
+        sql = "SELECT question_key,tag,source FROM question_tags WHERE lecture_id=20"
+        args = ()
+        if no:
+            sql += " AND question_no=?"
+            args = (no,)
+        return self.con.execute(sql + " ORDER BY tag", args).fetchall()
+
+    def test_split_tags_accepts_chinese_and_ascii_separators(self):
+        self.assertEqual(tags.split_tags("氧化还原反应，离子方程式, 化学平衡、电化学"),
+                         ["氧化还原反应", "离子方程式", "化学平衡", "电化学"])
+        self.assertEqual(tags.split_tags("  a  ;； b "), ["a", "b"])
+
+    def test_replace_question_tags_overwrites_only_target_question(self):
+        saved, err = tags.replace_question_tags(
+            self.con, 20, "q0", "3", "氧化还原反应，氧化剂与还原剂")
+        self.assertEqual(err, "")
+        self.assertEqual(saved, ["氧化还原反应", "氧化剂与还原剂"])
+        self.con.commit()
+        rows = self._rows("3")
+        self.assertEqual([r["tag"] for r in rows], ["氧化剂与还原剂", "氧化还原反应"])
+        self.assertTrue(all(r["source"] == "manual" for r in rows))
+        self.assertTrue(all(r["question_key"] == "" for r in rows))
+        # 其他题目的标签不受影响
+        self.assertEqual([r["tag"] for r in self._rows("4")], ["化学平衡"])
+
+    def test_replace_with_empty_clears_tags(self):
+        saved, err = tags.replace_question_tags(self.con, 20, "q0", "3", "   ")
+        self.assertEqual((saved, err), ([], ""))
+        self.con.commit()
+        self.assertEqual(self._rows("3"), [])
+
+    def test_rejects_overlong_and_too_many_tags(self):
+        _, err = tags.replace_question_tags(self.con, 20, "q0", "3", "标" * 21)
+        self.assertIn("超过 20 字", err)
+        many = "，".join(f"标签{i}" for i in range(tags.MAX_MANUAL_TAGS + 1))
+        _, err = tags.replace_question_tags(self.con, 20, "q0", "3", many)
+        self.assertIn("最多", err)
+        # 校验失败时不产生任何写入
+        self.assertEqual(len(self._rows("3")), 2)
+
+    def test_deduplicates_repeated_tags(self):
+        saved, _ = tags.replace_question_tags(self.con, 20, "q0", "3", "化学平衡，化学平衡")
+        self.assertEqual(saved, ["化学平衡"])
+
+
+class ScopeStemTest(unittest.TestCase):
+    """题目清单提取时保留完整题干，并按上限截断。"""
+
+    def test_analyze_answer_pdf_keeps_stem(self):
+        payload = json.dumps({"questions": [
+            {"no": "3", "max": 5, "hint": "配平",
+             "stem": "写出 $\\mathrm{Fe^{3+}}$ 与 $\\mathrm{Cl^-}$ 反应的离子方程式。"},
+            {"no": "4", "max": 0, "hint": "", "stem": "长" * 3000},
+            {"no": "5", "max": 0, "hint": ""},
+        ]}, ensure_ascii=False)
+        with mock.patch.object(pdfgrade, "_file_parts", return_value=(["p"], "")), \
+                mock.patch.object(pdfgrade.llm, "chat",
+                                  return_value=(payload, "stop", None)):
+            rows, err = pdfgrade.analyze_answer_pdf("a.pdf", "u", "k", "m")
+        self.assertEqual(err, "")
+        self.assertEqual(rows[0]["stem"],
+                         "写出 $\\mathrm{Fe^{3+}}$ 与 $\\mathrm{Cl^-}$ 反应的离子方程式。")
+        self.assertEqual(len(rows[1]["stem"]), pdfgrade.MAX_STEM_CHARS)
+        self.assertEqual(rows[2]["stem"], "")  # 模型漏给题干时留空，不影响范围选择
+
+
 class TagAITest(unittest.TestCase):
     def test_analyze_question_tags_normalizes_and_matches_numbers(self):
         reply = json.dumps({"questions": [
@@ -217,6 +303,23 @@ class TagAITest(unittest.TestCase):
         self.assertEqual(rows[0]["tags"], ["氧化还原反应", "电子守恒"])
         self.assertEqual(rows[1]["tags"], ["化学平衡"])
         self.assertEqual(rows[2]["tags"], [])
+
+    def test_analyze_question_tags_injects_kg_node_candidates(self):
+        captured = {}
+
+        def fake_chat(url, key, model, content, **kwargs):
+            captured["content"] = content
+            return '{"questions":[{"no":"1","tags":["氧化还原反应"]}]}', "stop", ""
+
+        with mock.patch.object(pdfgrade, "_file_parts", return_value=([], "")), \
+                mock.patch.object(pdfgrade.llm, "chat", side_effect=fake_chat):
+            rows, err = pdfgrade.analyze_question_tags(
+                "/tmp/answer.pdf", [{"no": "1"}], "u", "k", "m",
+                candidate_nodes=["氧化还原反应", "化学平衡常数"])
+        self.assertEqual(err, "")
+        prompt = captured["content"][0]["text"]
+        self.assertIn("氧化还原反应、化学平衡常数", prompt)
+        self.assertEqual(rows[0]["tags"], ["氧化还原反应"])
 
     def test_analyze_question_tags_reports_no_tags(self):
         with mock.patch.object(pdfgrade, "_file_parts", return_value=([], "")), \

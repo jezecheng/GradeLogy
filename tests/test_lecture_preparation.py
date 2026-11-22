@@ -59,7 +59,8 @@ class LecturePreparationTest(unittest.TestCase):
             "must_change_password) VALUES(2,'teacher','x','老师','teacher',1,0)")
         con.execute("INSERT INTO courses(id,name,teacher_id) VALUES(10,'化学',2)")
         con.execute("INSERT INTO course_teachers(course_id,teacher_id) VALUES(10,2)")
-        candidates = [{"key": "q0", "no": "3", "max": 5, "hint": "配平"},
+        candidates = [{"key": "q0", "no": "3", "max": 5, "hint": "配平",
+                       "stem": "写出 $\\mathrm{Fe^{3+}}$ 与 $\\mathrm{Cl^-}$ 反应的离子方程式。"},
                       {"key": "q1", "no": "4", "max": 5, "hint": "平衡"}]
         con.execute(
             "INSERT INTO lectures(id,course_id,title,answer_pdf,answer_pages,"
@@ -183,6 +184,64 @@ class LecturePreparationTest(unittest.TestCase):
             "SELECT tag FROM question_tags WHERE lecture_id=20 AND source='ai'").fetchall()
         con.close()
         self.assertEqual(tags, [])
+
+    def test_lecture_page_shows_stem_and_manual_tag_editor(self):
+        page = self.client.get(self._url("lecture_detail", hid=20)).get_data(as_text=True)
+        self.assertIn("查看题干", page)
+        self.assertIn("Fe^{3+}", page)
+        # 勾选框通过 form 属性关联，避免在表格里嵌套表单
+        self.assertIn('form="scope-form"', page)
+        self.assertIn("编辑标签", page)
+
+    def test_manual_tag_save_replaces_and_clears(self):
+        response = self._post("lecture_tag_save",
+                              {"question_key": "q1", "tags": "化学平衡，勒夏特列原理"},
+                              hid=20)
+        self.assertEqual(response.status_code, 302)
+        con = self._db()
+        rows = con.execute(
+            "SELECT tag,question_key,question_no,source FROM question_tags"
+            " WHERE lecture_id=20 AND question_no='4' ORDER BY tag").fetchall()
+        con.close()
+        self.assertEqual(sorted(r["tag"] for r in rows), sorted(["化学平衡", "勒夏特列原理"]))
+        # 手动标签按题号保存，避免题目清单重建后 q0/q1 错位
+        self.assertTrue(all(r["question_key"] == "" for r in rows))
+        self.assertTrue(all(r["source"] == "manual" for r in rows))
+
+        self._post("lecture_tag_save", {"question_key": "q1", "tags": "  "}, hid=20)
+        con = self._db()
+        left = con.execute(
+            "SELECT COUNT(*) FROM question_tags WHERE lecture_id=20"
+            " AND question_no='4'").fetchone()[0]
+        con.close()
+        self.assertEqual(left, 0)
+
+    def test_manual_tag_save_rejects_unknown_question(self):
+        self._post("lecture_tag_save", {"question_key": "q9", "tags": "化学平衡"}, hid=20)
+        con = self._db()
+        count = con.execute(
+            "SELECT COUNT(*) FROM question_tags WHERE lecture_id=20").fetchone()[0]
+        con.close()
+        self.assertEqual(count, 0)
+
+    def test_ai_regenerate_skips_duplicate_of_manual_tag(self):
+        self._post("lecture_tag_save", {"question_key": "q0", "tags": "氧化还原反应"}, hid=20)
+        queue = DeferredQueue()
+        rows = [{"key": "q0", "no": "3", "category": "化学",
+                 "tags": ["氧化还原反应", "离子方程式"]}]
+        with mock.patch.object(app_module, "_ai_task_queue", queue), \
+                mock.patch.object(app_module, "_ai_endpoint",
+                                  return_value=("http://api", "key", "model", "")), \
+                mock.patch.object(app_module, "_get_max_tokens", return_value=256), \
+                mock.patch.object(app_module, "analyze_question_tags", return_value=(rows, "")):
+            self._post("lecture_tags_generate", hid=20)
+            DeferredQueue.run(queue.pending[0])
+        con = self._db()
+        got = con.execute(
+            "SELECT tag,source FROM question_tags WHERE lecture_id=20 ORDER BY tag").fetchall()
+        con.close()
+        self.assertEqual(sorted((r["tag"], r["source"]) for r in got),
+                         sorted([("离子方程式", "ai"), ("氧化还原反应", "manual")]))
 
 
 if __name__ == "__main__":

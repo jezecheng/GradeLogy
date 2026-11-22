@@ -8,6 +8,9 @@
   var errorBox = document.getElementById('wp-galaxy-error');
   var courseBox = document.getElementById('wp-galaxy-courses');
   var note = document.getElementById('wp-galaxy-note');
+  var listBox = document.getElementById('wp-galaxy-list');
+  var viewButtons = Array.prototype.slice.call(
+    document.querySelectorAll('.wp-galaxy-view'));
 
   if (!window.echarts) {
     fail();
@@ -22,10 +25,23 @@
 
   var courses = [];
   var activeIndex = 0;
+  var viewMode = 'chart';
   var chart = null;
   var fitTimers = [];
   var roamTouched = false;
   var resizeTimer = null;
+
+  viewButtons.forEach(function (button) {
+    button.addEventListener('click', function () {
+      var mode = button.dataset.view;
+      if (!mode || mode === viewMode) return;
+      viewMode = mode;
+      viewButtons.forEach(function (item) {
+        item.classList.toggle('is-active', item === button);
+      });
+      renderActive();
+    });
+  });
 
   fetch(shell.dataset.url, { headers: { Accept: 'application/json' } })
     .then(function (response) {
@@ -40,7 +56,7 @@
         return;
       }
       renderCourses();
-      renderChart();
+      renderActive();
     })
     .catch(fail);
 
@@ -71,9 +87,12 @@
   function renderCourses() {
     if (!courseBox) return;
     courseBox.innerHTML = courses.map(function (course, index) {
+      var label = course.nodes.length
+        ? '点亮 ' + litCount(course)
+        : '未关联图谱';
       return '<button type="button" class="wp-galaxy-course'
         + (index === activeIndex ? ' is-active' : '') + '" data-index="' + index + '">'
-        + escapeHtml(course.name) + ' · 点亮 ' + litCount(course) + '</button>';
+        + escapeHtml(course.name) + ' · ' + label + '</button>';
     }).join('');
     Array.prototype.forEach.call(
       courseBox.querySelectorAll('.wp-galaxy-course'), function (button) {
@@ -82,13 +101,19 @@
           if (!isFinite(index) || index === activeIndex) return;
           activeIndex = index;
           renderCourses();
-          renderChart();
+          renderActive();
         });
       });
   }
 
   function renderNote(course) {
     if (!note) return;
+    if (!course.nodes.length) {
+      note.hidden = false;
+      note.textContent = '该课程的 ' + course.weak_total
+        + ' 个薄弱知识点都还没有关联知识图谱，已在下方列表中展示；关联图谱后会在这里点亮。';
+      return;
+    }
     if (course.unmatched > 0) {
       note.hidden = false;
       note.textContent = '另有 ' + course.unmatched
@@ -99,13 +124,79 @@
     }
   }
 
-  function renderChart() {
+  function renderActive() {
     var course = courses[activeIndex];
     if (!course) return;
     renderNote(course);
+    if (viewMode === 'list') {
+      if (box) box.hidden = true;
+      if (listBox) listBox.hidden = false;
+      renderList(course);
+      return;
+    }
+    if (listBox) listBox.hidden = true;
+    if (box) box.hidden = false;
+    renderChart();
+    if (chart) chart.resize();
+  }
+
+  function verdictSymbol(verdict) {
+    if (verdict === '对') return '✓';
+    if (verdict === '半对') return '◐';
+    return '✗';
+  }
+
+  function rateColor(rate) {
+    if (rate >= 60) return '#f87171';
+    if (rate >= 30) return '#fbbf24';
+    return '#34d399';
+  }
+
+  function renderList(course) {
+    if (!listBox) return;
+    var nodes = course.nodes.filter(function (node) {
+      return node.weak;
+    }).sort(function (a, b) {
+      return (b.wrong_count + b.partial_count) - (a.wrong_count + a.partial_count)
+        || String(a.name).localeCompare(String(b.name), 'zh');
+    });
+    if (!nodes.length) {
+      listBox.innerHTML = '<p class="wp-galaxy-list-empty">'
+        + '该课程暂无匹配到知识图谱的薄弱点，可查看下方卡片列表。</p>';
+      return;
+    }
+    listBox.innerHTML = nodes.map(function (node) {
+      var status = STATUS[node.status] || STATUS.weak;
+      var trend = (node.trend || []).map(verdictSymbol).join(' ');
+      var meta = '错 ' + node.wrong_count + ' / 半对 ' + node.partial_count
+        + ' / 共 ' + node.total_count + ' 题'
+        + (trend ? ' · 近 ' + node.trend.length + ' 次 ' + trend : '');
+      return '<div class="wp-galaxy-list-item" data-key="' + escapeHtml(node.key) + '">'
+        + '<span class="wp-gl-name">' + escapeHtml(node.name) + '</span>'
+        + '<span class="wp-gl-meta" style="color:' + status.color + '">'
+        + status.label + '</span>'
+        + '<span class="wp-gl-meta">' + escapeHtml(meta) + '</span>'
+        + '<span class="wp-gl-rate" style="color:' + rateColor(node.error_rate) + '">'
+        + '错误率 ' + node.error_rate + '%</span>'
+        + '</div>';
+    }).join('');
+    Array.prototype.forEach.call(
+      listBox.querySelectorAll('.wp-galaxy-list-item'), function (row) {
+        row.addEventListener('click', function () { focusCard(row.dataset.key); });
+      });
+  }
+
+  function renderChart() {
+    var course = courses[activeIndex];
+    if (!course) return;
     if (!chart) {
       chart = echarts.init(box, null, { renderer: 'canvas' });
       chart.on('graphRoam', function () { roamTouched = true; });
+    }
+    // 整门课都没有匹配到图谱：清空画布，只保留上方提示
+    if (!course.nodes.length) {
+      chart.clear();
+      return;
     }
 
     var lit = {};
@@ -146,6 +237,8 @@
         partialCount: node.partial_count,
         wrongCount: node.wrong_count,
         totalCount: node.total_count,
+        errorRate: node.error_rate || 0,
+        trend: node.trend || [],
         tags: node.tags || [],
         symbolSize: Math.min(30, 15 + Math.sqrt(weight + 1) * 5),
         itemStyle: {
@@ -195,8 +288,13 @@
               + '<br><span style="color:#94a3b8">背景知识 · 用于理解前后置关系</span>';
           }
           var lines = ['<b>' + escapeHtml(node.name) + '</b>',
-            node.statusLabel + ' · 错 ' + node.wrongCount + ' / 半对 '
-              + node.partialCount + ' / 共 ' + node.totalCount + ' 题'];
+            node.statusLabel + ' · 错误率 ' + node.errorRate + '%',
+            '错 ' + node.wrongCount + ' / 半对 ' + node.partialCount
+              + ' / 共 ' + node.totalCount + ' 题'];
+          if (node.trend.length) {
+            lines.push('<span style="color:#94a3b8">近 ' + node.trend.length + ' 次：'
+              + node.trend.map(verdictSymbol).join(' ') + '</span>');
+          }
           if (node.tags.length) {
             lines.push('<span style="color:#94a3b8">标签：'
               + escapeHtml(node.tags.join('、')) + '</span>');

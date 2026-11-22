@@ -3,6 +3,7 @@
 结构：课程 → 讲次（作业 + AI 批阅）/ 考试（只录分数）
 角色：admin（用户管理）/ teacher（课程、讲次、考试、批改、AI 设置）/ student（提交与查看批改）
 """
+import difflib
 import fcntl
 import hashlib
 import io
@@ -1935,13 +1936,16 @@ def _generate_question_tags(hw, keys):
     generation = _scope_analysis_generations.get(lecture_id, 0)
     course_id = hw["course_id"]
     teacher_id = g.user["id"]
+    # 优先沿用课程图谱已有节点名，减少生成后又匹配不上图谱的情况
+    kg_node_names = [n["name"] for n in _course_kg_nodes(db, course_id)]
 
     def runner(database, operation):
         try:
             rows, run_err = analyze_question_tags(
                 os.path.join(_upload_dir(), answer_pdf), picked,
                 api_url, api_key, model, pages=_page_list(answer_pages),
-                usage_hook=operation["usage_hook"], max_tokens=max_tokens)
+                usage_hook=operation["usage_hook"], max_tokens=max_tokens,
+                candidate_nodes=kg_node_names)
         except Exception as e:  # noqa: BLE001
             _finish_ai_operation(operation, "failed", str(e))
             log.exception("生成知识点标签失败 lecture=%s", lecture_id)
@@ -1966,9 +1970,18 @@ def _generate_question_tags(hw, keys):
                 return
             database.execute("DELETE FROM question_tags WHERE lecture_id=? AND source='ai'",
                              (lecture_id,))
+            # 老师手动维护的标签优先：重新标注时不再重复写入同名标签。
+            # 手动标签按题号保存（题目清单重建后 q0/q1 可能指向别的题），所以按题号比对。
+            manual = {(str(r["question_no"]), r["tag"]) for r in database.execute(
+                "SELECT question_no,tag FROM question_tags"
+                " WHERE lecture_id=? AND source='manual'", (lecture_id,))}
             count = 0
             for row in rows:
+                seen = set()
                 for tag in row["tags"]:
+                    if tag in seen or (str(row["no"]), tag) in manual:
+                        continue
+                    seen.add(tag)
                     database.execute(
                         "INSERT INTO question_tags(lecture_id,question_key,question_no,tag,"
                         "category,source) VALUES(?,?,?,?,?,'ai')",
@@ -2153,6 +2166,41 @@ def lecture_scope_save(hid):
         db.commit()
     flash(f"已保存作业范围：{len(keys)} 道题。")
     return redirect(url_for("lecture_detail", hid=hid))
+
+
+@_routes.route("/lecture/<oid:hid>/tags/save", methods=["POST"])
+@role_required("teacher")
+def lecture_tag_save(hid):
+    """按题整体替换知识点标签：新增、改名、删除都在同一张表单里提交。"""
+    db = get_db()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
+    if not hw:
+        abort(404)
+    own_course(hw["course_id"])
+    try:
+        candidates = json.loads(hw["scope_candidates"] or "[]")
+    except (TypeError, ValueError):
+        candidates = []
+    valid = {}
+    for item in candidates:
+        if isinstance(item, dict):
+            key = str(item.get("key") or item.get("no") or "").strip()
+            if key:
+                valid[key] = str(item.get("no") or "").strip()
+    key = (request.form.get("question_key") or "").strip()
+    if key not in valid:
+        flash("题目不在当前题目清单中，请刷新页面后重试。")
+        return redirect(url_for("lecture_detail", hid=hid))
+    saved, err = tag_utils.replace_question_tags(
+        db, hid, key, valid[key] or request.form.get("question_no"), request.form.get("tags"))
+    if err:
+        db.rollback()
+        flash(f"标签未保存：{err}")
+    else:
+        db.commit()
+        flash(f"第 {valid[key]} 题已保存 {len(saved)} 个知识点标签"
+              if saved else f"第 {valid[key]} 题的标签已清空")
+    return redirect(url_for("lecture_detail", hid=hid) + "#scope")
 
 
 @_routes.route("/lecture/<oid:hid>/tags/generate", methods=["POST"])
@@ -3299,6 +3347,120 @@ def course_knowledge_graphs_save(cid):
                 g.user["username"], g.user["id"], cid, sorted(chosen))
     flash(f"已关联 {len(chosen)} 张知识图谱" if chosen else "已解除全部知识图谱关联")
     return redirect(url_for("course_detail", cid=cid))
+
+
+def _course_graph_ids(db, cid):
+    return [r["graph_id"] for r in db.execute(
+        "SELECT graph_id FROM course_knowledge_graphs WHERE course_id=?", (cid,))]
+
+
+def _course_kg_nodes(db, cid):
+    """本课程关联图谱下的全部节点（含定义），用于标签绑定与匹配展示。"""
+    graph_ids = _course_graph_ids(db, cid)
+    if not graph_ids:
+        return []
+    ph = ",".join("?" * len(graph_ids))
+    return db.execute(
+        f"SELECT id,graph_id,name,definition FROM kg_nodes WHERE graph_id IN ({ph})"
+        f" ORDER BY name", graph_ids).fetchall()
+
+
+def _course_tags(db, cid):
+    return db.execute(
+        "SELECT qt.tag, COUNT(*) AS n_questions, COUNT(DISTINCT l.id) AS n_lectures"
+        " FROM question_tags qt JOIN lectures l ON l.id=qt.lecture_id"
+        " WHERE l.course_id=? GROUP BY qt.tag"
+        " ORDER BY n_questions DESC, qt.tag", (cid,)).fetchall()
+
+
+def _sync_tag_link_to_weak_points(db, cid, tag, node):
+    """老师绑定后立即刷新已有薄弱点记录，避免历史数据等下一轮复核才生效。"""
+    db.execute(
+        "UPDATE student_weak_points SET graph_id=?, node_id=?, node_name=?, definition=?"
+        " WHERE course_id=? AND tag=?",
+        (node["graph_id"], node["id"], node["name"], node["definition"] or "", cid, tag))
+
+
+@_routes.route("/course/<oid:cid>/tag-links")
+@role_required("teacher", "admin")
+def course_tag_links(cid):
+    """教师端：把课程里出现过的知识点标签手工绑定到图谱节点。"""
+    course = own_course(cid)
+    db = get_db()
+    graphs = db.execute(
+        "SELECT id,name,subject FROM knowledge_graphs WHERE id IN"
+        " (SELECT graph_id FROM course_knowledge_graphs WHERE course_id=?)"
+        " ORDER BY subject, name COLLATE NOCASE", (cid,)).fetchall()
+    nodes = _course_kg_nodes(db, cid)
+    name_to_node = {n["name"]: n for n in nodes}
+    node_by_id = {n["id"]: n for n in nodes}
+    links = _course_tag_links(db, cid)
+    rows = []
+    for r in _course_tags(db, cid):
+        auto_node, auto_type = _kg_match_node(nodes, name_to_node, r["tag"])
+        link = links.get(r["tag"])
+        bound = node_by_id.get(link["node_id"]) if link else None
+        rows.append({
+            "tag": r["tag"],
+            "n_questions": r["n_questions"],
+            "n_lectures": r["n_lectures"],
+            "auto_node": auto_node,
+            "auto_type": auto_type,
+            "bound_node_id": bound["id"] if bound else 0,
+            "effective_node": bound or auto_node,
+            "effective_is_manual": bool(bound),
+        })
+    nodes_by_graph = {}
+    for n in nodes:
+        nodes_by_graph.setdefault(n["graph_id"], []).append(n)
+    return render_template("course_tag_links.html", course=course, graphs=graphs,
+                           nodes_by_graph=nodes_by_graph, rows=rows,
+                           unmatched=sum(1 for r in rows if not r["effective_node"]))
+
+
+@_routes.route("/course/<oid:cid>/tag-links/save", methods=["POST"])
+@role_required("teacher", "admin")
+def course_tag_links_save(cid):
+    own_course(cid)
+    db = get_db()
+    node_by_id = {n["id"]: n for n in _course_kg_nodes(db, cid)}
+    valid_tags = {r["tag"] for r in _course_tags(db, cid)}
+    saved = removed = skipped = 0
+    for tag, raw in zip(request.form.getlist("tag"), request.form.getlist("node")):
+        tag = (tag or "").strip()
+        if tag not in valid_tags:
+            continue
+        try:
+            nid = int(raw)
+        except (TypeError, ValueError):
+            nid = 0
+        if not nid:
+            removed += db.execute(
+                "DELETE FROM tag_node_links WHERE course_id=? AND tag=?",
+                (cid, tag)).rowcount
+            continue
+        node = node_by_id.get(nid)
+        if not node:
+            skipped += 1
+            continue
+        db.execute(
+            "INSERT INTO tag_node_links(course_id,tag,graph_id,node_id,created_by)"
+            " VALUES(?,?,?,?,?) ON CONFLICT(course_id,tag) DO UPDATE SET"
+            " graph_id=excluded.graph_id, node_id=excluded.node_id,"
+            " created_by=excluded.created_by",
+            (cid, tag, node["graph_id"], node["id"], g.user["id"]))
+        _sync_tag_link_to_weak_points(db, cid, tag, node)
+        saved += 1
+    db.commit()
+    kg_log.info("课程标签绑定 user=%s#%s course=%s saved=%s removed=%s skipped=%s",
+                g.user["username"], g.user["id"], cid, saved, removed, skipped)
+    parts = []
+    if saved:
+        parts.append(f"已绑定 {saved} 个")
+    if removed:
+        parts.append(f"已解除 {removed} 个")
+    flash("、".join(parts) + "知识点标签" if parts else "标签绑定未发生变化")
+    return redirect(url_for("course_tag_links", cid=cid))
 
 
 # ---------- 老师：学科知识图谱 ----------
@@ -4929,35 +5091,130 @@ def generate_report(db, sub_id, teacher_id, reuse=False, operation=None):
     return md
 
 
+_TAG_NOISE_RE = re.compile(r"[\s\u3000（）()【】\[\]{}·、,，.。:：;；\"'“”‘’\-—_/]+")
+
+
+def _tag_key(text):
+    """标签/节点名归一化：忽略空白、括号、常见标点与全半角差异。"""
+    return _TAG_NOISE_RE.sub("", str(text or "")).lower()
+
+
 def _kg_match_node(nodes, name_to_node, tag):
-    """先精确匹配，再尝试模糊匹配（包含关系）。
-    知识点标签由 AI 从作业答案生成，KG 节点从教材提取，名称可能不完全一致。
-    例如标签「溶度积常数」可匹配 KG 节点「溶度积」。返回 (node, match_type)。"""
+    """知识点标签 -> 图谱节点。
+
+    顺序：原名精确 -> 归一化精确 -> 包含关系（取覆盖最长且明显更优的候选）
+    -> 字符相似度兜底。名称来自不同 AI 流程，常出现空格、括号、俗称差异。
+    返回 (node, match_type)；match_type 用于日志与教师端排查。
+    """
     node = name_to_node.get(tag)
     if node:
         return node, "exact"
+    key = _tag_key(tag)
+    if not key or len(key) < 2:
+        return None, "no_match"
     candidates = []
     for n in nodes:
-        # 标签包含节点名，或节点名包含标签（至少 2 个字符避免误匹配）
-        if len(n["name"]) >= 2 and n["name"] in tag:
-            candidates.append((n, "tag_contains_node"))
-        elif len(tag) >= 2 and tag in n["name"]:
-            candidates.append((n, "node_contains_tag"))
+        nkey = _tag_key(n["name"])
+        if not nkey or len(nkey) < 2:
+            continue
+        if nkey == key:
+            return n, "normalized"
+        if nkey in key:
+            candidates.append((n, "tag_contains_node", len(nkey) / len(key)))
+        elif key in nkey:
+            candidates.append((n, "node_contains_tag", len(key) / len(nkey)))
     if candidates:
-        # 优先选名称最长的匹配（更具体）
-        candidates.sort(key=lambda c: len(c[0]["name"]), reverse=True)
-        return candidates[0]
+        candidates.sort(key=lambda c: c[2], reverse=True)
+        best, kind, score = candidates[0]
+        # 多个候选接近时宁可不匹配，也不要把学生挂到错误的节点上
+        if len(candidates) == 1 or score - candidates[1][2] >= 0.12:
+            return best, kind
+    best_node, best_ratio = None, 0.0
+    for n in nodes:
+        nkey = _tag_key(n["name"])
+        if not nkey:
+            continue
+        ratio = difflib.SequenceMatcher(None, key, nkey).ratio()
+        if ratio > best_ratio:
+            best_node, best_ratio = n, ratio
+    if best_node is not None and best_ratio >= 0.86:
+        return best_node, "similar"
     return None, "no_match"
 
 
-def _update_student_weak_points(db, submission):
-    """人工复核保存后，基于该次提交的题目判定与知识点标签，更新学生薄弱点记录。
+def _course_tag_links(db, course_id):
+    """老师手动绑定的 标签 -> 节点，优先于自动匹配。"""
+    return {r["tag"]: {"graph_id": r["graph_id"], "node_id": r["node_id"]}
+            for r in db.execute(
+                "SELECT graph_id,node_id,tag FROM tag_node_links WHERE course_id=?",
+                (course_id,))}
 
-    - 按 question_tags.tag 聚合 questions.verdict（对/半对/错/总数）
-    - 匹配课程 KG 节点（复用 _kg_match_node），记录 node_name/definition
-    - UPSERT student_weak_points：保留学生已设 status 与 student_note；
-      已掌握(mastered)节点若本次又出现错/半对，自动回退为 weak。
-    - 计数字段覆盖为该次提交的统计；last_seen_at/source_submission_id 同步刷新。
+
+def _resolve_tag_node(db, course_id, nodes, name_to_node, tag, links=None,
+                      node_by_id=None):
+    """优先使用老师绑定，其次自动匹配；返回 (node, match_type)。"""
+    if links is None:
+        links = _course_tag_links(db, course_id)
+    link = links.get(tag)
+    if link:
+        node = (node_by_id or {}).get(link["node_id"])
+        if node is not None:
+            return node, "manual"
+    return _kg_match_node(nodes, name_to_node, tag)
+
+
+WEAK_AUTO_REVIEW_STREAK = 2
+
+
+def _weak_latest_attempts(db, student_id, course_id=None):
+    """每个 (讲次, 题号) 取学生最近一次提交的判定，并带上该讲该题的全部标签。
+
+    同一题重复提交只算一次，避免重批把累计计数放大。
+    """
+    sql = ("SELECT s.lecture_id, l.course_id, qt.tag, q.no, q.verdict "
+           "FROM submissions s JOIN lectures l ON l.id=s.lecture_id "
+           "JOIN question_tags qt ON qt.lecture_id=l.id "
+           "JOIN questions q ON q.submission_id=s.id AND q.no=qt.question_no "
+           "WHERE s.student_id=? AND q.verdict<>''")
+    params = [student_id]
+    if course_id is not None:
+        sql += " AND l.course_id=?"
+        params.append(course_id)
+    latest = {}
+    for h in db.execute(sql + " ORDER BY s.id", params):
+        item = latest.setdefault(
+            (h["lecture_id"], h["no"]),
+            {"course_id": h["course_id"], "lecture_id": h["lecture_id"],
+             "verdict": h["verdict"], "tags": set()})
+        item["verdict"] = h["verdict"]
+        item["tags"].add(h["tag"])
+    return list(latest.values())
+
+
+def _weak_tag_totals(attempts):
+    """按标签累计最近判定，返回 {tag: [对, 半对, 错, 总数]}。"""
+    totals = {}
+    for attempt in attempts:
+        for tag in attempt["tags"]:
+            row = totals.setdefault(tag, [0, 0, 0, 0])
+            row[3] += 1
+            if attempt["verdict"] == "对":
+                row[0] += 1
+            elif attempt["verdict"] == "半对":
+                row[1] += 1
+            elif attempt["verdict"] == "错":
+                row[2] += 1
+    return totals
+
+
+def _update_student_weak_points(db, submission):
+    """人工复核保存后，基于逐题判定与知识点标签更新学生薄弱点记录。
+
+    - 只有真正出现错/半对的知识点才新建记录；全对不产生薄弱点
+    - 计数写入与展示同一口径：跨讲次累计、每题最近一次判定
+    - 本次全对时累计 right_streak；连续 WEAK_AUTO_REVIEW_STREAK 讲全对
+      自动从 weak 收敛为 reviewed（mastered 仍需学生自己确认）
+    - 同一讲重复保存保留学生设定的状态；后续讲次再错才回退为 weak
     """
     if not submission:
         return
@@ -4999,8 +5256,11 @@ def _update_student_weak_points(db, submission):
         nodes = db.execute(
             f"SELECT * FROM kg_nodes WHERE graph_id IN ({ph})", gids).fetchall()
         name_to_node = {n["name"]: n for n in nodes}
+    node_by_id = {n["id"]: n for n in nodes}
+    links = _course_tag_links(db, course_id)
 
     now = db.execute("SELECT CURRENT_TIMESTAMP").fetchone()[0]
+    totals = _weak_tag_totals(_weak_latest_attempts(db, student_id, course_id))
     for tag, qnos in tag_to_qnos.items():
         wrong = partial = right = total = 0
         for qno in qnos:
@@ -5016,9 +5276,12 @@ def _update_student_weak_points(db, submission):
                 right += 1
         if total == 0:
             continue
+        # 计数字段与展示口径一致：跨讲累计、每题最近一次判定
+        right, partial_c, wrong_c, total_c = totals.get(tag, [right, partial, wrong, total])
         node = None
         if nodes:
-            node, _ = _kg_match_node(nodes, name_to_node, tag)
+            node, _ = _resolve_tag_node(db, course_id, nodes, name_to_node, tag,
+                                        links, node_by_id)
         node_name = node["name"] if node else ""
         definition = (node["definition"] or "") if node else ""
         graph_id = node["graph_id"] if node else 0
@@ -5029,26 +5292,41 @@ def _update_student_weak_points(db, submission):
             (student_id, course_id, tag)).fetchone()
         if existing:
             new_status = existing["status"]
-            # 同一讲反复重批保留学生设定的状态；后续讲次再次做错则回退为薄弱
-            if (wrong or partial) and new_status in ("reviewed", "mastered", "removed") \
-                    and (existing["status_lecture_id"] or 0) != lecture_id:
-                new_status = "weak"
-            anchor = lecture_id if new_status == "weak" else (existing["status_lecture_id"] or 0)
+            streak = existing["right_streak"] or 0
+            if wrong or partial:
+                # 同一讲反复重批保留学生设定的状态；后续讲次再次做错则回退为薄弱
+                if new_status in ("reviewed", "mastered", "removed") \
+                        and (existing["status_lecture_id"] or 0) != lecture_id:
+                    new_status = "weak"
+                streak = 0
+            else:
+                streak += 1
+                if new_status == "weak" and streak >= WEAK_AUTO_REVIEW_STREAK:
+                    new_status = "reviewed"
+            anchor = existing["status_lecture_id"] or 0
+            if new_status == "weak" or new_status != existing["status"]:
+                anchor = lecture_id
             db.execute(
                 "UPDATE student_weak_points SET graph_id=?, node_id=?, node_name=?, "
                 "definition=?, source_submission_id=?, status=?, wrong_count=?, "
-                "partial_count=?, right_count=?, total_count=?, last_seen_at=?, "
-                "status_lecture_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                "partial_count=?, right_count=?, total_count=?, right_streak=?, "
+                "last_seen_at=?, status_lecture_id=?, updated_at=CURRENT_TIMESTAMP "
+                "WHERE id=?",
                 (graph_id, node_id, node_name, definition, sub_id, new_status,
-                 wrong, partial, right, total, now, anchor, existing["id"]))
+                 wrong_c, partial_c, right, total_c, streak, now, anchor,
+                 existing["id"]))
         else:
+            # 全对不产生薄弱点：只有真实出现过错/半对才建档
+            if not (wrong_c or partial_c):
+                continue
             db.execute(
                 "INSERT INTO student_weak_points(student_id,course_id,graph_id,node_id,"
                 "tag,node_name,definition,source_submission_id,status,wrong_count,"
-                "partial_count,right_count,total_count,last_seen_at,status_lecture_id) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "partial_count,right_count,total_count,right_streak,last_seen_at,"
+                "status_lecture_id) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (student_id, course_id, graph_id, node_id, tag, node_name, definition,
-                 sub_id, "weak", wrong, partial, right, total, now, lecture_id))
+                 sub_id, "weak", wrong_c, partial_c, right, total_c, 0, now, lecture_id))
     db.commit()
 
 
@@ -5073,9 +5351,12 @@ def _kg_weakness_chains(db, course_id, weak_tag_names):
     if not nodes:
         return ""
     name_to_node = {n["name"]: n for n in nodes}
+    node_by_id = {n["id"]: n for n in nodes}
+    links = _course_tag_links(db, course_id)
     lines = []
     for tag in sorted(set(weak_tag_names)):
-        node, _ = _kg_match_node(nodes, name_to_node, tag)
+        node, _ = _resolve_tag_node(db, course_id, nodes, name_to_node, tag,
+                                    links, node_by_id)
         if not node:
             continue
         neighbors = kg_utils.concept_neighbors(db, node["graph_id"], node["id"])
@@ -5151,11 +5432,14 @@ def _kg_diagnosis(db, sub):
         f"SELECT id,graph_id,name,definition FROM kg_nodes WHERE graph_id IN ({ph})",
         graph_ids).fetchall()
     name_to_node = {n["name"]: n for n in nodes}
+    node_by_id = {n["id"]: n for n in nodes}
+    links = _course_tag_links(db, lecture["course_id"])
 
     matched_tags, unmatched_tags = [], []
     diagnoses = []
     for tag in sorted(weak_tags):
-        node, match_type = _kg_match_node(nodes, name_to_node, tag)
+        node, match_type = _resolve_tag_node(
+            db, lecture["course_id"], nodes, name_to_node, tag, links, node_by_id)
         if not node:
             unmatched_tags.append(tag)
             continue
@@ -5434,6 +5718,9 @@ def student_report(sid):
 
 
 WEAK_STATUS_RANK = {"weak": 0, "reviewed": 1, "mastered": 2}
+# 星图只保留每个薄弱点的有限邻居，并优先展示前置关系
+MAX_CONTEXT_PER_WEAK = 6
+_KG_RELATION_ORDER = {"prerequisite": 0, "contains": 1, "related": 2}
 
 
 def _weak_group_key(row):
@@ -5467,6 +5754,7 @@ def _weak_point_groups(db, student_id):
                 "last_seen_at": r["last_seen_at"] or "",
                 "right_count": 0, "partial_count": 0, "wrong_count": 0,
                 "total_count": 0, "stored": (0, 0, 0, 0), "prerequisites": [],
+                "verdicts": [],
             }
         item["tags"].append(r["tag"])
         if (r["last_seen_at"] or "") > item["last_seen_at"]:
@@ -5483,20 +5771,9 @@ def _weak_point_groups(db, student_id):
         tag_meta[(r["course_id"], r["tag"])] = key
 
     # 累计判定：同一讲同一题只取最近一次提交，避免重复提交放大计数
-    latest = {}
-    for h in db.execute(
-            "SELECT s.lecture_id, l.course_id, qt.tag, q.no, q.verdict "
-            "FROM submissions s JOIN lectures l ON l.id=s.lecture_id "
-            "JOIN question_tags qt ON qt.lecture_id=l.id "
-            "JOIN questions q ON q.submission_id=s.id AND q.no=qt.question_no "
-            "WHERE s.student_id=? AND q.verdict<>'' ORDER BY s.id",
-            (student_id,)):
-        item = latest.setdefault(
-            (h["lecture_id"], h["no"]),
-            {"course_id": h["course_id"], "verdict": h["verdict"], "tags": set()})
-        item["verdict"] = h["verdict"]
-        item["tags"].add(h["tag"])
-    for attempt in latest.values():
+    attempts = _weak_latest_attempts(db, student_id)
+    attempts.sort(key=lambda a: (a["course_id"], a["lecture_id"]))
+    for attempt in attempts:
         keys = {tag_meta.get((attempt["course_id"], tag))
                 for tag in attempt["tags"]}
         for key in keys:
@@ -5510,11 +5787,14 @@ def _weak_point_groups(db, student_id):
                 item["partial_count"] += 1
             elif attempt["verdict"] == "错":
                 item["wrong_count"] += 1
+            if attempt["verdict"] in ("对", "半对", "错"):
+                item["verdicts"].append(attempt["verdict"])
 
     for item in groups.values():
         if not item["total_count"]:
             (item["right_count"], item["partial_count"],
              item["wrong_count"], item["total_count"]) = item["stored"]
+        item["verdicts"] = item["verdicts"][-5:]
     return groups
 
 
@@ -5547,68 +5827,118 @@ def student_weak_points():
 @_routes.route("/student/weak-points/galaxy.json")
 @role_required("student")
 def student_weak_points_galaxy():
-    """薄弱点星图：只下发薄弱知识点及其一跳邻居，前端据此点亮。"""
+    """薄弱点星图：下发薄弱知识点及其有限的一跳邻居，前端据此点亮。
+
+    每个薄弱点最多保留 MAX_CONTEXT_PER_WEAK 条关系边（按前置/包含/相关排
+    序），并补全可见背景知识之间的边，避免散成孤点；节点与边均批量查询。
+    """
     db = get_db()
     groups = _weak_point_groups(db, g.user["id"])
     courses = {}
     for item in groups.values():
         course = courses.setdefault(item["course_id"], {
             "id": item["course_id"], "name": item["course_name"],
-            "weak_total": 0, "unmatched": 0, "nodes": [], "edges": [],
+            "weak_total": 0, "unmatched": 0, "context_total": 0,
+            "nodes": [], "edges": [],
         })
         course["weak_total"] += 1
         if not item["node_id"]:
             course["unmatched"] += 1
     for course_id, course in courses.items():
-        nodes = {}
-        weak_map = {}
-        edges = {}
-        for item in groups.values():
-            if item["course_id"] != course_id or not item["node_id"]:
+        weak_items = [it for it in groups.values()
+                      if it["course_id"] == course_id and it["node_id"]]
+        by_graph = {}
+        for item in weak_items:
+            by_graph.setdefault(item["graph_id"], []).append(item)
+        node_cache, weak_map, edges = {}, {}, {}
+        for graph_id, items in by_graph.items():
+            ids = sorted({it["node_id"] for it in items})
+            ph = ",".join("?" * len(ids))
+            found = {n["id"]: n for n in db.execute(
+                f"SELECT * FROM kg_nodes WHERE graph_id=? AND id IN ({ph})",
+                (graph_id, *ids))}
+            for item in items:
+                node = found.get(item["node_id"])
+                if node is None:
+                    course["unmatched"] += 1
+                    continue
+                node_cache[node["id"]] = node
+                weak_map[node["id"]] = item
+            if not found:
                 continue
-            node = db.execute(
-                "SELECT * FROM kg_nodes WHERE id=? AND graph_id=?",
-                (item["node_id"], item["graph_id"])).fetchone()
-            if node is None:
-                course["unmatched"] += 1
-                continue
-            nodes[node["id"]] = node
-            weak_map[node["id"]] = item
+            per_node = {}
             for edge in db.execute(
-                    "SELECT * FROM kg_edges WHERE graph_id=? AND (src_id=? OR dst_id=?)",
-                    (item["graph_id"], node["id"], node["id"])).fetchall():
+                    f"SELECT * FROM kg_edges WHERE graph_id=? AND"
+                    f" (src_id IN ({ph}) OR dst_id IN ({ph}))",
+                    (graph_id, *ids, *ids)):
+                if edge["src_id"] in found:
+                    per_node.setdefault(edge["src_id"], []).append(edge)
+                if edge["dst_id"] in found:
+                    per_node.setdefault(edge["dst_id"], []).append(edge)
+            context_ids = set()
+            for nid, node_edges in per_node.items():
+                node_edges.sort(key=lambda e: (
+                    _KG_RELATION_ORDER.get(e["relation"], 9), e["id"]))
+                for edge in node_edges[:MAX_CONTEXT_PER_WEAK]:
+                    edges[edge["id"]] = edge
+                    other_id = (edge["dst_id"] if edge["src_id"] == nid
+                                else edge["src_id"])
+                    if other_id not in found:
+                        context_ids.add(other_id)
+            if context_ids:
+                cph = ",".join("?" * len(context_ids))
+                for node in db.execute(
+                        f"SELECT * FROM kg_nodes WHERE graph_id=? AND id IN ({cph})",
+                        (graph_id, *sorted(context_ids))):
+                    node_cache.setdefault(node["id"], node)
+            # 背景知识之间也可能有前置/相关关系，补全可见节点内部的边
+            visible = set(found) | context_ids
+            vph = ",".join("?" * len(visible))
+            for edge in db.execute(
+                    f"SELECT * FROM kg_edges WHERE graph_id=? AND"
+                    f" src_id IN ({vph}) AND dst_id IN ({vph})",
+                    (graph_id, *visible, *visible)):
                 edges[edge["id"]] = edge
-                other_id = (edge["dst_id"] if edge["src_id"] == node["id"]
-                            else edge["src_id"])
-                if other_id not in nodes:
-                    other = db.execute(
-                        "SELECT * FROM kg_nodes WHERE id=? AND graph_id=?",
-                        (other_id, item["graph_id"])).fetchone()
-                    if other is not None:
-                        nodes[other["id"]] = other
+        # 图谱数据不完整时可能引用不存在的节点，直接丢弃这类边
+        edges = {eid: e for eid, e in edges.items()
+                 if e["src_id"] in node_cache and e["dst_id"] in node_cache}
         degree = {}
         for edge in edges.values():
             degree[edge["src_id"]] = degree.get(edge["src_id"], 0) + 1
             degree[edge["dst_id"]] = degree.get(edge["dst_id"], 0) + 1
-        course["nodes"] = [{
-            "id": node["id"], "name": node["name"],
-            "category": node["category"] or "",
-            "definition": node["definition"] or "",
-            "degree": degree.get(node["id"], 0),
-            "weak": node["id"] in weak_map,
-            "key": weak_map[node["id"]]["key"] if node["id"] in weak_map else "",
-            "status": weak_map[node["id"]]["status"] if node["id"] in weak_map else "",
-            "right_count": weak_map[node["id"]]["right_count"] if node["id"] in weak_map else 0,
-            "partial_count": weak_map[node["id"]]["partial_count"] if node["id"] in weak_map else 0,
-            "wrong_count": weak_map[node["id"]]["wrong_count"] if node["id"] in weak_map else 0,
-            "total_count": weak_map[node["id"]]["total_count"] if node["id"] in weak_map else 0,
-            "tags": weak_map[node["id"]]["tags"] if node["id"] in weak_map else [],
-        } for node in nodes.values()]
+        course["context_total"] = len(node_cache) - len(weak_map)
+        course["nodes"] = []
+        for node in node_cache.values():
+            entry = {
+                "id": node["id"], "name": node["name"],
+                "category": node["category"] or "",
+                "definition": node["definition"] or "",
+                "degree": degree.get(node["id"], 0),
+                "weak": node["id"] in weak_map,
+            }
+            item = weak_map.get(node["id"])
+            if item is not None:
+                total = item["total_count"]
+                entry.update({
+                    "key": item["key"],
+                    "status": item["status"],
+                    "right_count": item["right_count"],
+                    "partial_count": item["partial_count"],
+                    "wrong_count": item["wrong_count"],
+                    "total_count": total,
+                    "error_rate": (round((item["wrong_count"]
+                                          + item["partial_count"] * 0.5)
+                                         / total * 100) if total else 0),
+                    "trend": item["verdicts"],
+                    "tags": item["tags"],
+                })
+            course["nodes"].append(entry)
         course["edges"] = [{
             "src": edge["src_id"], "dst": edge["dst_id"],
             "relation": edge["relation"],
         } for edge in edges.values()]
-    payload = [course for course in courses.values() if course["nodes"]]
+    # 整门课都没匹配到图谱时也下发，前端需要提示「未关联图谱」而不是整门课消失
+    payload = list(courses.values())
     payload.sort(key=lambda course: (-course["weak_total"], course["name"]))
     return jsonify({"courses": payload})
 

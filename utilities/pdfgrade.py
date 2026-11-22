@@ -69,12 +69,21 @@ _MIME = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
 SCOPE_PROMPT = (
     "你是阅卷助理。附件是教师版标准答案的整页扫描图。\n"
     "请只输出 JSON，不要输出解释或代码块标记：\n"
-    '{"questions":[{"no":"题号","max":5,"hint":"这题考查什么（不超过 20 字）"}]}\n'
+    '{"questions":[{"no":"题号","max":5,"hint":"这题考查什么（不超过 20 字）",'
+    '"stem":"完整题干"}]}\n'
     "规则：\n"
     "1. 按标准答案上标注的题号顺序列出全部题目，题号保持原文写法。\n"
     "2. max 填该题满分；没有标注就填 0，不要估算。\n"
-    "3. 带小问的大题按大题合并成一条，不要把 (1)(2) 拆成多题。\n"
-    "4. 看不清的题号不要编造。")
+    "3. 带小问的大题按大题合并成一条，不要把 (1)(2) 拆成多题；小问原文留在 stem 里。\n"
+    "4. 看不清的题号不要编造。\n"
+    "5. stem 逐字保留题干原文，含已知条件、数据、选项与小问；不要改写、不要给解答、"
+    "不要写「略」或省略号。\n"
+    "6. 化学式、离子式、数学式用轻量 LaTeX，用一对 $ 包裹，"
+    "例如 $\\mathrm{Fe^{3+}}$、$\\mathrm{H_2SO_4}$、$\\Delta H<0$；纯文字不要加 $。\n"
+    "7. 单题 stem 控制在 600 字以内；超长时压缩重复描述，但条件、数据与小问不得省略。")
+
+# 模型偶尔会整段照抄整页；截断防止 scope_candidates 无限膨胀
+MAX_STEM_CHARS = 2000
 
 
 def _as_num(value, default=0.0):
@@ -296,7 +305,8 @@ def analyze_answer_pdf(answer_path, api_url, api_key, model, max_tokens=16384,
                        pages=None, usage_hook=None):
     """从教师版标准答案里识别题目清单，返回 (questions, error)。
 
-    每项为 {no, max, hint}，供老师在讲次页勾选本讲作业范围。
+    每项为 {no, max, hint, stem}，供老师在讲次页勾选本讲作业范围。
+    stem 是题干原文（可含轻量 LaTeX），供讲次页展示与后续知识点标注参考。
     pages 为要发送的页码（1 起）；为空表示整份文件。
     """
     parts, err = _file_parts(answer_path, "标准答案", pages)
@@ -322,7 +332,8 @@ def analyze_answer_pdf(answer_path, api_url, api_key, model, max_tokens=16384,
             continue
         out.append({"key": f"q{len(out)}", "no": no,
                     "max": _as_num(q.get("max"), 0.0),
-                    "hint": str(q.get("hint", "")).strip()})
+                    "hint": str(q.get("hint", "")).strip(),
+                    "stem": str(q.get("stem", "")).strip()[:MAX_STEM_CHARS]})
     if not out:
         if finish == "length":
             return None, "AI 输出被截断（题目数太多），请重试。"
@@ -373,12 +384,15 @@ def _no_token(value):
 
 def analyze_question_tags(answer_path, questions, api_url, api_key, model,
                           max_tokens=16384, pages=None, usage_hook=None,
-                          batch_size=12):
+                          batch_size=12, candidate_nodes=None):
     """给作业范围内每道题生成知识点标签，返回 (rows, error)。
 
     为避免一次请求题目过多导致输出被截断（finish_reason=length），按
     batch_size 分批调用模型，每批独立请求并把结果合并；没有生成标签的题
     也会保留（tags 为空），由调用方决定是否落库。
+
+    candidate_nodes 是课程知识图谱里的节点名，作为术语候选注入 prompt，
+    让模型优先使用图谱已有名称，减少后续「标签匹配不上节点」的情况。
     """
     listing = []
     for i, q in enumerate(questions or []):
@@ -399,6 +413,11 @@ def analyze_question_tags(answer_path, questions, api_url, api_key, model,
 
     if batch_size <= 0:
         batch_size = 12
+    node_hint = ""
+    node_names = [str(n).strip() for n in (candidate_nodes or []) if str(n).strip()]
+    if node_names:
+        node_hint = ("\n可优先使用的知识点节点（与题意一致时请直接使用这些名称）：\n"
+                     + "、".join(node_names[:120]) + "\n")
     by_no = {}
     truncated = False
     total_batches = (len(listing) + batch_size - 1) // batch_size
@@ -406,7 +425,8 @@ def analyze_question_tags(answer_path, questions, api_url, api_key, model,
         batch = listing[start:start + batch_size]
         idx = start // batch_size + 1
         content = [{"type": "text",
-                    "text": TAG_PROMPT + json.dumps(batch, ensure_ascii=False) + TAG_RULES},
+                    "text": TAG_PROMPT + json.dumps(batch, ensure_ascii=False)
+                            + node_hint + TAG_RULES},
                    {"type": "text",
                     "text": f"教师版标准答案，共 {len(parts)} 页（第 {idx}/{total_batches} 批）："}]
         content += parts

@@ -463,7 +463,7 @@ class TagRouteTest(unittest.TestCase):
         self.assertEqual(html.count('class="weak-point-card"'), 2)
         self.assertIn("合并标签：氧化还原反应、电子守恒", html)
         self.assertIn("✗错 1", html)
-        self.assertEqual(html.count("（共 1 题）"), 1)
+        self.assertEqual(html.count("（共 1 题 · 错误率 100%）"), 1)
         self.assertIn("全部 2", html)
         self.assertIn("待复习 2", html)
         self.assertIn("未匹配标签", html)
@@ -579,7 +579,8 @@ class TagRouteTest(unittest.TestCase):
             "SELECT status, wrong_count FROM student_weak_points "
             "WHERE student_id=4 AND tag='氧化还原反应'").fetchone()
         con.close()
-        self.assertEqual((row["status"], row["wrong_count"]), ("weak", 1))
+        # 计数字段与展示口径一致：第一讲错 1 次 + 第二讲错 1 次 = 2
+        self.assertEqual((row["status"], row["wrong_count"]), ("weak", 2))
 
     def test_weak_point_galaxy_lights_weak_nodes_with_neighbors(self):
         con = self._db()

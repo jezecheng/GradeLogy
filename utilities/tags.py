@@ -353,3 +353,54 @@ def render_vertical_md(result, stats=None):
         for i, item in enumerate(plan, 1):
             lines.append(f"{i}. {str(item).strip()}")
     return "\n".join(lines)
+
+
+# ---------- 手动编辑标签 ----------
+# AI 生成的标签可能不准确；老师可以按题整体替换标签集合，
+# 手动写入的行 source='manual'，AI 重新标注时不会被清掉。
+
+MAX_TAG_CHARS = 20
+MAX_MANUAL_TAGS = 8
+_TAG_SPLIT_RE = re.compile(r"[,，、;；\n]+")
+
+
+def normalize_tag(raw):
+    """去掉首尾空白与常见分隔符，压缩中间空白。"""
+    return re.sub(r"\s+", " ", str(raw or "").strip().strip("#、,，;；"))
+
+
+def split_tags(raw):
+    """把逗号/顿号/分号分隔的输入拆成标签列表（保序、去空）。"""
+    return [t for t in (normalize_tag(x) for x in _TAG_SPLIT_RE.split(str(raw or ""))) if t]
+
+
+def replace_question_tags(db, lecture_id, question_key, question_no, raw_tags):
+    """整体替换某道题的标签集合，返回 (saved_tags, error)。
+
+    老师手动编辑时以整组提交，避免多次增删产生半途状态；
+    同一题重复标签自动去重，超过上限或单标签过长直接拒绝。
+    """
+    tags = []
+    for tag in split_tags(raw_tags):
+        if len(tag) > MAX_TAG_CHARS:
+            return [], f"标签「{tag[:MAX_TAG_CHARS]}…」超过 {MAX_TAG_CHARS} 字"
+        if tag not in tags:
+            tags.append(tag)
+    if len(tags) > MAX_MANUAL_TAGS:
+        return [], f"单题最多 {MAX_MANUAL_TAGS} 个标签"
+    key = str(question_key or "").strip()
+    no = str(question_no or "").strip()
+    if not key and not no:
+        return [], "缺少题目标识"
+    if key:
+        db.execute("DELETE FROM question_tags WHERE lecture_id=?"
+                   " AND (question_key=? OR question_no=?)",
+                   (lecture_id, key, no))
+    else:
+        db.execute("DELETE FROM question_tags WHERE lecture_id=? AND question_no=?",
+                   (lecture_id, no))
+    db.executemany(
+        "INSERT INTO question_tags(lecture_id,question_key,question_no,tag,source)"
+        " VALUES(?,?,?,?,'manual')",
+        [(lecture_id, "", no, tag) for tag in tags])
+    return tags, ""

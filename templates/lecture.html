@@ -209,7 +209,7 @@
   </dialog>
 </div>
 
-<details class="card scope-card" data-fold="scope" data-force-open="{{ 0 if grade_ready else 1 }}" {% if not grade_ready and hw.answer_pdf %}open{% endif %}>
+<details class="card scope-card" id="scope" data-fold="scope" data-force-open="{{ 0 if grade_ready else 1 }}" {% if not grade_ready and hw.answer_pdf %}open{% endif %}>
   <summary class="card-head">
     <h2>作业范围</h2>
     <span class="muted small scope-summary">
@@ -268,26 +268,52 @@
   {% endif %}
 
   {% if cands %}
-  <form method="post" action="{{ url_for('lecture_scope_save', hid=hw.id) }}" id="scope-form">
-    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <table>
-      <tr><th style="width:40px">#</th><th style="width:60px">选中</th><th>题号</th><th>满分</th><th>说明</th><th>知识点标签</th></tr>
-      {% for q in cands %}
-      <tr>
-        <td class="muted">{{ loop.index }}</td>
-        <td><input type="checkbox" name="no" value="{{ q.key or q.no }}" style="width:auto"
-                   {% if not chosen or (q.key or q.no) in chosen %}checked{% endif %}></td>
-        <td>{{ q.no }}</td>
-        <td>{% if q.max %}{{ '%g'|format(q.max|float) }}{% else %}<span class="muted">—</span>{% endif %}</td>
-        <td class="muted">{{ q.hint or '—' }}</td>
-        <td>
-          {% set qtags = tag_by_key.get(q.key or q.no) or [] %}
+  <table>
+    <tr><th style="width:40px">#</th><th style="width:60px">选中</th><th>题号</th><th>满分</th><th>说明</th><th>知识点标签</th></tr>
+    {% for q in cands %}
+    {% set qkey = q.key or q.no %}
+    {% set qtags = tag_by_key.get(qkey) or [] %}
+    <tr>
+      <td class="muted">{{ loop.index }}</td>
+      <td><input type="checkbox" name="no" value="{{ qkey }}" form="scope-form" style="width:auto"
+                 {% if not chosen or qkey in chosen %}checked{% endif %}></td>
+      <td>{{ q.no }}</td>
+      <td>{% if q.max %}{{ '%g'|format(q.max|float) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td class="muted">{{ q.hint or '—' }}</td>
+      <td>
+        <div class="tag-list">
           {% for t in qtags %}<span class="tag tag-knowledge">{{ t }}</span>{% endfor %}
           {% if not qtags %}<span class="muted small">未标注</span>{% endif %}
-        </td>
-      </tr>
-      {% endfor %}
-    </table>
+        </div>
+        <details class="tag-editor">
+          <summary class="small">编辑标签</summary>
+          <form method="post" action="{{ url_for('lecture_tag_save', hid=hw.id) }}" class="tag-edit-form">
+            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+            <input type="hidden" name="question_key" value="{{ qkey }}">
+            <input type="hidden" name="question_no" value="{{ q.no }}">
+            <input type="text" name="tags" value="{{ qtags|join('，') }}"
+                   placeholder="用逗号分隔，如：氧化还原反应，离子方程式" aria-label="第 {{ q.no }} 题的知识点标签">
+            <button type="submit" class="small">保存</button>
+          </form>
+          <span class="muted small">改动会整体覆盖该题标签；清空后保存即删除全部标签。手动标签不会被 AI 重新标注覆盖。</span>
+        </details>
+      </td>
+    </tr>
+    {% if q.stem %}
+    <tr class="scope-stem-row">
+      <td></td>
+      <td colspan="5">
+        <details class="stem-details">
+          <summary class="small">查看题干</summary>
+          <div class="question-stem">{{ q.stem }}</div>
+        </details>
+      </td>
+    </tr>
+    {% endif %}
+    {% endfor %}
+  </table>
+  <form method="post" action="{{ url_for('lecture_scope_save', hid=hw.id) }}" id="scope-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <div class="save-bar">
       <button type="submit">保存作业范围</button>
       <button type="button" class="small ghost" data-scope-all="1">全选</button>
@@ -550,7 +576,8 @@
 (function () {
   var form = document.getElementById('scope-form');
   if (!form) return;
-  var boxes = form.querySelectorAll('input[name="no"]');
+  // 勾选框用 form="scope-form" 关联到下方表单（表格内不能嵌套 form）
+  var boxes = document.querySelectorAll('input[name="no"][form="scope-form"]');
   var counter = document.getElementById('scope-count');
   function refresh() {
     var n = 0;

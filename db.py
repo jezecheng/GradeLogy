@@ -241,6 +241,7 @@ CREATE TABLE IF NOT EXISTS student_weak_points(
   partial_count INTEGER DEFAULT 0,
   right_count INTEGER DEFAULT 0,
   total_count INTEGER DEFAULT 0,
+  right_streak INTEGER DEFAULT 0,
   last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
   student_note TEXT DEFAULT '',
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -248,6 +249,16 @@ CREATE TABLE IF NOT EXISTS student_weak_points(
   UNIQUE(student_id, course_id, tag));
 CREATE INDEX IF NOT EXISTS idx_swp_student_course ON student_weak_points(student_id, course_id);
 CREATE INDEX IF NOT EXISTS idx_swp_student_status ON student_weak_points(student_id, status);
+-- 老师手动把课程知识点标签绑定到图谱节点；命中后优先于自动匹配
+CREATE TABLE IF NOT EXISTS tag_node_links(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  course_id INTEGER NOT NULL,
+  tag TEXT NOT NULL,
+  graph_id INTEGER NOT NULL,
+  node_id INTEGER NOT NULL,
+  created_by INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(course_id, tag));
 -- 学生错题本的复习标记：按题记录是否已复习，与批改结果分开保存
 CREATE TABLE IF NOT EXISTS student_question_reviews(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -498,6 +509,11 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=(), reco
         con.execute(
             "UPDATE student_weak_points SET status_lecture_id=COALESCE("
             "(SELECT lecture_id FROM submissions WHERE id=source_submission_id), 0)")
+    # 轻量迁移：连续全对次数，用于「薄弱 -> 已复习」自动收敛
+    wcols = {r[1] for r in con.execute("PRAGMA table_info(student_weak_points)")}
+    if wcols and "right_streak" not in wcols:
+        con.execute("ALTER TABLE student_weak_points "
+                    "ADD COLUMN right_streak INTEGER DEFAULT 0")
     # 轻量迁移：提示词类型从「批改/报告」扩展到知识点分析，移除旧 CHECK 约束
     prompt_sql = con.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='prompts'").fetchone()

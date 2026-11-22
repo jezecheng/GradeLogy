@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}知识点标签绑定 · {{ course.name }}{% endblock %}
+{% block content %}
+<style>
+.tag-bind-select { min-width: 260px; max-width: 100%; }
+.tag-bind-hint { color: #8a8f99; font-size: 12px; margin-left: 6px; }
+.tag-bind-summary { display: flex; gap: 16px; flex-wrap: wrap; margin: 6px 0 0; }
+.tag-bind-actions { margin-top: 14px; }
+</style>
+
+<p><a href="{{ url_for('course_detail', cid=course.id) }}">← 返回课程</a></p>
+<div class="card-head">
+  <h1>知识点标签绑定</h1>
+  <a class="btn-link" href="{{ url_for('course_detail', cid=course.id) }}#knowledge-graph">课程知识图谱 →</a>
+</div>
+<p class="muted">
+  系统会先把知识点标签自动匹配到课程关联的知识图谱节点；同义、俗称或带括号的标签可能匹配不上。
+  在这里可以手工指定标签对应的节点，手动绑定优先于自动匹配，并会立即刷新已有学生的薄弱点记录。
+</p>
+
+{% if not graphs %}
+<div class="card">
+  <p class="muted">本课程还没有关联知识图谱，请先在课程页的「关联知识图谱」中关联至少一张图谱。</p>
+</div>
+{% elif not rows %}
+<div class="card">
+  <p class="muted">本课程还没有生成过知识点标签。设置作业范围并提取题目后，标签会出现在这里。</p>
+</div>
+{% else %}
+<div class="card">
+  <div class="tag-bind-summary">
+    <span class="muted small">共 {{ rows | length }} 个标签</span>
+    <span class="muted small">当前未匹配 <b class="{% if unmatched %}danger-text{% endif %}">{{ unmatched }}</b> 个</span>
+  </div>
+  <form method="post" action="{{ url_for('course_tag_links_save', cid=course.id) }}">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <table>
+      <thead>
+        <tr>
+          <th>知识点标签</th>
+          <th>出现范围</th>
+          <th>当前生效节点</th>
+          <th>绑定图谱节点</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td>
+            <span class="tag tag-knowledge">{{ row.tag }}</span>
+            <input type="hidden" name="tag" value="{{ row.tag }}">
+          </td>
+          <td class="muted small nowrap">{{ row.n_questions }} 题 · {{ row.n_lectures }} 讲</td>
+          <td>
+            {% if row.effective_node %}
+              {{ row.effective_node.name }}
+              <span class="tag-bind-hint">
+                {% if row.effective_is_manual %}手动绑定
+                {% elif row.auto_type == 'exact' %}同名自动匹配
+                {% elif row.auto_type == 'normalized' %}规范化后匹配
+                {% elif row.auto_type == 'similar' %}相似度匹配
+                {% else %}包含关系匹配{% endif %}
+              </span>
+            {% else %}
+              <span class="danger-text">未匹配</span>
+            {% endif %}
+          </td>
+          <td>
+            <select name="node" class="tag-bind-select">
+              <option value="0">
+                {% if row.auto_node %}跟随自动匹配（{{ row.auto_node.name }}）{% else %}未匹配 · 请选择节点{% endif %}
+              </option>
+              {% for g in graphs %}
+                {% set g_nodes = nodes_by_graph.get(g.id, []) %}
+                {% if g_nodes %}
+                <optgroup label="{{ g.subject }} · {{ g.name }}">
+                  {% for n in g_nodes %}
+                  <option value="{{ n.id }}" {% if n.id == row.bound_node_id %}selected{% endif %}>{{ n.name }}</option>
+                  {% endfor %}
+                </optgroup>
+                {% endif %}
+              {% endfor %}
+            </select>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div class="tag-bind-actions">
+      <button type="submit" class="small">保存绑定</button>
+    </div>
+  </form>
+</div>
+{% endif %}
+{% endblock %}
