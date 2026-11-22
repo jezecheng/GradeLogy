@@ -159,27 +159,13 @@ def register(registry, deps):
         pages = max(1, (summary["request_count"] + page_size - 1) // page_size)
         page = request.args.get("page", 1, type=int) or 1
         page = max(1, min(page, pages))
-        operation_rows = db.execute("""
-            SELECT o.*,COUNT(e.id) AS request_count,
-              SUM(CASE WHEN e.request_path<>'' OR e.response_path<>'' THEN 1 ELSE 0 END)
-                AS payload_event_count,
-              SUM(CASE WHEN e.debug_error<>'' THEN 1 ELSE 0 END) AS debug_error_count,
-              c.name AS course_name,l.title AS lecture_title,u.display_name AS student_name
-            FROM ai_operations o
-            LEFT JOIN ai_usage_events e ON e.operation_id=o.id
-            LEFT JOIN courses c ON c.id=o.course_id
-            LEFT JOIN submissions s ON s.id=o.submission_id
-            LEFT JOIN lectures l ON l.id=COALESCE(o.lecture_id,s.lecture_id)
-            LEFT JOIN users u ON u.id=s.student_id
-            WHERE o.teacher_id=?
-            GROUP BY o.id ORDER BY o.id DESC LIMIT 100
-        """, (teacher_id,)).fetchall()
         requests = db.execute("""
             SELECT e.id,e.operation_id,e.chunk_id,e.attempt,e.provider_request_id,
               COALESCE(NULLIF(e.model,''),NULLIF(o.model,''),'未指定模型') AS model,
               e.prompt_tokens,e.completion_tokens,e.total_tokens,e.cached_tokens,
               e.reasoning_tokens,e.latency_ms,e.estimated_cost,e.finish_reason,
               e.pricing_json,e.usage_json,e.status AS event_status,e.error AS event_error,
+              e.debug_error,(e.request_path<>'' OR e.response_path<>'') AS has_payload,
               e.created_at,o.operation_type,o.status AS operation_status,
               o.started_at,o.finished_at,o.error AS operation_error,c.name AS course_name,
               l.title AS lecture_title,u.display_name AS student_name
@@ -193,7 +179,7 @@ def register(registry, deps):
             ORDER BY e.id DESC LIMIT ? OFFSET ?
         """, (teacher_id, page_size, (page - 1) * page_size)).fetchall()
         return render_template("teacher_ai_usage.html", summary=summary,
-                               operations=operations, operation_rows=operation_rows,
+                               operations=operations,
                                requests=requests,
                                page=page, pages=pages, page_size=page_size,
                                ai_operation_label=ai_operation_label,

@@ -274,6 +274,20 @@ class AIDebugLogTest(unittest.TestCase):
             self.assertEqual(self.other_teacher.get(url).status_code, 404)
             self.assertEqual(self.student.get(url).status_code, 403)
 
+    def test_ai_usage_combines_request_and_operation_debug_logs(self):
+        result = self.run_chat([FakeResponse(chat_body("用量页测试"))])
+        page = self.teacher.get(self.url("teacher_ai_usage")).get_data(as_text=True)
+
+        self.assertNotIn("AI 操作与调试日志", page)
+        self.assertIn("模型请求", page)
+        self.assertEqual(page.count("<table"), 1)
+        headers = page[page.index("<thead>"):page.index("</thead>")]
+        self.assertLess(headers.index("<th>详情</th>"), headers.index("<th>调试日志</th>"))
+        self.assertIn(self.debug_url(result["operation_id"]), page)
+        self.assertIn(self.zip_url(result["operation_id"]), page)
+        self.assertIn("新窗口打开", page)
+        self.assertIn("下载 ZIP", page)
+
     def test_large_payload_preview_is_capped_but_download_is_complete(self):
         response = FakeResponse(chat_body("A" * 300000))
         result = self.run_chat([response])
