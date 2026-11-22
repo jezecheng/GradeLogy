@@ -151,6 +151,13 @@ button.ghost:hover { background: #f4f6f8; }
 
 /* 「帮助」→ 关于：版本与文档入口 */
 dialog.modal.about-modal { width: min(460px, 92vw); }
+.session-idle-dialog { width: min(440px, 92vw); }
+.session-idle-dialog:focus { outline: none; }
+.session-idle-dialog :focus-visible { outline: 3px solid #91b4ff; outline-offset: 2px; }
+.session-idle-countdown { margin: 12px 0; color: #344054; }
+.session-idle-countdown strong { margin-left: 4px; color: #b42318;
+  font-size: 24px; font-variant-numeric: tabular-nums; }
+.session-idle-dialog .modal-actions { margin-top: 16px; }
 .about-meta { display: grid; grid-template-columns: 72px 1fr; gap: 6px 12px;
               margin: 14px 0; font-size: 14px; }
 .about-meta dt { color: #8a8f99; }

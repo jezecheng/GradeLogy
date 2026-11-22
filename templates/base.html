@@ -11,7 +11,17 @@
   {% if g.user and g.user.role == 'teacher' %}<link rel="stylesheet" href="{{ url_for('static', filename='teacher_ui.css') }}">{% endif %}
   <link rel="stylesheet" href="{{ url_for('static', filename='vendor/katex/katex.min.css') }}">
 </head>
-<body class="{% if g.user and g.user.role == 'teacher' %}teacher-ui{% endif %} {% block body_class %}{% endblock %}" data-ui-user="{{ g.user.id if g.user else '' }}">
+<body class="{% if g.user and g.user.role == 'teacher' %}teacher-ui{% endif %} {% block body_class %}{% endblock %}"
+      data-ui-user="{{ g.user.id if g.user else '' }}"
+      {% if g.user %}
+      data-session-last-activity="{{ g.session_last_activity_at or '' }}"
+      data-session-idle-timeout="{{ config['SESSION_IDLE_TIMEOUT_SECONDS'] }}"
+      data-session-idle-warning="{{ config['SESSION_IDLE_WARNING_SECONDS'] }}"
+      data-session-status-url="{{ url_for('session_status') }}"
+      data-session-activity-url="{{ url_for('session_activity') }}"
+      data-session-logout-url="{{ url_for('logout') }}"
+      data-session-login-url="{{ url_for('login') }}"
+      {% endif %}>
 {% if g.user %}
 {% if g.user.role == 'teacher' %}
 {% set teacher_page_title = self.title() %}
@@ -76,6 +86,23 @@
   {% endif %}
 </main>
 
+{% if g.user %}
+<dialog id="session-idle-dialog" class="modal session-idle-dialog"
+        aria-labelledby="session-idle-title" aria-describedby="session-idle-description">
+  <h2 id="session-idle-title">登录即将过期</h2>
+  <p id="session-idle-description">因连续 {{ config['SESSION_IDLE_WARNING_SECONDS'] // 60 }} 分钟无操作，系统将在倒计时结束后退出登录。</p>
+  {% set remain_seconds = config['SESSION_IDLE_TIMEOUT_SECONDS'] - config['SESSION_IDLE_WARNING_SECONDS'] %}
+  <p class="session-idle-countdown">剩余 <strong id="session-idle-countdown" role="timer" aria-live="off">{{ '%02d:%02d'|format(remain_seconds // 60, remain_seconds % 60) }}</strong></p>
+  <p id="session-idle-message" class="muted small" aria-live="polite">
+    页面中尚未保存的内容不会自动提交，请先保存或选择继续使用。
+  </p>
+  <div class="modal-actions">
+    <button type="button" id="session-idle-continue" autofocus>继续使用</button>
+    <button type="button" class="ghost" id="session-idle-logout">退出登录</button>
+  </div>
+</dialog>
+{% endif %}
+
 <dialog id="about-dialog" class="modal about-modal">
   <h2>关于 GradeLogy</h2>
   <dl class="about-meta">
@@ -108,6 +135,7 @@
 </dialog>
 
 <script src="{{ url_for('static', filename='ui.js') }}"></script>
+{% if g.user %}<script src="{{ url_for('static', filename='session_timeout.js') }}"></script>{% endif %}
 {% if g.user and g.user.role == 'teacher' %}<script src="{{ url_for('static', filename='teacher_ui.js') }}"></script>{% endif %}
 <script src="{{ url_for('static', filename='upload_draft.js') }}"></script>
 <script>

@@ -55,6 +55,10 @@ LEGACY_TIMEZONE = _env("LEGACY_TIMEZONE", _env("TZ", "Asia/Shanghai"))
 # HTTPS 部署时设为 1：会话 Cookie 只通过加密连接传输（本地 http 访问时保持 0）
 COOKIE_SECURE = _env("COOKIE_SECURE", "0").lower() in ("1", "true", "yes", "on")
 
+# 所有角色使用同一连续空闲会话期限；服务端为最终判定依据。
+SESSION_IDLE_TIMEOUT_SECONDS = int(_env("SESSION_IDLE_TIMEOUT_SECONDS", "2700"))
+SESSION_IDLE_WARNING_SECONDS = int(_env("SESSION_IDLE_WARNING_SECONDS", "2400"))
+
 # 密钥：优先环境变量，其次读文件；都没有时由应用生成并写回文件
 SECRET_KEY = _env("SECRET_KEY", "")
 SECRET_KEY_FILE = os.path.abspath(_env("SECRET_KEY_FILE",

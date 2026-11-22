@@ -61,7 +61,9 @@ from utilities import kg_transfer
 from utilities import tags as tag_utils
 from utilities.teacher_views import workload
 from utilities.report import _overall_text, build_report_md, render_markdown
-from utilities.sessions import session_epoch, revoke_sessions
+from utilities.sessions import (
+    IDLE_TIMEOUT_SECONDS, auth_session_activity, create_auth_session,
+    revoke_auth_session, revoke_sessions, session_epoch, touch_auth_session)
 from utilities.uploads import (_student_files, _validate_upload, allowed_file, file_list,
                                save_upload, can_read_file)
 from utilities.pdfgrade import (DEFAULT_GRADE_PROMPT, DEFAULT_REPORT_PROMPT,
@@ -442,6 +444,42 @@ def csrf_token():
 # 无需 CSRF 校验的端点：健康检查（只读）、静态资源
 CSRF_EXEMPT = {"healthz", "static"}
 
+
+def _ajax_request():
+    return (request.headers.get("X-Requested-With") == "XMLHttpRequest"
+            or request.is_json
+            or request.accept_mimetypes["application/json"] > 0)
+
+
+def _unauthenticated_response(expired=False):
+    """Give fetch clients a detectable 401, while preserving normal page redirects."""
+    if expired:
+        flash("登录状态已失效，请重新登录。")
+    if _ajax_request():
+        response = jsonify(ok=False, error="登录已失效，请重新登录。")
+        response.status_code = 401
+        if expired:
+            response.headers["X-Session-Expired"] = "1"
+        return response
+    return redirect(url_for("login", next=request.path))
+
+
+def _is_document_navigation():
+    if request.method not in ("GET", "HEAD"):
+        return False
+    if request.endpoint in {"static", "healthz", "session_status", "admin_logs_tail",
+                            "grading_queue", "lecture_grading_status",
+                            "submission_grading_status", "knowledge_graph_status"}:
+        return False
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return False
+    destination = request.headers.get("Sec-Fetch-Dest")
+    if destination:
+        return destination == "document"
+    # Fetch's default Accept is */* (which is compatible with HTML but is not a
+    # document navigation); require an explicit HTML media type for old browsers.
+    return "text/html" in request.headers.get("Accept", "").lower()
+
 # ---------- 数据库 ----------
 def _migrate_upload_layout(con):
     """把旧版平铺在 uploads/ 下的附件迁入分层目录，并更新数据库引用。
@@ -626,7 +664,8 @@ def _access_log(resp):
         kg_log.debug("KG 状态轮询 path=%s status=%s ip=%s",
                      request.path, resp.status_code, request.remote_addr or "-")
         return resp
-    if request.endpoint in ("static", "healthz", "admin_logs_tail"):
+    if request.endpoint in ("static", "healthz", "admin_logs_tail",
+                            "session_status", "session_activity"):
         return resp
     started = getattr(g, "request_started", None)
     cost_ms = (time.perf_counter() - started) * 1000 if started else 0.0
@@ -671,17 +710,51 @@ def security_headers(resp):
 # ---------- 登录与权限 ----------
 @_routes.before_request
 def load_user():
+    g.session_expired = False
+    g.session_last_activity_at = None
     uid = session.get("uid")
     g.user = None
     if uid:
         if session.get("auth_epoch", "0") != session_epoch(cfg.get("DATA_DIR")):
             session.clear()
+            g.session_expired = True
             return
         g.user = get_db().execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
         if g.user is None or not g.user["active"]:
             # 账号被删除或停用后，已登录的会话立即失效
             session.clear()
             g.user = None
+            g.session_expired = True
+            return
+
+        db = get_db()
+        sid = session.get("sid")
+        timeout = int(current_app.config.get(
+            "SESSION_IDLE_TIMEOUT_SECONDS", IDLE_TIMEOUT_SECONDS))
+        if sid:
+            last_activity = auth_session_activity(db, sid, uid, idle_timeout=timeout)
+            if last_activity is None:
+                session.clear()
+                g.user = None
+                g.session_expired = True
+                return
+        else:
+            # 一次性兼容旧版签名 Cookie：升级后的首个有效请求开始记录服务端空闲时间。
+            # 之后每个会话都必须有服务端记录；缺失/撤销的 sid 不会被重新签发。
+            sid, last_activity = create_auth_session(db, uid, idle_timeout=timeout)
+            db.commit()
+            session["sid"] = sid
+            session.modified = True
+
+        if _is_document_navigation():
+            last_activity = touch_auth_session(db, sid, uid)
+            if last_activity is None:
+                session.clear()
+                g.user = None
+                g.session_expired = True
+                return
+            session.modified = True
+        g.session_last_activity_at = last_activity
 
 
 @_routes.before_request
@@ -705,14 +778,28 @@ def csrf_protect():
     """所有写操作必须带本次会话的 CSRF token（表单隐藏域 _csrf 或请求头 X-CSRF-Token）。"""
     if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
         return None
+    if getattr(g, "session_expired", False):
+        return _unauthenticated_response(expired=True)
     if request.endpoint in CSRF_EXEMPT:
         return None
+    if request.endpoint == "session_activity" and not g.user:
+        return _unauthenticated_response(expired=True)
     expect = session.get("_csrf") or ""
     got = request.headers.get("X-CSRF-Token") or request.form.get("_csrf") or ""
     if not expect or not got or not secrets.compare_digest(expect, got):
         security_log.warning("CSRF 校验失败 method=%s path=%s ip=%s",
                              request.method, request.path, request.remote_addr)
         abort(400, description="页面已过期或请求来源不可信，请刷新页面后重试。")
+    # 只有通过 CSRF 验证的用户写操作才续期；匿名登录和无效请求不算用户活动。
+    if g.user and request.endpoint != "session_activity":
+        last_activity = touch_auth_session(get_db(), session.get("sid"), g.user["id"])
+        if last_activity is None:
+            session.clear()
+            g.user = None
+            g.session_expired = True
+            return _unauthenticated_response(expired=True)
+        g.session_last_activity_at = last_activity
+        session.modified = True
     return None
 
 
@@ -731,7 +818,7 @@ def login_required(f):
     @wraps(f)
     def wrapper(*a, **kw):
         if not g.user:
-            return redirect(url_for("login", next=request.path))
+            return _unauthenticated_response(expired=getattr(g, "session_expired", False))
         return f(*a, **kw)
     return wrapper
 
@@ -741,7 +828,7 @@ def role_required(*roles):
         @wraps(f)
         def wrapper(*a, **kw):
             if not g.user:
-                return redirect(url_for("login"))
+                return _unauthenticated_response(expired=getattr(g, "session_expired", False))
             if g.user["role"] not in roles:
                 abort(403)
             return f(*a, **kw)
@@ -795,12 +882,17 @@ def login():
             flash("该账号已停用，请联系管理员")
         elif user and check_password_hash(user["password_hash"], password):
             session.clear()
+            db = get_db()
+            sid, last_activity = create_auth_session(
+                db, user["id"],
+                idle_timeout=int(current_app.config["SESSION_IDLE_TIMEOUT_SECONDS"]))
             session["uid"] = user["id"]
             session["auth_epoch"] = session_epoch(cfg.get("DATA_DIR"))
-            session.permanent = True  # 启用 8 小时空闲过期
-            db = get_db()
+            session["sid"] = sid
+            session.permanent = True
             db.execute("UPDATE users SET last_login_at=CURRENT_TIMESTAMP WHERE id=?", (user["id"],))
             db.commit()
+            g.session_last_activity_at = last_activity
             user_log.info("登录成功 user=%s#%s role=%s ip=%s",
                           username, user["id"], user["role"], request.remote_addr or "-")
             nxt = _safe_next(request.args.get("next"))
@@ -810,11 +902,42 @@ def login():
     return render_template("login.html")
 
 
+@_routes.route("/session/status", methods=["GET"])
+@login_required
+def session_status():
+    """恢复前台/休眠标签时校验会话，不把状态轮询视为用户活动。"""
+    return jsonify(ok=True,
+                   lastActivityAt=g.session_last_activity_at,
+                   idleTimeoutSeconds=current_app.config["SESSION_IDLE_TIMEOUT_SECONDS"],
+                   warningSeconds=current_app.config["SESSION_IDLE_WARNING_SECONDS"])
+
+
+@_routes.route("/session/activity", methods=["POST"])
+@login_required
+def session_activity():
+    """仅由用户输入事件或“继续使用”操作调用，服务器确认后续期。"""
+    last_activity = touch_auth_session(get_db(), session.get("sid"), g.user["id"])
+    if last_activity is None:
+        session.clear()
+        g.user = None
+        g.session_expired = True
+        return _unauthenticated_response(expired=True)
+    session.modified = True
+    g.session_last_activity_at = last_activity
+    return jsonify(ok=True,
+                   lastActivityAt=last_activity,
+                   idleTimeoutSeconds=current_app.config["SESSION_IDLE_TIMEOUT_SECONDS"],
+                   warningSeconds=current_app.config["SESSION_IDLE_WARNING_SECONDS"])
+
+
 @_routes.route("/logout")
 def logout():
     if g.user:
         user_log.info("退出登录 user=%s#%s ip=%s",
                       g.user["username"], g.user["id"], request.remote_addr or "-")
+        revoke_auth_session(get_db(), session.get("sid"))
+    if request.args.get("reason") == "idle":
+        flash("因连续无操作，已自动退出登录。")
     session.clear()
     return redirect(url_for("login"))
 
@@ -6117,10 +6240,19 @@ def create_app(config_overrides=None):
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     app.config["SESSION_COOKIE_SECURE"] = cfg.COOKIE_SECURE
-    # 会话空闲 8 小时过期：每次请求自动续期，长时间不操作需重新登录
-    app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=8)
-    app.config["SESSION_REFRESH_EACH_REQUEST"] = True
     app.config.update(overrides)
+    app.config.setdefault("SESSION_IDLE_TIMEOUT_SECONDS", cfg.SESSION_IDLE_TIMEOUT_SECONDS)
+    app.config.setdefault("SESSION_IDLE_WARNING_SECONDS", cfg.SESSION_IDLE_WARNING_SECONDS)
+    idle_timeout = int(app.config["SESSION_IDLE_TIMEOUT_SECONDS"])
+    idle_warning = int(app.config["SESSION_IDLE_WARNING_SECONDS"])
+    if idle_timeout <= 0 or idle_warning < 0 or idle_warning >= idle_timeout:
+        raise ValueError(
+            "SESSION_IDLE_TIMEOUT_SECONDS must be positive and "
+            "SESSION_IDLE_WARNING_SECONDS must be smaller")
+    app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(
+        seconds=idle_timeout)
+    # Cookie 只在已验证的活动请求上滚动，后台轮询不能延长浏览器会话。
+    app.config["SESSION_REFRESH_EACH_REQUEST"] = False
     app.teardown_appcontext(close_db)
 
     app.url_map.gradelogy_signer = URLSafeSerializer(app.config["SECRET_KEY"], salt="gradelogy-url-id")
