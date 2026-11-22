@@ -293,14 +293,14 @@
       <button type="button" class="small ghost" data-scope-all="1">全选</button>
       <button type="button" class="small ghost" data-scope-all="0">全不选</button>
       <span class="muted small">至少勾选一道题；当前已选 <b id="scope-count">{{ cands|length if not chosen else chosen|length }}</b> 题 ·
-        保存时会分批调用 AI 为勾选题目生成知识点标签（题目越多耗时越长）</span>
+        保存范围只影响 AI 批阅题目，不会调用 AI 或生成标签</span>
     </div>
   </form>
   <div class="save-bar" style="margin-top:6px">
     <form method="post" action="{{ url_for('lecture_tags_generate', hid=hw.id) }}" class="tag-form">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-      <button type="submit" class="small ghost">重新生成知识点标签</button>
-      <span class="muted small">更换答案页或标签不理想时使用；只标注当前作业范围内的题目。</span>
+      <button type="submit" class="small ghost">生成/重新生成知识点标签</button>
+      <span class="muted small">保存作业范围不会调用 AI；需要生成或更新标签时，请单独点击此按钮。只标注当前作业范围内的题目。</span>
     </form>
   </div>
   {% else %}
@@ -566,7 +566,7 @@
     });
   });
   form.addEventListener('submit', function () {
-    busyOn(form.querySelector('button[type="submit"]'), '保存并标注中…');
+    busyOn(form.querySelector('button[type="submit"]'), '保存中…');
   });
 })();
 // 知识点标签与分析：都会调用 AI，按钮进入处理中状态；已有结果时覆盖先确认

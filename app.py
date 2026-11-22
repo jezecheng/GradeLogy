@@ -1855,8 +1855,11 @@ def lecture_answer(hid):
         except ValueError as e:
             flash(str(e))
             return redirect(url_for("lecture_detail", hid=hid))
-        db.execute("UPDATE lectures SET answer_pdf=?, answer_pages='' WHERE id=?", (name, hid))
-        db.commit()
+        with _scope_analysis_lock:
+            _advance_scope_analysis_generation(hid)
+            db.execute("UPDATE lectures SET answer_pdf=?, answer_pages='', "
+                       "scope_candidates='', scope_selected='' WHERE id=?", (name, hid))
+            db.commit()
     return redirect(url_for("lecture_detail", hid=hid))
 
 
@@ -1867,6 +1870,18 @@ def _answer_pages_note(picked, total):
     if len(picked) == total:
         return f"已保存页码：全部 {total} 页（与不限制相同）。"
     return f"已保存页码：{len(picked)}/{total} 页，只发送这些页。"
+
+
+# 同一讲的答案/页码每次变更都会推进代次。队列任务写回时同时校验代次和
+# 数据库中的答案配置，避免任务迟到，或配置改回原值后仍写入过期清单。
+_scope_analysis_lock = threading.RLock()
+_scope_analysis_generations = {}
+
+
+def _advance_scope_analysis_generation(lecture_id):
+    _scope_analysis_generations[lecture_id] = (
+        _scope_analysis_generations.get(lecture_id, 0) + 1)
+    return _scope_analysis_generations[lecture_id]
 
 
 def _course_label(course):
@@ -1968,9 +1983,23 @@ def lecture_answer_pages(hid):
         return redirect(url_for("lecture_detail", hid=hid))
     picked = sorted({int(v) for v in request.form.getlist("page")
                      if v.isdigit() and 1 <= int(v) <= total})
-    db.execute("UPDATE lectures SET answer_pages=? WHERE id=?",
-               (",".join(str(p) for p in picked), hid))
-    db.commit()
+    stored_pages = ",".join(str(p) for p in picked)
+    with _scope_analysis_lock:
+        current = db.execute(
+            "SELECT answer_pdf,answer_pages FROM lectures WHERE id=?", (hid,)).fetchone()
+        if not current or current["answer_pdf"] != hw["answer_pdf"]:
+            flash("教师版答案已更新，请重新选择页码。")
+            return redirect(url_for("lecture_detail", hid=hid))
+        changed = (current["answer_pages"] or "") != stored_pages
+        if changed:
+            generation = _advance_scope_analysis_generation(hid)
+            db.execute("UPDATE lectures SET answer_pages=?, scope_candidates='', "
+                       "scope_selected='' WHERE id=?", (stored_pages, hid))
+        else:
+            generation = _scope_analysis_generations.get(hid, 0)
+            db.execute("UPDATE lectures SET answer_pages=? WHERE id=?",
+                       (stored_pages, hid))
+        db.commit()
     note = _answer_pages_note(picked, total)
     teacher_id = g.user["id"]
     if get_setting(teacher_id, "ai_demo") == "1":
@@ -2003,15 +2032,28 @@ def lecture_answer_pages(hid):
             _finish_ai_operation(operation, "failed", err)
             return
         if not err:
-            database.execute("UPDATE lectures SET scope_candidates=?, scope_selected='' WHERE id=?",
-                             (json.dumps(questions, ensure_ascii=False), hid))
-            _finish_ai_operation(operation, "success")
+            with _scope_analysis_lock:
+                current_generation = _scope_analysis_generations.get(hid, 0)
+                cursor = None
+                if current_generation == generation:
+                    cursor = database.execute(
+                        "UPDATE lectures SET scope_candidates=?, scope_selected='' "
+                        "WHERE id=? AND COALESCE(answer_pdf,'')=? "
+                        "AND COALESCE(answer_pages,'')=?",
+                        (json.dumps(questions, ensure_ascii=False), hid,
+                         answer_pdf or "", stored_pages))
+                if cursor is None or cursor.rowcount != 1:
+                    _finish_ai_operation(
+                        operation, "failed", "答案文件或页码已更改，已忽略过期题目清单")
+                    return
+                _finish_ai_operation(operation, "success")
             log.info("作业范围题目清单生成成功 lecture=%s 题目=%s", hid, len(questions))
 
     log.info("分析作业范围 lecture=%s answer_pdf=%s pages=%s", hid, answer_pdf, picked)
     operation, queue_err = _ai_task_queue.submit(
         teacher_id, "scope_analyze", model=model, runner=runner,
-        course_id=course_id, lecture_id=hid, dedup_key=f"scope_analyze|{hid}")
+        course_id=course_id, lecture_id=hid,
+        dedup_key=f"scope_analyze|{hid}|{generation}")
     if queue_err:
         flash(f"{note} {queue_err}")
     else:
@@ -2074,14 +2116,7 @@ def lecture_scope_save(hid):
     db.execute("UPDATE lectures SET scope_selected=? WHERE id=?",
                (json.dumps(keys, ensure_ascii=False), hid))
     db.commit()
-    # 保存范围时顺带为勾选的题目生成知识点标签，供后续横向/纵向薄弱点分析
-    count, err = _generate_question_tags(hw, keys)
-    if err:
-        flash(f"已保存作业范围：{len(keys)} 道题；知识点标签未生成：{err}")
-    elif count is None:
-        flash(f"已保存作业范围：{len(keys)} 道题；知识点标签已加入后台队列。")
-    else:
-        flash(f"已保存作业范围：{len(keys)} 道题，已生成 {count} 个知识点标签")
+    flash(f"已保存作业范围：{len(keys)} 道题。")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
