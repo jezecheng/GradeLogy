@@ -222,9 +222,30 @@ class AssistantToolsTest(unittest.TestCase):
         self.assertEqual(overview["scored"], 1)
         self.assertEqual(overview["absent"], 1)
         self.assertEqual(overview["pending"], 0)
+        scores = assistant.exam_scores(1, "线性代数", "期中")
+        self.assertEqual(scores["scored"], 1)
+        self.assertEqual(scores["average"], 0.0)
+        by_student = {row["student"]: row for row in scores["students"]}
+        self.assertEqual(by_student["李一"]["status"], "已录入")
+        self.assertEqual(by_student["王二"]["status"], "缺考")
         mine = assistant.my_exam_scores(3)["exams"][0]
         self.assertEqual(mine["status"], "缺考")
         self.assertEqual(mine["score"], "—")
+
+    def test_comment_only_exam_entry_is_recorded_but_not_counted_as_scored(self):
+        with sqlite3.connect(assistant.DB_PATH) as con:
+            con.execute("UPDATE exam_scores SET status='recorded',comment='说明' "
+                         "WHERE exam_id=40 AND student_id=3")
+        overview = assistant.list_exams(1, "线性代数")["exams"][0]
+        self.assertEqual(overview["recorded"], 2)
+        self.assertEqual(overview["scored"], 1)
+        self.assertEqual(overview["pending"], 0)
+        score_data = assistant.exam_scores(1, "线性代数", "期中")
+        self.assertEqual(score_data["recorded"], 2)
+        self.assertEqual(score_data["scored"], 1)
+        student_row = assistant.my_exam_scores(3)["exams"][0]
+        self.assertEqual(student_row["status"], "已录入评语")
+        self.assertEqual(student_row["score"], "已录入评语（暂无分数）")
 
     def test_student_cannot_read_other_course(self):
         self.assertIn("error", assistant.my_lectures(2, "别的课"))

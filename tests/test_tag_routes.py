@@ -108,32 +108,23 @@ class TagRouteTest(unittest.TestCase):
         con.close()
         return [(r["question_no"], r["tag"]) for r in rows]
 
-    def test_scope_save_generates_tags_and_replaces_old(self):
-        ai_rows = [
-            {"key": "q0", "no": "3", "category": "化学计算",
-             "tags": ["氧化还原反应", "电子守恒"]},
-            {"key": "q1", "no": "4", "category": "", "tags": ["化学平衡"]},
-        ]
-        with mock.patch.object(app_module, "_ai_endpoint",
-                               return_value=("http://api", "key", "model", "")), \
-                mock.patch.object(app_module, "analyze_question_tags",
-                                  return_value=(ai_rows, "")) as ai:
+    def test_scope_save_does_not_call_ai_or_replace_existing_tags(self):
+        with mock.patch.object(app_module, "_generate_question_tags") as tagging:
             resp = self._post("lecture_scope_save", {"no": ["q0", "q1"]}, hid=20)
         self.assertEqual(resp.status_code, 302)
-        self.assertEqual(self._tags(), [
-            ("3", "氧化还原反应"), ("3", "电子守恒"), ("4", "化学平衡")])
+        self.assertEqual(self._tags(), [("3", "氧化还原反应")])
         con = self._db()
         selected = json.loads(con.execute(
             "SELECT scope_selected FROM lectures WHERE id=20").fetchone()[0])
         con.close()
         self.assertEqual(selected, ["q0", "q1"])
-        ai.assert_called_once()
+        tagging.assert_not_called()
 
-    def test_scope_save_keeps_scope_when_tagging_fails(self):
+    def test_scope_save_keeps_previous_tags_without_implicit_ai(self):
         with mock.patch.object(app_module, "_ai_endpoint",
                                return_value=("http://api", "key", "model", "")), \
                 mock.patch.object(app_module, "analyze_question_tags",
-                                  return_value=(None, "AI 标注失败：超时")):
+                                  return_value=(None, "AI 标注失败：超时")) as ai:
             resp = self._post("lecture_scope_save", {"no": ["q0"]}, hid=20)
         self.assertEqual(resp.status_code, 302)
         con = self._db()
@@ -141,8 +132,9 @@ class TagRouteTest(unittest.TestCase):
             "SELECT scope_selected FROM lectures WHERE id=20").fetchone()[0])
         con.close()
         self.assertEqual(selected, ["q0"])
-        # 失败时保留旧标签，便于重试前继续展示
+        # 保存范围本身不触发 AI，已有标签保持不变。
         self.assertEqual(self._tags(), [("3", "氧化还原反应")])
+        ai.assert_not_called()
 
     def test_tags_generate_requires_saved_scope(self):
         con = self._db()

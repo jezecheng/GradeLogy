@@ -338,6 +338,8 @@ def list_exams(teacher_id, course):
         rows = _rows(db.execute("""
             SELECT x.id, x.title, x.description, x.exam_date, x.full_score,
               (SELECT COUNT(*) FROM exam_scores s
+                 WHERE s.exam_id=x.id AND s.status='recorded') AS recorded,
+              (SELECT COUNT(*) FROM exam_scores s
                  WHERE s.exam_id=x.id AND s.status='recorded' AND TRIM(s.score)<>'') AS scored,
               (SELECT COUNT(*) FROM exam_scores s
                  WHERE s.exam_id=x.id AND s.status='absent') AS absent
@@ -345,7 +347,7 @@ def list_exams(teacher_id, course):
             ORDER BY x.exam_date, x.id""", (c["id"],)))
         for r in rows:
             r["enrolled"] = enrolled
-            r["pending"] = max(0, enrolled - r["scored"] - r["absent"])
+            r["pending"] = max(0, enrolled - r["recorded"] - r["absent"])
             r["missing"] = r["pending"]  # 兼容旧工具字段；明确缺考不再混入待录入。
         return {"course": c["name"], "enrolled": enrolled, "exams": rows}
     finally:
@@ -369,14 +371,22 @@ def exam_scores(teacher_id, course, exam):
             FROM enrollments e JOIN users u ON u.id=e.student_id
             LEFT JOIN exam_scores s ON s.exam_id=? AND s.student_id=u.id
             WHERE e.course_id=? ORDER BY u.display_name""", (x["id"], c["id"])))
+        for row in rows:
+            if row["score_status"] == "absent":
+                row["status"] = "缺考"
+            elif row["score_status"] == "recorded":
+                row["status"] = "已录入" if row["score"] else "已录入评语"
+            else:
+                row["status"] = "待录入"
         nums = [n for n in (_score_number(r["score"]) for r in rows) if n is not None]
         absent = sum(1 for r in rows if r["score_status"] == "absent")
-        pending = max(0, len(rows) - len(nums) - absent)
+        recorded = sum(1 for r in rows if r["score_status"] == "recorded")
+        pending = sum(1 for r in rows if r["score_status"] == "pending")
         return {
             "course": c["name"], "exam": x["title"], "exam_date": x["exam_date"],
             "full_score": x["full_score"], "enrolled": len(rows),
             "scored": len(nums),
-            "absent": absent, "pending": pending,
+            "recorded": recorded, "absent": absent, "pending": pending,
             "average": round(sum(nums) / len(nums), 1) if nums else None,
             "highest": max(nums) if nums else None,
             "lowest": min(nums) if nums else None,
@@ -982,7 +992,7 @@ def my_exam_scores(student_id, course=None):
                 r["status"] = "缺考"
                 r["score"] = "—"
             elif r["score_status"] == "recorded":
-                r["status"] = "已录入"
+                r["status"] = "已录入" if r["score"] else "已录入评语"
                 r["score"] = r["score"] or "已录入评语（暂无分数）"
             else:
                 r["status"] = "待录入"
@@ -1136,7 +1146,7 @@ TOOLS = [
            "student": {"type": "string", "description": "学生姓名或用户名"},
            "lecture": {"type": "string", "description": "讲次标题或 ID，可省略"}},
           ["course", "student"]),
-    _spec("list_exams", "列出某门课程的考试，含日期、满分、已录分、缺考与待录入人数。",
+    _spec("list_exams", "列出某门课程的考试，含日期、满分、已录入、已录分、缺考与待录入人数。",
           {"course": {"type": "string", "description": "课程名称或 ID"}},
           ["course"]),
     _spec("exam_scores", "查看某次考试的全班状态、分数与评语，以及均分/最高/最低；缺考不按零分统计。",

@@ -300,7 +300,7 @@
     <form method="post" action="{{ url_for('lecture_tags_generate', hid=hw.id) }}" class="tag-form">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
       <button type="submit" class="small ghost">生成/重新生成知识点标签</button>
-      <span class="muted small">保存作业范围不会调用 AI；需要生成或更新标签时，请单独点击此按钮。只标注当前作业范围内的题目。</span>
+      <span class="muted small">保存作业范围不会调用 AI；答案或范围变化后，旧 AI 标签不会自动更新。需要生成或更新标签时，请单独点击此按钮；只标注当前作业范围内的题目。</span>
     </form>
   </div>
   {% else %}

@@ -14,13 +14,13 @@
 | 顺序 | 条目 | 执行方式 | 主要范围 | 状态 |
 |---|---|---|---|---|
 | 0 | UX-07 空闲会话 | 已在主工作区完成 | 服务端 45 分钟 / 40 分钟提醒、轮询不续期、跨标签、键盘 | `completed` |
-| 1A | UX-01 批量加课 | 专用 worktree / 子代理 | `app.py` enrollment route、`templates/course.html`、隔离回归测试、老师手册 | `in progress` |
-| 1B | UX-04 作业范围可靠性 | 专用 worktree / 子代理 | `app.py` 答案/页码/范围路由、`templates/lecture.html`、AI 标签显式操作、回归测试、老师手册 | `in progress` |
-| 1C | UX-06 登录帮助 | 专用 worktree / 子代理 | `templates/login.html`、独立测试文件；不读取账号、不变更登录行为 | `in progress` |
+| 1A | UX-01 批量加课 | 专用 worktree / 子代理 | `app.py` enrollment route、`templates/course.html`、隔离回归测试、老师手册 | `completed` |
+| 1B | UX-04 作业范围可靠性 | 专用 worktree / 子代理 | `app.py` 答案/页码/范围路由、`templates/lecture.html`、AI 标签显式操作、回归测试、老师手册 | `completed` |
+| 1C | UX-06 登录帮助 | 专用 worktree / 子代理 | `templates/login.html`、独立测试文件；不读取账号、不变更登录行为 | `completed` |
 | 2 | UX-05 考试状态 | 主工作区串行实施 | `db.py` 幂等迁移、考试录入/学生显示、零分/仅评语/缺考测试、老师/学生手册 | `completed` |
 | 3 | UX-03 近期截止列表 | 主工作区串行实施 | 学生路由和首页、时区/提交状态/权限/窄屏相关测试、学生手册 | `completed` |
-| 4 | UX-02 发布状态核验 | 集成后验收 | 继续维持逐题结果与报告各自独立发布；补齐任何发现的不一致测试，不新增自动/合并发布 | `planned` |
-| 5 | 总体验收、提交、推送 | 主代理 | 全量回归、差异检查、核对部署 workflow；得到必要确认后再推送 | `planned` |
+| 4 | UX-02 发布状态核验 | 已审计 | 现有状态呈现及后端门槛符合计划；保留独立发布，相关回归测试通过 | `completed` |
+| 5 | 总体验收、提交、推送 | 主代理 | 全量回归和差异检查已通过；本地集成提交待完成，推送需处理自动部署确认 | `in progress` |
 
 ## Worktree 协作规则
 

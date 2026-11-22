@@ -164,6 +164,26 @@ class LecturePreparationTest(unittest.TestCase):
         self.assertEqual(json.loads(self._lecture()["scope_selected"]), ["q1"])
         analyze.assert_not_called()
 
+    def test_stale_tag_task_cannot_write_after_scope_changes(self):
+        queue = DeferredQueue()
+        rows = [{"key": "q0", "no": "3", "category": "化学", "tags": ["旧标签"]}]
+        with mock.patch.object(app_module, "_ai_task_queue", queue), \
+                mock.patch.object(app_module, "_ai_endpoint",
+                                  return_value=("http://api", "key", "model", "")), \
+                mock.patch.object(app_module, "_get_max_tokens", return_value=256), \
+                mock.patch.object(app_module, "analyze_question_tags", return_value=(rows, "")):
+            queued = self._post("lecture_tags_generate", hid=20)
+            self.assertEqual(queued.status_code, 302)
+            self.assertEqual(len(queue.pending), 1)
+            changed = self._post("lecture_scope_save", {"no": ["q1"]}, hid=20)
+            self.assertEqual(changed.status_code, 302)
+            DeferredQueue.run(queue.pending[0])
+        con = self._db()
+        tags = con.execute(
+            "SELECT tag FROM question_tags WHERE lecture_id=20 AND source='ai'").fetchall()
+        con.close()
+        self.assertEqual(tags, [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1858,8 +1858,9 @@ def lecture_answer(hid):
         with _scope_analysis_lock:
             _advance_scope_analysis_generation(hid)
             db.execute("UPDATE lectures SET answer_pdf=?, answer_pages='', "
-                       "scope_candidates='', scope_selected='' WHERE id=?", (name, hid))
+                        "scope_candidates='', scope_selected='' WHERE id=?", (name, hid))
             db.commit()
+        flash("教师版答案已更新；旧页码和题目范围已清除，请重新生成题目清单。")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
@@ -1930,6 +1931,8 @@ def _generate_question_tags(hw, keys):
     answer_pdf = hw["answer_pdf"]
     answer_pages = hw["answer_pages"]
     lecture_id = hw["id"]
+    scope_selected = hw["scope_selected"] or ""
+    generation = _scope_analysis_generations.get(lecture_id, 0)
     course_id = hw["course_id"]
     teacher_id = g.user["id"]
 
@@ -1946,18 +1949,33 @@ def _generate_question_tags(hw, keys):
         if run_err:
             _finish_ai_operation(operation, "failed", run_err)
             return
-        database.execute("DELETE FROM question_tags WHERE lecture_id=? AND source='ai'",
-                         (lecture_id,))
-        count = 0
-        for row in rows:
-            for tag in row["tags"]:
-                database.execute(
-                    "INSERT INTO question_tags(lecture_id,question_key,question_no,tag,"
-                    "category,source) VALUES(?,?,?,?,?,'ai')",
-                    (lecture_id, row["key"], row["no"], tag, row["category"]))
-                count += 1
-        _finish_ai_operation(operation, "success")
-        log.info("生成知识点标签 lecture=%s 题数=%s 标签数=%s", lecture_id, len(rows), count)
+        with _scope_analysis_lock:
+            current = database.execute(
+                "SELECT answer_pdf,answer_pages,scope_selected FROM lectures WHERE id=?",
+                (lecture_id,)).fetchone()
+            try:
+                current_scope = json.loads(current["scope_selected"] or "[]") if current else []
+            except (TypeError, ValueError):
+                current_scope = []
+            if (not current or _scope_analysis_generations.get(lecture_id, 0) != generation
+                    or (current["answer_pdf"] or "") != answer_pdf
+                    or (current["answer_pages"] or "") != answer_pages
+                    or set(map(str, current_scope)) != set(map(str, keys))):
+                _finish_ai_operation(
+                    operation, "failed", "答案、页码或作业范围已更改，已忽略过期知识点标签")
+                return
+            database.execute("DELETE FROM question_tags WHERE lecture_id=? AND source='ai'",
+                             (lecture_id,))
+            count = 0
+            for row in rows:
+                for tag in row["tags"]:
+                    database.execute(
+                        "INSERT INTO question_tags(lecture_id,question_key,question_no,tag,"
+                        "category,source) VALUES(?,?,?,?,?,'ai')",
+                        (lecture_id, row["key"], row["no"], tag, row["category"]))
+                    count += 1
+            _finish_ai_operation(operation, "success")
+            log.info("生成知识点标签 lecture=%s 题数=%s 标签数=%s", lecture_id, len(rows), count)
 
     operation, queue_err = _ai_task_queue.submit(
         teacher_id, "question_tagging", model=model, runner=runner,
@@ -2001,6 +2019,8 @@ def lecture_answer_pages(hid):
                        (stored_pages, hid))
         db.commit()
     note = _answer_pages_note(picked, total)
+    if changed:
+        note += " 已清除旧题目范围，待新清单生成后重新选择。"
     teacher_id = g.user["id"]
     if get_setting(teacher_id, "ai_demo") == "1":
         flash(f"{note} 演示模式不会调用 AI，无法生成题目清单。")
@@ -2110,12 +2130,27 @@ def lecture_scope_save(hid):
         abort(404)
     own_course(hw["course_id"])
     keys = [k.strip() for k in request.form.getlist("no") if k.strip()]
+    try:
+        candidates = json.loads(hw["scope_candidates"] or "[]")
+    except (TypeError, ValueError):
+        candidates = []
+    valid_keys = {str(item.get("key") or item.get("no"))
+                  for item in candidates if isinstance(item, dict)}
+    keys = list(dict.fromkeys(key for key in keys if key in valid_keys))
     if not keys:
         flash("请至少勾选一道题再保存；未划定作业范围时 AI 批阅不会执行。")
         return redirect(url_for("lecture_detail", hid=hid))
-    db.execute("UPDATE lectures SET scope_selected=? WHERE id=?",
-               (json.dumps(keys, ensure_ascii=False), hid))
-    db.commit()
+    selected_json = json.dumps(keys, ensure_ascii=False)
+    with _scope_analysis_lock:
+        current = db.execute("SELECT scope_selected FROM lectures WHERE id=?", (hid,)).fetchone()
+        try:
+            old_keys = json.loads(current["scope_selected"] or "[]") if current else []
+        except (TypeError, ValueError):
+            old_keys = []
+        if set(map(str, old_keys)) != set(keys):
+            _advance_scope_analysis_generation(hid)
+        db.execute("UPDATE lectures SET scope_selected=? WHERE id=?", (selected_json, hid))
+        db.commit()
     flash(f"已保存作业范围：{len(keys)} 道题。")
     return redirect(url_for("lecture_detail", hid=hid))
 
