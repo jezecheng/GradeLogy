@@ -294,7 +294,18 @@ details summary { cursor: pointer; color: #1456f0; }
 .scope-parent-row { background: #fbfcfe; }
 .scope-child-row { background: #f7f9fc; }
 .scope-child-row > td:first-child { border-left: 3px solid #d7dfec; }
-.scope-child-stem { white-space: pre-wrap; padding-left: 10px; border-left: 2px solid #d7dfec; }
+.scope-table { table-layout: fixed; width: 100%; }
+.scope-table th, .scope-table td { min-width: 0; vertical-align: top; overflow-wrap: anywhere; }
+.scope-table .stem-details, .scope-table .tag-editor, .scope-table .tag-list { max-width: 100%; min-width: 0; }
+.scope-table .question-stem { box-sizing: border-box; max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
+.scope-table .scope-child-stem { white-space: pre-wrap; padding: 5px 8px; border: 0;
+                                border-left: 2px solid #d7dfec; border-radius: 0;
+                                background: transparent; margin: 0; }
+.scope-table .tag-list { display: flex; flex-wrap: wrap; align-items: flex-start; }
+.scope-table .tag-knowledge { max-width: 100%; white-space: normal; overflow-wrap: anywhere;
+                              word-break: break-word; }
+.scope-table .tag-edit-form input[type="text"] { width: 100%; min-width: 0;
+                                                   box-sizing: border-box; flex-basis: 100%; }
 .question-stem { white-space: pre-wrap; line-height: 1.75; font-size: 14px; color: #3b4351;
                  border: 1px solid #e3e7ee; border-radius: 10px; background: #fff;
                  padding: 10px 12px; margin: 6px 0 10px; }

@@ -1720,6 +1720,9 @@ def lecture_detail(hid):
     scope_item_count = (len(_scope_items(scope_candidates, scope_selected))
                         if scope_selected else len(_scope_items(scope_candidates)))
     scope_reset_impact = _lecture_scope_reset_impact(db, hid)
+    scope_operation = db.execute(
+        "SELECT id,status,error FROM ai_operations WHERE lecture_id=? "
+        "AND operation_type='scope_analyze' ORDER BY id DESC LIMIT 1", (hid,)).fetchone()
     subs = db.execute("""
         SELECT s.*, u.display_name, u.username,
           (SELECT COUNT(*) FROM questions q WHERE q.submission_id=s.id) AS n_questions,
@@ -1778,6 +1781,7 @@ def lecture_detail(hid):
                             answer_total=answer_total, answer_picked=answer_picked,
                             scope_item_count=scope_item_count,
                             scope_reset_impact=scope_reset_impact,
+                            scope_operation=scope_operation,
                             grade_jobs=grade_jobs,
                            grading_active=any(j["status"] in ("queued", "running")
                                               for j in grade_jobs.values()),
@@ -2321,6 +2325,33 @@ def lecture_answer_pages(hid):
     else:
         flash(f"{note} 题目清单生成已加入后台队列，可离开当前页面。")
     return redirect(url_for("lecture_detail", hid=hid))
+
+
+@_routes.route("/lecture/<oid:hid>/scope/status")
+@role_required("teacher")
+def lecture_scope_status(hid):
+    """查询题目清单后台提取状态，页面停留时完成后自动刷新清单。"""
+    db = get_db()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
+    if not hw:
+        abort(404)
+    own_course(hw["course_id"])
+    operation_id = request.args.get("operation_id", type=int)
+    if not operation_id:
+        return {"ok": False, "error": "缺少 operation_id"}, 400
+    operation = db.execute(
+        "SELECT id,status,error FROM ai_operations WHERE id=? AND lecture_id=? "
+        "AND operation_type='scope_analyze'", (operation_id, hid)).fetchone()
+    if not operation:
+        abort(404)
+    try:
+        candidates = json.loads(hw["scope_candidates"] or "[]")
+    except (TypeError, ValueError):
+        candidates = []
+    response = jsonify({"ok": True, "status": operation["status"],
+                        "error": operation["error"] or "", "ready": bool(candidates)})
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @_routes.route("/lecture/<oid:hid>/answer/page/<int:no>.jpg")

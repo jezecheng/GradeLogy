@@ -203,8 +203,40 @@ class LecturePreparationTest(unittest.TestCase):
         page = self.client.get(self._url("lecture_detail", hid=20)).get_data(as_text=True)
         self.assertIn("1.1", page)
         self.assertIn("1.2", page)
+        self.assertIn('class="scope-table"', page)
+        self.assertIn('class="question-stem scope-child-stem"', page)
+        self.assertIn("<colgroup>", page)
         self.assertIn("data-scope-parent=\"1\"", page)
         self.assertIn("data-scope-child=\"1\"", page)
+
+    def test_scope_status_endpoint_reports_ready_for_in_place_refresh(self):
+        con = self._db()
+        con.execute("UPDATE lectures SET scope_candidates='',scope_selected='' WHERE id=20")
+        con.commit()
+        con.close()
+        with app_module.app.app_context():
+            operation = app_module._start_ai_operation(
+                2, "scope_analyze", "model", course_id=10, lecture_id=20, status="running")
+        page = self.client.get(self._url("lecture_detail", hid=20)).get_data(as_text=True)
+        self.assertIn('id="scope-build-status"', page)
+        self.assertIn('data-poll="1"', page)
+
+        status_url = self._url("lecture_scope_status", hid=20)
+        response = self.client.get(status_url, query_string={"operation_id": operation["id"]})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["status"], "running")
+        self.assertFalse(response.get_json()["ready"])
+
+        con = self._db()
+        con.execute("UPDATE lectures SET scope_candidates=? WHERE id=20",
+                    (json.dumps([{"key": "q0", "no": "1", "stem": "新题干"}]),))
+        con.execute("UPDATE ai_operations SET status='success' WHERE id=?", (operation["id"],))
+        con.commit()
+        con.close()
+        response = self.client.get(status_url, query_string={"operation_id": operation["id"]})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["status"], "success")
+        self.assertTrue(response.get_json()["ready"])
 
     def test_scope_change_requires_confirmation_and_recomputes_old_results(self):
         con = self._db()
