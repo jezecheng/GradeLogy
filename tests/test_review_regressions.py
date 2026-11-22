@@ -177,8 +177,37 @@ class ReviewRegressionTest(unittest.TestCase):
         self.db.commit()
         with mock.patch.object(a, "generate_report", return_value="draft"):
             self.post("submission_review_save", sid=30)
-            self.post("submission_report_publish", sid=30)
+        self.post("submission_report_publish", sid=30)
         self.assertEqual(self.db.execute("SELECT report_published FROM submissions WHERE id=30").fetchone()[0], 1)
+
+    def test_single_report_publish_releases_report_and_question_results_together(self):
+        self.db.execute("UPDATE submissions SET status='待批改',report_published=0,report_md='Report'")
+        self.db.execute("UPDATE questions SET reviewed=1,verdict='错'")
+        self.db.commit()
+        student = self.client(4)
+        lecture_url = self.url("student_lecture_page", hid=20)
+        self.assertEqual(student.get(self.url("student_report", sid=30)).status_code, 404)
+        self.assertNotIn('id="question-40"', student.get(lecture_url).get_data(as_text=True))
+        self.assertNotIn("第 1 题", student.get(self.url("student_wrong_questions")).get_data(as_text=True))
+
+        self.client(2).post(self.url("submission_review_save", sid=30), data={
+            "_csrf": "test-token", "action": "complete", "verdict_40": "错"})
+        self.assertEqual(tuple(self.db.execute(
+            "SELECT status,report_published FROM submissions WHERE id=30").fetchone()),
+            ("已批改", 0))
+        self.assertEqual(student.get(self.url("student_report", sid=30)).status_code, 404)
+
+        self.post("submission_report_publish", sid=30)
+        self.assertEqual(tuple(self.db.execute(
+            "SELECT status,report_published FROM submissions WHERE id=30").fetchone()),
+            ("已批改", 1))
+        self.assertEqual(student.get(self.url("student_report", sid=30)).status_code, 200)
+        self.assertIn('id="question-40"', student.get(lecture_url).get_data(as_text=True))
+        self.assertIn("第 1 题", student.get(self.url("student_wrong_questions")).get_data(as_text=True))
+
+        self.post("submission_report_publish", sid=30)
+        self.assertEqual(student.get(self.url("student_report", sid=30)).status_code, 404)
+        self.assertNotIn('id="question-40"', student.get(lecture_url).get_data(as_text=True))
 
     def test_page_match_is_conservative_and_persists_source_page(self):
         normalized = pdfgrade._normalize([
@@ -223,10 +252,7 @@ class ReviewRegressionTest(unittest.TestCase):
 
     def test_report_knowledge_graph_matrix_is_a_question_by_concept_table(self):
         md = a.build_report_md(
-            "学生", "讲次", "6月1日", [], {},
-            {"knowledge_summary": [{"knowledge_points": ["速率常数", "初始速率"],
-                                    "questions": ["例6", "例7"],
-                                    "summary": "两题均有薄弱表现，需结合初始速率补强。"}]},
+            "学生", "讲次", "6月1日", [], {}, {},
             kg_diagnosis={"matrix": {
                 "columns": [{"tag": "速率常数", "name": "速率常数"},
                             {"tag": "初始速率", "name": "初始速率"}],
@@ -240,9 +266,7 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertIn("| 题号 | 题目简述 | 速率常数 | 初始速率 | 知识点点评 |", md)
         self.assertIn("| 例6 | 速率常数求算 | ⚠️ |", md)
         self.assertIn("前置薄弱：初始速率", md)
-        self.assertIn("纵向批阅", md)
-        self.assertIn("速率常数：例6⚠️、例7🔴", md)
-        self.assertIn("纵向点评：两题均有薄弱表现", md)
+        self.assertNotIn("纵向批阅", md)
 
     def test_review_uses_manual_review_label_and_report_button_is_conditional(self):
         html = self.client(2).get(self.url("submission_review", sid=30)).get_data(as_text=True)
@@ -254,6 +278,16 @@ class ReviewRegressionTest(unittest.TestCase):
         html_without_report = self.client(2).get(
             self.url("submission_review", sid=30)).get_data(as_text=True)
         self.assertNotIn("打开评阅报告", html_without_report)
+
+    def test_student_report_keeps_latex_for_client_katex_rendering(self):
+        latex = r"$\mathrm{H_2O}$"
+        self.db.execute("UPDATE submissions SET report_published=1,report_md=? WHERE id=30",
+                        (f"# 报告\n\n化学式：{latex}",))
+        self.db.commit()
+        response = self.client(4).get(self.url("student_report", sid=30))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(latex, response.get_data(as_text=True))
+        self.assertNotIn("<math ", response.get_data(as_text=True))
 
     def test_explicit_draft_hides_even_fully_reviewed_results(self):
         with mock.patch.object(a, "generate_report", return_value="draft"):

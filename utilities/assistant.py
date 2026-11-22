@@ -847,7 +847,7 @@ def _accuracy(db, submission_id):
 
 
 def _revealed(sub):
-    return bool(sub) and (sub["status"] == "已批改" or sub["report_published"])
+    return bool(sub) and bool(sub["report_published"])
 
 
 def my_courses(student_id):
@@ -901,9 +901,11 @@ def my_lectures(student_id, course=None):
             r["deadline"] = format_beijing_time(r["deadline"], "legacy")
             if not r["submission_id"]:
                 r["my_status"] = "未提交"
-            elif r["status"] == "已批改" or r["report_published"]:
+            elif r["report_published"]:
                 r["my_status"] = "已批改"
                 r["accuracy"] = _accuracy(db, r["submission_id"])
+            elif r["status"] == "已批改":
+                r["my_status"] = "待公布"
             else:
                 r["my_status"] = "已提交，待批改"
             for k in ("submission_id", "status", "report_published"):

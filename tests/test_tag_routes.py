@@ -500,6 +500,10 @@ class TagRouteTest(unittest.TestCase):
         self.assertEqual(status, "weak")
 
     def _review_save(self):
+        con = self._db()
+        con.execute("UPDATE submissions SET report_published=1,report_md='published' WHERE id=30")
+        con.commit()
+        con.close()
         self.client.post(self.url("question_reviewed", qid=40),
                          json={"reviewed": True, "verdict": "错"},
                          headers={"X-CSRF-Token": "test-token"})
@@ -564,8 +568,8 @@ class TagRouteTest(unittest.TestCase):
         con = self._db()
         con.execute("INSERT INTO lectures(id,course_id,title) VALUES(21,10,'第二讲')")
         con.execute(
-            "INSERT INTO submissions(id,lecture_id,student_id,file_path,status)"
-            " VALUES(31,21,4,'b.pdf','待批改')")
+            "INSERT INTO submissions(id,lecture_id,student_id,file_path,status,report_published,report_md)"
+            " VALUES(31,21,4,'b.pdf','待批改',1,'published')")
         con.execute(
             "INSERT INTO questions(id,submission_id,no,verdict,reviewed) VALUES(50,31,'1','错',1)")
         con.execute(
@@ -585,6 +589,7 @@ class TagRouteTest(unittest.TestCase):
 
     def test_weak_point_galaxy_lights_weak_nodes_with_neighbors(self):
         con = self._db()
+        con.execute("UPDATE submissions SET report_published=1 WHERE id=30")
         con.execute("INSERT INTO knowledge_graphs(id,subject,name,created_by)"
                     " VALUES(31,'化学','主图谱',2)")
         con.executemany(
@@ -628,7 +633,7 @@ class TagRouteTest(unittest.TestCase):
     def _reveal_submission(self):
         """把提交改成已批改，并补一道半对题与一道对题。"""
         con = self._db()
-        con.execute("UPDATE submissions SET status='已批改' WHERE id=30")
+        con.execute("UPDATE submissions SET status='已批改',report_published=1 WHERE id=30")
         con.execute(
             "INSERT INTO questions(id,submission_id,no,verdict,ocr_text,ai_comment,"
             "standard_answer,note) VALUES(41,30,'4','半对','第4题作答','条件写错',"

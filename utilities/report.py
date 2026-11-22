@@ -103,7 +103,7 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
     # 知识图谱诊断：以题目为行、关联知识点为列展示掌握状态。
     if kg_diagnosis:
         out += ["## 四、知识图谱诊断", "",
-                "> 每行是一道题，按题目关联知识点显示状态；绿色✓表示判定正常，黄色!表示需要关注，红色表示可能存在问题。表格末尾附跨题纵向批阅。", ""]
+                "> 每行是一道题，按题目关联知识点显示状态；绿色✓表示判定正常，黄色!表示需要关注，红色表示可能存在问题。", ""]
         matrix = kg_diagnosis.get("matrix") if isinstance(kg_diagnosis, dict) else None
         if matrix and matrix.get("columns"):
             headers = ["题号", "题目简述"] + [c["name"] for c in matrix["columns"]] + ["知识点点评"]
@@ -116,79 +116,6 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
                 cells.extend(row.get("cells", {}).get(c["tag"], "—") for c in columns)
                 cells.append(row.get("analysis", ""))
                 out.append("| " + " | ".join(_md_cell(x) for x in cells) + " |")
-
-            def resolve_points(raw_points):
-                resolved = []
-                for raw in raw_points:
-                    needle = str(raw or "").strip().casefold()
-                    if not needle:
-                        continue
-                    match = next((c for c in columns
-                                  if needle in (str(c["tag"]).casefold(),
-                                                str(c["name"]).casefold())), None)
-                    if match and match["tag"] not in resolved:
-                        resolved.append(match["tag"])
-                return resolved
-
-            issue_icons = {"⚠️", "🔴"}
-
-            def issue_rows(points, requested_questions=None):
-                requested = {str(q).strip() for q in (requested_questions or [])}
-                found = []
-                for row in matrix_rows:
-                    if requested and str(row.get("no", "")).strip() not in requested:
-                        continue
-                    affected = {tag: row.get("cells", {}).get(tag, "—") for tag in points}
-                    affected = {tag: icon for tag, icon in affected.items()
-                                if icon in issue_icons}
-                    if affected:
-                        found.append((row, affected))
-                return found
-
-            summaries = (detail or {}).get("knowledge_summary") or []
-            used_points = set()
-            vertical_rows = []
-            for item in summaries:
-                if not isinstance(item, dict):
-                    continue
-                points = [tag for tag in resolve_points(item.get("knowledge_points") or [])
-                          if tag not in used_points]
-                affected_rows = issue_rows(points, item.get("questions"))
-                if not points or not affected_rows:
-                    continue  # 丢弃模型杜撰、全绿或不对应当前作业的汇总。
-                used_points.update(points)
-                vertical_rows.append((points, affected_rows,
-                                      str(item.get("summary") or "").strip()))
-
-            # 旧报告详情或模型漏返纵向汇总时，仍把矩阵中实际存在的问题列出来。
-            for column in columns:
-                tag = column["tag"]
-                if tag in used_points:
-                    continue
-                affected_rows = issue_rows([tag])
-                if affected_rows:
-                    vertical_rows.append((
-                        [tag], affected_rows,
-                        f"{tag}在相关题目中出现需关注表现；优先回看这些题及其逐题点评。"))
-
-            for points, affected_rows, summary_text in vertical_rows:
-                status_parts = []
-                for tag in points:
-                    entries = [f"{row.get('no', '')}{icon}"
-                               for row, affected in affected_rows
-                               if (icon := affected.get(tag))]
-                    if entries:
-                        status_parts.append(f"{tag}：{'、'.join(entries)}")
-                vertical = ["纵向批阅", "相近知识点：" + " / ".join(
-                    str(next(c["name"] for c in columns if c["tag"] == tag))
-                    for tag in points)]
-                vertical.extend([""] * len(columns))
-                # 同组知识点的跨题表现集中放在组内首列，尾行其余列留空以收紧版面。
-                first_column = min(next(i for i, c in enumerate(columns) if c["tag"] == tag)
-                                   for tag in points)
-                vertical[2 + first_column] = "；".join(status_parts)
-                vertical.append("纵向点评：" + (summary_text or "请结合上述跨题表现补强相关知识点。"))
-                out.append("| " + " | ".join(_md_cell(x) for x in vertical) + " |")
             out.append("")
         else:
             # 兼容旧格式的已保存/外部调用数据。
@@ -218,7 +145,7 @@ def _overall_text(detail, fallback=""):
     return "\n\n".join(parts) or (fallback or "")
 
 
-def render_markdown(md):
+def render_markdown(md, *, server_mathml=True):
     """把报告用的极简 Markdown（标题/表格/列表/粗体）渲染成 HTML。
 
     LaTeX 处理：行内 ``$...$`` 与块级 ``$$...$$`` 在转义阶段用占位符保护，
@@ -268,7 +195,7 @@ def render_markdown(md):
         for key, raw in math_store.items():
             if key not in s:
                 continue
-            mathml = _math_to_mathml(raw)
+            mathml = _math_to_mathml(raw) if server_mathml else None
             replacement = mathml if mathml is not None else esc(raw)
             s = s.replace(esc(key), replacement)
             s = s.replace(key, replacement)

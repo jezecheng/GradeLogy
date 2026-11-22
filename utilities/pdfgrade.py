@@ -585,13 +585,7 @@ REPORT_OUTPUT_CONTRACT = (
     "输出格式（必须严格遵守）：只输出 JSON，不要解释或代码块标记：\n"
     '{"good":"做得好的地方（80~160 字，要具体点出哪几题做得好）",'
     '"improve":["需要改的第 1 处","第 2 处","第 3 处"],'
-    '"next":"下一步建议（60~120 字）",'
-    '"knowledge_summary":[{"knowledge_points":["知识点名称"],'
-    '"questions":["题号"],"summary":"跨题表现与纵向点评"}]}'
-    "\nknowledge_summary 规则：若下方提供了“题目-知识点表现矩阵”，请沿题号纵向汇总同一/相近知识点在不同题中的表现；"
-    "只汇总含⚠️或🔴的问题点，全部✅的知识点不要输出。相近/前置关联知识点可合并到同一条的 knowledge_points，"
-    "questions 只填矩阵里实际涉及且出现问题的题号；summary 用一两句（不超过60字）概括表现与可由证据支持的前置薄弱点，"
-    "不得推断矩阵没有提供的原因。没有需关注的知识点时必须输出空数组。该纵向点评将附加到知识图谱矩阵的末尾。"
+    '"next":"下一步建议（60~120 字）"}'
 )
 
 REPORT_PROMPT = DEFAULT_REPORT_PROMPT + "\n" + REPORT_OUTPUT_CONTRACT
@@ -621,10 +615,9 @@ def ai_report_comment(questions, weak_points, evaluation, api_url, api_key, mode
                           "evaluation": evaluation or ""}, ensure_ascii=False)
     base = (prompt.strip() + "\n" + REPORT_OUTPUT_CONTRACT) if prompt.strip() else REPORT_PROMPT
     if kg_context:
-        base += ("\n\n以下是本次作业的知识图谱证据，包含前置知识关系及逐题矩阵：\n"
+        base += ("\n\n以下是本次作业的知识图谱诊断信息与前置知识关系：\n"
                  + kg_context
-                 + "\n请在总评中自然引用与失分相关的前置知识；并按输出契约填写 knowledge_summary，"
-                   "纵向比较同一知识点在各题中的表现，只保留需关注项。")
+                 + "\n请在总评中自然引用与失分相关的前置知识；仅依据已有逐题判定与图谱前置关系分析错误原因。")
     content = [{"type": "text", "text": base + "\n\n数据：\n" + payload}]
     reply, finish, err = llm.chat(api_url, api_key, model, content,
                                   max_tokens=max_tokens, timeout=60, retries=1,
@@ -638,27 +631,9 @@ def ai_report_comment(questions, weak_points, evaluation, api_url, api_key, mode
     if isinstance(improve, str):
         improve = [improve]
     improve = [str(x).strip() for x in (improve or []) if str(x).strip()][:3]
-    knowledge_summary = []
-    for item in data.get("knowledge_summary") or []:
-        if not isinstance(item, dict):
-            continue
-        points = item.get("knowledge_points") or []
-        questions = item.get("questions") or []
-        if isinstance(points, str):
-            points = [points]
-        if isinstance(questions, str):
-            questions = [questions]
-        points = list(dict.fromkeys(str(x).strip() for x in points if str(x).strip()))[:8]
-        questions = list(dict.fromkeys(str(x).strip() for x in questions if str(x).strip()))[:20]
-        summary = str(item.get("summary") or "").strip()[:120]
-        if points and questions and summary:
-            knowledge_summary.append({"knowledge_points": points,
-                                      "questions": questions, "summary": summary})
-    knowledge_summary = knowledge_summary[:12]
     return {"good": str(data.get("good", "")).strip(),
             "improve": improve,
-            "next": str(data.get("next", "")).strip(),
-            "knowledge_summary": knowledge_summary}
+            "next": str(data.get("next", "")).strip()}
 
 
 # ---------- 讲次级别的整体汇总 ----------

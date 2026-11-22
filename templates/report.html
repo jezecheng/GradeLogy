@@ -14,8 +14,8 @@
       {% if md %}
       <form method="post" action="{{ url_for('submission_report_publish', sid=sub.id) }}">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-        <button class="small {{ 'danger' if sub.report_published else '' }}">
-          {{ '撤回发布' if sub.report_published else '发布给学生' }}</button>
+         <button class="small {{ 'danger' if sub.report_published else '' }}">
+           {{ '撤回发布' if sub.report_published else '一键发布给学生' }}</button>
       </form>
       <a class="btn-link" href="{{ url_for('submission_report_download', sid=sub.id) }}">下载 .md</a>
       {% endif %}
@@ -25,8 +25,8 @@
 
   <p class="muted small">
     {{ student_name }} · {{ hw.title }}
-    {% if sub.report_published %}<span class="reviewed-badge">已发布</span>
-    {% elif is_teacher and md %}<span class="pending-badge">草稿（学生不可见）</span>{% endif %}
+    {% if sub.report_published %}<span class="reviewed-badge">报告与逐题批改已发布</span>
+    {% elif is_teacher and md %}<span class="pending-badge">草稿（报告与逐题内容均不可见）</span>{% endif %}
     {% if is_teacher %}
       · <a href="{{ url_for('submission_review', sid=sub.id) }}">返回人工复核</a>
       · <a href="{{ url_for('lecture_detail', hid=hw.id) }}">返回讲次</a>

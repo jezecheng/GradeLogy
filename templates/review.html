@@ -188,7 +188,7 @@
           </span>
         </p>
         <p class="muted small" style="margin-top:6px">
-          按「完全答对的题数 ÷ 已判定题数」计算。草稿不公开，全部完成人工复核后可公开逐题结果。
+          按「完全答对的题数 ÷ 已判定题数」计算。完成复核仍是草稿；在评阅报告页一键发布后学生才能查看。
         </p>
       </div>
       <div class="review-col wide">
@@ -205,9 +205,9 @@
       </div>
     </div>
     <div class="save-bar">
-      <span class="review-save-state" id="review-save-state" role="status">{{ '逐题结果已公开' if sub.status == '已批改' else '草稿 · 学生暂不可见' }}；报告另行公开。</span>
+      <span class="review-save-state" id="review-save-state" role="status">{{ '报告与逐题结果已发布' if sub.report_published else ('人工复核已完成 · 学生暂不可见' if sub.status == '已批改' else '草稿 · 学生暂不可见') }}；发布报告时会一并公开。</span>
       <button type="submit" name="action" value="draft" class="ghost">保存草稿</button>
-      <button type="submit" name="action" value="publish" id="review-publish" {% if not all_reviewed or job_status in ('queued','running') %}disabled{% endif %}>完成人工复核并公开逐题结果</button>
+      <button type="submit" name="action" value="complete" id="review-complete" {% if not all_reviewed or job_status in ('queued','running') %}disabled{% endif %}>保存并完成人工复核</button>
       {% if sub.report_md %}
        <a class="report-open-button" href="{{ url_for('submission_report', sid=sub.id) }}">打开评阅报告</a>
       {% else %}
@@ -215,7 +215,7 @@
               class="ghost{% if not all_reviewed or job_status in ('queued','running') %} is-disabled{% endif %}"
               data-blocked="{{ 0 if all_reviewed and job_status not in ('queued','running') else 1 }}">生成评阅报告</button>
       {% endif %}
-      <span class="muted small">单题修改自动保存；未完成复核不能公开。保存草稿会暂时隐藏已公开的逐题结果与报告。</span>
+      <span class="muted small">单题修改自动保存；完成人工复核不会自动公开，须在评阅报告页一键发布报告与逐题结果。</span>
     </div>
   </form>
 </div>
@@ -273,7 +273,7 @@
   var genBtn = document.getElementById('gen-overall');
   var genHint = document.getElementById('gen-overall-hint');
   var reportBtn = document.getElementById('gen-report');
-  var publishBtn = document.getElementById('review-publish');
+  var completeBtn = document.getElementById('review-complete');
   var active = {{ 'true' if job_status in ('queued', 'running') else 'false' }};
   var saves = new Map(), failed = new Set(), dirty = new Set();
   var inFlight = 0;
@@ -299,7 +299,7 @@
     var done = document.querySelectorAll('.reviewed-badge[data-reviewed="1"]').length;
     if (countEl) countEl.textContent = done;
     var all = total > 0 && done === total;
-    if (publishBtn) publishBtn.disabled = !all || active;
+    if (completeBtn) completeBtn.disabled = !all || active;
     if (genBtn) genBtn.disabled = !all || active;
     if (reportBtn) {
       reportBtn.dataset.blocked = all ? '0' : '1';

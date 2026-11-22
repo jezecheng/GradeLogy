@@ -60,7 +60,7 @@
       {% endfor %}
       </span>
       <span class="muted">{{ s.created_at|localtime }}</span>
-      {% set st = '批改中' if locked and loop.first else s.status %}
+      {% set st = '批改中' if locked and loop.first else s.student_status %}
       <span class="tag tag-{{ st }}">{{ st }}</span>
       {% if revealed and sm_acc %}<span class="score" title="正确率">{{ sm_acc }}</span>{% endif %}
       {% if s.report_published %}<a class="btn-link" href="{{ url_for('student_report', sid=s.id) }}">查看批改报告</a>{% endif %}
@@ -70,9 +70,10 @@
       <span class="muted">对 {{ sm.right|length }} 题 · 半对 {{ sm.partial|length }} 题 · 错 {{ sm.wrong|length }} 题{% if sm.unknown %} · 无法判定 {{ sm.unknown|length }} 题{% endif %}</span>
     </p>
     {% endif %}
-    {% if s.feedback %}<pre class="feedback">{{ s.feedback }}</pre>
+    {% if revealed and s.feedback %}<pre class="feedback">{{ s.feedback }}</pre>
     {% elif revealed and sm and sm.evaluation %}<pre class="feedback">{{ sm.evaluation }}</pre>
-    {% elif s.status == '已批改' %}<p class="muted small">老师已完成批改，暂无文字评语。</p>
+    {% elif s.status == '已批改' and not s.report_published %}<p class="muted small">老师已完成批改，结果暂未发布。</p>
+    {% elif revealed and s.status == '已批改' %}<p class="muted small">老师已完成批改，暂无文字评语。</p>
     {% else %}<p class="muted small">老师批阅中，结果暂不公开。</p>{% endif %}
   </div>
   {% endfor %}
@@ -84,9 +85,9 @@
     {% if q.verdict %}
     <span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">{{ q.verdict }}</span>
     {% endif %}
-    {% if q.stem %}<p class="qa-stem"><span class="muted small">题干</span><br>{{ q.stem }}</p>{% endif %}
-    {% if q.ocr_text %}<p class="muted small">我的作答：{{ q.ocr_text }}</p>{% endif %}
-    {% if q.note %} — {{ q.note }}{% endif %}
+    {% if q.stem %}<p class="qa-stem question-stem"><span class="muted small">题干</span><br>{{ q.stem }}</p>{% endif %}
+    {% if q.ocr_text %}<p class="muted small question-comment">我的作答：{{ q.ocr_text }}</p>{% endif %}
+    {% if q.note %}<span class="question-comment"> — {{ q.note }}</span>{% endif %}
   </div>
   {% endfor %}
   {% endif %}

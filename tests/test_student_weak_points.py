@@ -55,8 +55,8 @@ class WeakPointRuleTest(unittest.TestCase):
 
     def _submit(self, sid, lecture_id, verdicts):
         self.db.execute(
-            "INSERT INTO submissions(id,lecture_id,student_id,file_path,status)"
-            " VALUES(?,?,4,'x.pdf','已批改')", (sid, lecture_id))
+            "INSERT INTO submissions(id,lecture_id,student_id,file_path,status,report_published)"
+            " VALUES(?,?,4,'x.pdf','已批改',1)", (sid, lecture_id))
         for no, verdict in verdicts.items():
             self.db.execute(
                 "INSERT INTO questions(submission_id,no,verdict,reviewed)"

@@ -59,10 +59,10 @@ class StudentDeadlineTest(unittest.TestCase):
                 "INSERT INTO lectures(id,course_id,title,deadline) VALUES(?,?,?,?)",
                 [(lid, cid, title, deadline) for lid, cid, title, deadline, _ in deadlines])
             db.executemany(
-                "INSERT INTO submissions(id,lecture_id,student_id,file_path,status) "
-                "VALUES(?,?,3,?,?)",
-                [(30, 22, "course_10/student-3.pdf", "已批改"),
-                 (31, 25, "course_10/student-3.pdf", "已批改")])
+                "INSERT INTO submissions(id,lecture_id,student_id,file_path,status,report_published) "
+                "VALUES(?,?,3,?,?,?)",
+                [(30, 22, "course_10/student-3.pdf", "已批改", 1),
+                 (31, 25, "course_10/student-3.pdf", "已批改", 1)])
             db.execute("INSERT INTO settings(teacher_id,key,value) VALUES(3,'display_timezone','UTC')")
             db.commit()
 

@@ -3107,10 +3107,13 @@ def submission_review_save(sid):
                 "已批改" if reviewed else "待批改", reviewed,
                 f"{g.user['display_name']} 逐题批改", sid))
     db.commit()
-    # 更新学生个人薄弱点图谱（失败不影响批改保存）
+    public_now = bool(db.execute(
+        "SELECT report_published FROM submissions WHERE id=?", (sid,)).fetchone()[0])
+    # 只按已发布的题目结果刷新薄弱点图谱；撤回/草稿也会触发一次收敛。
     try:
-        if reviewed:
-            _update_student_weak_points(db, sub)
+        if sub["report_published"] or public_now:
+            current_sub = db.execute("SELECT * FROM submissions WHERE id=?", (sid,)).fetchone()
+            _update_student_weak_points(db, current_sub)
     except Exception:
         log.exception("更新学生薄弱点失败 submission=%s student=%s", sid, sub["student_id"])
     if (request.form.get("then") or "") == "report":
@@ -3139,7 +3142,12 @@ def submission_review_save(sid):
             return redirect(url_for("submission_report", sid=sid))
         flash("批改已保存，报告已生成，可继续修改后发布。")
         return redirect(url_for("submission_report", sid=sid))
-    flash("批改已保存，学生可以查看" if reviewed else "草稿已保存，全部题目完成人工复核后再保存即可公开。")
+    if reviewed and public_now:
+        flash("批改已保存，学生可以查看")
+    elif reviewed:
+        flash("人工复核已完成，学生暂不可见；生成报告后可一键发布")
+    else:
+        flash("草稿已保存，全部题目完成人工复核后再完成复核。")
     return redirect(url_for("submission_review", sid=sid))
 
 
@@ -4914,13 +4922,21 @@ def student_home():
             WHERE s.lecture_id=h.id AND s.student_id=?
             ORDER BY s.id DESC LIMIT 1) AS last_sub_id,
           (SELECT s.status FROM submissions s
-            WHERE s.lecture_id=h.id AND s.student_id=?
-            ORDER BY s.id DESC LIMIT 1) AS my_status
+             WHERE s.lecture_id=h.id AND s.student_id=?
+             ORDER BY s.id DESC LIMIT 1) AS raw_my_status,
+          (SELECT s.report_published FROM submissions s
+             WHERE s.lecture_id=h.id AND s.student_id=?
+             ORDER BY s.id DESC LIMIT 1) AS my_report_published
         FROM lectures h
         JOIN courses c ON c.id=h.course_id
         JOIN enrollments e ON e.course_id=c.id AND e.student_id=?
         ORDER BY h.title COLLATE NOCASE, h.id""",
-        (g.user["id"],) * 4).fetchall()
+        (g.user["id"],) * 5).fetchall()
+    lectures = [dict(row) for row in lectures]
+    for lecture in lectures:
+        lecture["my_status"] = (
+            "待公布" if lecture["raw_my_status"] == "已批改" and not lecture["my_report_published"]
+            else lecture["raw_my_status"])
     acc_by = _accuracy_by_submission(db, [h["last_sub_id"] for h in lectures])
     grading_active_ids = {
         r["submission_id"] for r in db.execute(
@@ -4991,12 +5007,13 @@ def student_lecture_page(hid):
             else:
                 flash(f"提交成功（{len(names)} 个文件），等待老师批改")
         return redirect(url_for("student_lecture_page", hid=hid))
-    subs = db.execute("SELECT * FROM submissions WHERE lecture_id=? AND student_id=? "
-                      "ORDER BY id DESC", (hid, g.user["id"])).fetchall()
-    # 老师复核完成（status=已批改）或已发布批改报告后，向学生公开逐题明细。
-    # 明细按最新一次提交取，且不再依赖 score（默认定性批改时 score 为空）。
+    subs = [dict(row) for row in db.execute(
+        "SELECT * FROM submissions WHERE lecture_id=? AND student_id=? "
+        "ORDER BY id DESC", (hid, g.user["id"])).fetchall()]
+    # 只有一键发布后的最新提交才向学生公开逐题明细；不依赖 score（默认定性批改时 score 为空）。
     latest = subs[0] if subs else None
-    revealed = bool(latest) and (latest["status"] == "已批改" or latest["report_published"])
+    # 人工复核完成只标记教师端状态；学生侧报告与逐题内容统一由 report_published 控制。
+    revealed = bool(latest) and bool(latest["report_published"])
     items = []
     if revealed:
         items = [dict(row) for row in db.execute(
@@ -5017,6 +5034,10 @@ def student_lecture_page(hid):
         for item in items:
             item["stem"] = stems_by_no.get(str(item.get("no") or ""), "")
     locked = bool(latest) and _submission_grade_active(db, latest["id"])
+    for submission in subs:
+        submission["student_status"] = (
+            "待公布" if submission["status"] == "已批改" and not submission["report_published"]
+            else submission["status"])
     return render_template("student_lecture.html", hw=hw, subs=subs, items=items,
                            revealed=revealed, locked=locked,
                            auto_grade_limit=_grading_queue.attempt_limit(hw["teacher_id"]))
@@ -5271,11 +5292,11 @@ def _weak_latest_attempts(db, student_id, course_id=None):
 
     同一题重复提交只算一次，避免重批把累计计数放大。
     """
-    sql = ("SELECT s.lecture_id, l.course_id, qt.tag, q.no, q.verdict "
+    sql = ("SELECT s.id AS submission_id, s.lecture_id, l.course_id, qt.tag, q.no, q.verdict "
            "FROM submissions s JOIN lectures l ON l.id=s.lecture_id "
            "JOIN question_tags qt ON qt.lecture_id=l.id "
            "JOIN questions q ON q.submission_id=s.id AND q.no=qt.question_no "
-           "WHERE s.student_id=? AND q.verdict<>''")
+           "WHERE s.student_id=? AND s.report_published=1 AND q.verdict<>''")
     params = [student_id]
     if course_id is not None:
         sql += " AND l.course_id=?"
@@ -5284,9 +5305,11 @@ def _weak_latest_attempts(db, student_id, course_id=None):
     for h in db.execute(sql + " ORDER BY s.id", params):
         item = latest.setdefault(
             (h["lecture_id"], h["no"]),
-            {"course_id": h["course_id"], "lecture_id": h["lecture_id"],
+            {"submission_id": h["submission_id"], "course_id": h["course_id"],
+             "lecture_id": h["lecture_id"],
              "verdict": h["verdict"], "tags": set()})
         item["verdict"] = h["verdict"]
+        item["submission_id"] = h["submission_id"]
         item["tags"].add(h["tag"])
     return list(latest.values())
 
@@ -5308,13 +5331,13 @@ def _weak_tag_totals(attempts):
 
 
 def _update_student_weak_points(db, submission):
-    """人工复核保存后，基于逐题判定与知识点标签更新学生薄弱点记录。
+    """公开结果变更后，基于已发布提交的逐题判定与标签更新学生薄弱点记录。
 
     - 只有真正出现错/半对的知识点才新建记录；全对不产生薄弱点
     - 计数写入与展示同一口径：跨讲次累计、每题最近一次判定
     - 本次全对时累计 right_streak；连续 WEAK_AUTO_REVIEW_STREAK 讲全对
       自动从 weak 收敛为 reviewed（mastered 仍需学生自己确认）
-    - 同一讲重复保存保留学生设定的状态；后续讲次再错才回退为 weak
+    - 同一讲重复发布保留学生设定的状态；后续讲次再错才回退为 weak
     """
     if not submission:
         return
@@ -5331,11 +5354,6 @@ def _update_student_weak_points(db, submission):
         (sub_id,)).fetchall()
     if not questions:
         return
-    no_to_verdict = {}
-    for q in questions:
-        v = (q["verdict"] or "").strip()
-        if v:
-            no_to_verdict[q["no"]] = v
 
     tags_rows = db.execute(
         "SELECT question_no, tag FROM question_tags WHERE lecture_id=? ORDER BY id",
@@ -5360,24 +5378,28 @@ def _update_student_weak_points(db, submission):
     links = _course_tag_links(db, course_id)
 
     now = db.execute("SELECT CURRENT_TIMESTAMP").fetchone()[0]
-    totals = _weak_tag_totals(_weak_latest_attempts(db, student_id, course_id))
+    attempts = _weak_latest_attempts(db, student_id, course_id)
+    totals = _weak_tag_totals(attempts)
+    lecture_totals, latest_source = {}, {}
+    for attempt in attempts:
+        for tag in attempt["tags"]:
+            perf = lecture_totals.setdefault(
+                (attempt["lecture_id"], tag), [0, 0, 0, 0])
+            perf[3] += 1
+            if attempt["verdict"] == "对":
+                perf[0] += 1
+            elif attempt["verdict"] == "半对":
+                perf[1] += 1
+            elif attempt["verdict"] == "错":
+                perf[2] += 1
+            latest_source[tag] = max(latest_source.get(tag, 0), attempt["submission_id"])
+
     for tag, qnos in tag_to_qnos.items():
-        wrong = partial = right = total = 0
-        for qno in qnos:
-            v = no_to_verdict.get(qno, "")
-            if not v:
-                continue
-            total += 1
-            if v == "错":
-                wrong += 1
-            elif v == "半对":
-                partial += 1
-            elif v == "对":
-                right += 1
-        if total == 0:
-            continue
+        right, partial, wrong, total = lecture_totals.get(
+            (lecture_id, tag), [0, 0, 0, 0])
         # 计数字段与展示口径一致：跨讲累计、每题最近一次判定
-        right, partial_c, wrong_c, total_c = totals.get(tag, [right, partial, wrong, total])
+        right_c, partial_c, wrong_c, total_c = totals.get(tag, [0, 0, 0, 0])
+        source_submission_id = latest_source.get(tag, 0)
         node = None
         if nodes:
             node, _ = _resolve_tag_node(db, course_id, nodes, name_to_node, tag,
@@ -5390,13 +5412,24 @@ def _update_student_weak_points(db, submission):
         existing = db.execute(
             "SELECT * FROM student_weak_points WHERE student_id=? AND course_id=? AND tag=?",
             (student_id, course_id, tag)).fetchone()
+        if not total_c and not existing:
+            continue
         if existing:
             new_status = existing["status"]
             streak = existing["right_streak"] or 0
-            if wrong or partial:
+            if not total_c:
+                # 撤回了该学生最后一个已发布的相关提交，图谱中不再显示此点。
+                new_status = "removed"
+                streak = 0
+            elif total == 0:
+                # 本讲当前没有公开记录，但其他已公开讲次仍贡献累计数据。
+                pass
+            elif wrong or partial:
                 # 同一讲反复重批保留学生设定的状态；后续讲次再次做错则回退为薄弱
                 if new_status in ("reviewed", "mastered", "removed") \
-                        and (existing["status_lecture_id"] or 0) != lecture_id:
+                        and ((existing["status_lecture_id"] or 0) != lecture_id
+                             or (new_status == "removed"
+                                 and not existing["source_submission_id"])):
                     new_status = "weak"
                 streak = 0
             else:
@@ -5412,8 +5445,8 @@ def _update_student_weak_points(db, submission):
                 "partial_count=?, right_count=?, total_count=?, right_streak=?, "
                 "last_seen_at=?, status_lecture_id=?, updated_at=CURRENT_TIMESTAMP "
                 "WHERE id=?",
-                (graph_id, node_id, node_name, definition, sub_id, new_status,
-                 wrong_c, partial_c, right, total_c, streak, now, anchor,
+                (graph_id, node_id, node_name, definition, source_submission_id, new_status,
+                 wrong_c, partial_c, right_c, total_c, streak, now, anchor,
                  existing["id"]))
         else:
             # 全对不产生薄弱点：只有真实出现过错/半对才建档
@@ -5426,7 +5459,8 @@ def _update_student_weak_points(db, submission):
                 "status_lecture_id) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (student_id, course_id, graph_id, node_id, tag, node_name, definition,
-                 sub_id, "weak", wrong_c, partial_c, right, total_c, 0, now, lecture_id))
+                 source_submission_id, "weak", wrong_c, partial_c, right_c, total_c,
+                 0, now, lecture_id))
     db.commit()
 
 
@@ -5629,12 +5663,10 @@ def _kg_diagnosis(db, sub):
 
 
 def _kg_diagnosis_text(diagnoses):
-    """把 KG 诊断与题目矩阵转成证据文本，注入评阅报告 prompt。"""
+    """把薄弱知识点与前置关系转成文本，注入评阅报告 prompt。"""
     if not diagnoses:
         return ""
-    matrix = None
     if isinstance(diagnoses, dict):
-        matrix = diagnoses.get("matrix") or None
         diagnoses = diagnoses.get("diagnoses") or []
     lines = []
     for d in diagnoses:
@@ -5650,20 +5682,6 @@ def _kg_diagnosis_text(diagnoses):
         if d["untested_prereqs"]:
             line += f"\n  本次未考的前置知识：{'、'.join(x['name'] for x in d['untested_prereqs'])}"
         lines.append(line)
-    if matrix and matrix.get("columns"):
-        lines.extend([
-            "逐题知识点表现矩阵（✅=本题表现正常，⚠️=部分掌握/待关注，🔴=可能存在问题，—=本题不涉及）：",
-        ])
-        for row in matrix.get("rows") or []:
-            cells = [f"{column['name']} {row.get('cells', {}).get(column['tag'], '—')}"
-                     for column in matrix["columns"]
-                     if row.get("cells", {}).get(column["tag"], "—") != "—"]
-            detail = "；".join(cells) if cells else "无匹配知识点"
-            lines.append(f"- {row.get('no', '')}（{row.get('brief', '')}）：{detail}。"
-                         f"逐题点评：{row.get('analysis', '')}")
-        lines.append(
-            "请据此纵向比较同一/相近知识点跨题表现，只把含⚠️或🔴的知识点写入 knowledge_summary，"
-            "注明对应题号；全✅知识点跳过，相近或有前置关系的知识点可合并。")
     return "\n".join(lines)
 
 
@@ -5755,9 +5773,17 @@ def submission_report_publish(sid):
         flash("请先生成批改报告，再发布给学生。")
         return redirect(url_for("submission_report", sid=sid))
     publish = 0 if sub["report_published"] else 1
-    db.execute("UPDATE submissions SET report_published=? WHERE id=?", (publish, sid))
+    db.execute("UPDATE submissions SET report_published=?,"
+               "status=CASE WHEN ? THEN '已批改' ELSE status END WHERE id=?",
+               (publish, publish, sid))
     db.commit()
-    flash("报告已发布，学生可在「我的学习」里查看。" if publish else "报告已撤回，学生不再可见。")
+    refreshed = db.execute("SELECT * FROM submissions WHERE id=?", (sid,)).fetchone()
+    try:
+        _update_student_weak_points(db, refreshed)
+    except Exception:
+        log.exception("更新学生薄弱点失败 submission=%s", sid)
+    flash("评阅报告和逐题批改已一并发布，学生可在「我的学习」里查看。"
+          if publish else "报告和逐题批改已撤回，学生不再可见。")
     return redirect(url_for("submission_report", sid=sid))
 
 
@@ -5884,8 +5910,9 @@ def student_report(sid):
     course = db.execute("SELECT * FROM courses WHERE id=?", (hw["course_id"],)).fetchone()
     kg_diag = _kg_diagnosis(db, sub)
     return render_template("report.html", sub=sub, hw=hw, course=course, md=sub["report_md"],
-                           body=render_markdown(sub["report_md"]),
-                           student_name=g.user["display_name"], is_teacher=False,
+                            # 学生端统一交给 KaTeX 渲染，避免部分浏览器不支持服务端 MathML。
+                            body=render_markdown(sub["report_md"], server_mathml=False),
+                            student_name=g.user["display_name"], is_teacher=False,
                            kg_diagnosis=kg_diag)
 
 
@@ -5908,7 +5935,10 @@ def _weak_point_groups(db, student_id):
         "SELECT w.*, c.name AS course_name FROM student_weak_points w "
         "JOIN courses c ON c.id=w.course_id "
         "JOIN enrollments e ON e.course_id=w.course_id AND e.student_id=w.student_id "
-        "WHERE w.student_id=? AND w.status<>'removed' ORDER BY c.name, w.tag",
+        "WHERE w.student_id=? AND w.status<>'removed' "
+        "AND (w.source_submission_id=0 OR EXISTS(SELECT 1 FROM submissions s "
+        "  WHERE s.id=w.source_submission_id AND s.report_published=1)) "
+        "ORDER BY c.name, w.tag",
         (student_id,)).fetchall()
     groups = {}
     tag_meta = {}
@@ -6222,7 +6252,7 @@ def student_wrong_questions():
         "WHERE s.student_id=? AND q.verdict IN ('错','半对') "
         "AND s.id=(SELECT MAX(s2.id) FROM submissions s2 "
         "  WHERE s2.lecture_id=s.lecture_id AND s2.student_id=s.student_id) "
-        "AND (s.status='已批改' OR s.report_published=1) "
+        "AND s.report_published=1 "
         "ORDER BY c.name, l.id DESC, q.id",
         (g.user["id"],)).fetchall()
     # 先按知识点筛选，再按课程汇总可选范围

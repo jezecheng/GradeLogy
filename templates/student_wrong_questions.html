@@ -68,19 +68,19 @@
       {% if q.ocr_text %}
       <div class="wq-block">
         <span class="wq-label">我的作答</span>
-        <pre class="wq-text">{{ q.ocr_text }}</pre>
+        <pre class="wq-text question-comment">{{ q.ocr_text }}</pre>
       </div>
       {% endif %}
       {% if q.ai_comment or q.note %}
       <div class="wq-block">
         <span class="wq-label">老师评语</span>
-        <p class="wq-text">{{ q.ai_comment or q.note }}</p>
+        <p class="wq-text question-comment">{{ q.ai_comment or q.note }}</p>
       </div>
       {% endif %}
       {% if q.standard_answer %}
       <details class="wq-answer">
         <summary>查看标准答案</summary>
-        <pre class="wq-text">{{ q.standard_answer }}</pre>
+        <pre class="wq-text question-comment">{{ q.standard_answer }}</pre>
       </details>
       {% endif %}
       <div class="wq-foot">
