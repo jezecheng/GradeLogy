@@ -34,7 +34,13 @@ DEFAULT_GRADE_PROMPT = (
     "5. 作业没有标注分值就不要编造分数：score 与 max_score 都输出 0，只给定性判定。\n"
     "6. comment 不超过 60 个汉字，standard_answer 不超过 60 个汉字。\n"
     "7. 学生作业中缺失或与标准答案对不上的题，不要凭空补题。\n"
-    "8. 化学式、离子式、数学式请用轻量 LaTeX 写法，用一对 $ 包裹，"
+    "8. 必须逐题核对题干与学生页：以本讲范围提供的参考题干为基准，"
+    "将学生 PDF 每一页上可见的题号、题干原文和关键条件逐一比对；"
+    "只有题号与题干文字一致或明确等价时才可确认学生页。不能仅凭答案数字、相似知识点或标准答案猜页码，"
+    "也不能把相邻题或标准答案页当成学生答卷页。题干无法比对、题号冲突、页面内容不足或找不到对应页时，"
+    "必须输出 student_page=0、page_match=\"uncertain\" 或 \"not_found\"，不得猜页码；"
+    "此时判为「无法判定」，并在 comment 说明需人工核对原卷。\n"
+    "9. 化学式、离子式、数学式请用轻量 LaTeX 写法，用一对 $ 包裹，"
     "例如碳酸根写 $\\mathrm{CO_3^{2-}}$、硫酸根写 $\\mathrm{SO_4^{2-}}$、"
     "电子转移数写 $2e^-$、pH 计算写 $\\mathrm{pH}=-\\lg[\\mathrm{H^+}]$；"
     "化学方程式可写 $\\mathrm{2H_2+O_2\\xrightarrow{\\text{点燃}}2H_2O}$。"
@@ -45,13 +51,19 @@ GRADE_OUTPUT_CONTRACT = (
     "输出格式（必须严格遵守）：只输出 JSON，不要输出解释或代码块标记：\n"
     '{"questions":[{"no":"题号","ocr":"学生实际作答内容","standard_answer":"标准答案要点",'
     '"verdict":"对|半对|错|无法判定","score":0,"max_score":0,"comment":"给分/扣分说明",'
-    '"student_page":1,"answer_page":1,"student_box":[0,0,1,1],"answer_box":[0,0,1,1]}],'
+    '"student_page":1,"page_match":"confirmed|uncertain|not_found","answer_page":1,'
+    '"student_box":[0,0,1,1],"answer_box":[0,0,1,1]}],'
     '"weak_points":[{"no":"题号","type":"失分类型","detail":"具体说明"}],'
     '"evaluation":"整份作业总评（不超过 100 字）","total_score":"如 12/20，没有分值就留空"}\n'
     "页码与裁剪框说明：\n"
-    "1. student_page：该题学生答案出现在「学生作业」图片中的第几页（1 起；多份文件按发送顺序连续编号），看不清填 1。\n"
+    "1. student_page：确认后填学生答卷中的全局页码（1 起；多份文件按发送顺序连续编号）；未确认必须填 0。"
+    "只有完成题干比对后 page_match 才能填 confirmed。\n"
     "2. answer_page：该题标准答案出现在「标准答案」图片中的第几页（1 起，仅针对发送的页码），看不清填 1。\n"
-    "3. student_box / answer_box：裁剪框 [x, y, w, h]，均为 0~1 的比例（左上角为原点），大致圈住该题的学生答案/标准答案区域；不确定就用 [0,0,1,1] 表示整页。"
+    "3. 页码确认规则：必须将学生页上题号及题干/关键条件与本讲范围给出的参考题干比对；"
+    "不能仅凭答案相似或题号推断。题干缺失、冲突或不能确认时，student_page=0，"
+    "page_match=uncertain 或 not_found，verdict=无法判定，并在 comment 提醒人工核对原卷。\n"
+    "4. student_box / answer_box：裁剪框 [x, y, w, h]，均为 0~1 的比例（左上角为原点），"
+    "大致圈住该题的学生答案/标准答案区域；不确定就用 [0,0,1,1] 表示整页。"
 )
 
 PDF_GRADE_PROMPT = DEFAULT_GRADE_PROMPT + "\n" + GRADE_OUTPUT_CONTRACT
@@ -283,17 +295,29 @@ def _normalize(raw):
         verdict = str(q.get("verdict", "")).strip()
         if verdict not in VERDICTS:
             verdict = "无法判定"
-        sp = int(_as_num(q.get("student_page"), 1))
+        sp = int(_as_num(q.get("student_page"), 0))
         ap = int(_as_num(q.get("answer_page"), 1))
+        page_match = str(q.get("page_match") or "").strip().lower()
+        if page_match not in ("confirmed", "uncertain", "not_found"):
+            page_match = "uncertain"
+        if sp < 1 and page_match == "confirmed":
+            page_match = "uncertain"
+        if page_match != "confirmed":
+            sp = 0
+            verdict = "无法判定"
+            comment = "学生页未能通过题干比对确认，请人工核对原卷。"
+        else:
+            comment = str(q.get("comment", "")).strip()
         questions.append({
             "no": no,
             "ocr": str(q.get("ocr", "")).strip(),
             "standard_answer": str(q.get("standard_answer", "")).strip(),
             "verdict": verdict,
-            "score": _as_num(q.get("score"), 0.0),
+            "score": _as_num(q.get("score"), 0.0) if page_match == "confirmed" else 0.0,
             "max_score": _as_num(q.get("max_score"), 0.0),
-            "comment": str(q.get("comment", "")).strip(),
-            "student_page": sp if sp >= 1 else 1,
+            "comment": comment,
+            "student_page": sp,
+            "page_match": page_match,
             "answer_page": ap if ap >= 1 else 1,
             "student_box": _box(q.get("student_box")),
             "answer_box": _box(q.get("answer_box")),
@@ -301,7 +325,7 @@ def _normalize(raw):
     return questions
 
 
-def analyze_answer_pdf(answer_path, api_url, api_key, model, max_tokens=16384,
+def analyze_answer_pdf(answer_path, api_url, api_key, model, max_tokens=32768,
                        pages=None, usage_hook=None):
     """从教师版标准答案里识别题目清单，返回 (questions, error)。
 
@@ -383,7 +407,7 @@ def _no_token(value):
 
 
 def analyze_question_tags(answer_path, questions, api_url, api_key, model,
-                          max_tokens=16384, pages=None, usage_hook=None,
+                          max_tokens=32768, pages=None, usage_hook=None,
                           batch_size=12, candidate_nodes=None):
     """给作业范围内每道题生成知识点标签，返回 (rows, error)。
 
@@ -485,12 +509,18 @@ def grade_pdf_submission(student_path, answer_path, api_url, api_key, model,
                 "errors": [], "error": "请先上传教师版标准答案 PDF，再开始批阅。"}
     student_paths = list(student_path) if isinstance(student_path, (list, tuple)) else [student_path]
     student_parts = []
+    student_page_count = 0
     for path in student_paths:
         parts, err = _file_parts(path, "学生作业")
         if err:
             return {"questions": [], "weak_points": [], "evaluation": "", "total_score": "",
                     "errors": [], "error": err}
-        student_parts += parts
+        for part in parts:
+            student_page_count += 1
+            student_parts.extend([
+                {"type": "text", "text": f"【学生作业原 PDF 全局第 {student_page_count} 页】"},
+                part,
+            ])
     answer_parts, err = _file_parts(answer_path, "标准答案", answer_pages)
     if err:
         return {"questions": [], "weak_points": [], "evaluation": "", "total_score": "",
@@ -498,11 +528,18 @@ def grade_pdf_submission(student_path, answer_path, api_url, api_key, model,
 
     base = (prompt.strip() + "\n" + GRADE_OUTPUT_CONTRACT) if prompt.strip() else PDF_GRADE_PROMPT
     full_prompt = base + (f"\n补充要求：{extra}" if extra else "")
+    labeled_answer_parts = []
+    for index, part in enumerate(answer_parts, 1):
+        original_page = answer_pages[index - 1] if answer_pages else index
+        labeled_answer_parts.extend([
+            {"type": "text", "text": f"【标准答案本次输入第 {index} 页；教师 PDF 第 {original_page} 页】"},
+            part,
+        ])
     content = [{"type": "text", "text": full_prompt},
-               {"type": "text", "text": f"① 学生作业，共 {len(student_parts)} 页："}]
+               {"type": "text", "text": f"① 学生作业，共 {student_page_count} 页："}]
     content += student_parts
     content.append({"type": "text", "text": f"② 教师版标准答案，共 {len(answer_parts)} 页："})
-    content += answer_parts
+    content += labeled_answer_parts
 
     reply, finish, err = llm.chat(api_url, api_key, model, content,
                                   max_tokens=max_tokens, timeout=GRADE_TIMEOUT,
@@ -555,7 +592,7 @@ REPORT_PROMPT = DEFAULT_REPORT_PROMPT + "\n" + REPORT_OUTPUT_CONTRACT
 
 
 def ai_report_comment(questions, weak_points, evaluation, api_url, api_key, model,
-                      max_tokens=2048, prompt="", usage_hook=None, kg_context=""):
+                       max_tokens=32768, prompt="", usage_hook=None, kg_context=""):
     """根据逐题结果生成报告里的「评价」部分；失败返回 {}，不影响报告其余内容。
 
     kg_context: 知识图谱诊断摘要文本，注入 prompt 让 AI 引用前置知识断层做归因。
@@ -619,7 +656,7 @@ LECTURE_SUMMARY_PROMPT = (
 )
 
 
-def ai_lecture_summary(qstats, api_url, api_key, model, max_tokens=4096,
+def ai_lecture_summary(qstats, api_url, api_key, model, max_tokens=32768,
                        kg_chains="", usage_hook=None):
     """根据全班逐题判定与评语，生成讲次汇总。
     成功返回 {"per_question": ..., "overall": ...}；
@@ -780,7 +817,7 @@ def _compose_tag_prompt(template, contract, values):
 
 
 def ai_horizontal_analysis(context, api_url, api_key, model,
-                           max_tokens=4096, prompt="", usage_hook=None):
+                           max_tokens=32768, prompt="", usage_hook=None):
     """按讲次生成全班教学诊断；context 提供提示词所需的各项数据。
 
     context 键：subject_and_course / lecture_name / total_students /
@@ -817,7 +854,7 @@ def ai_horizontal_analysis(context, api_url, api_key, model,
 
 
 def ai_vertical_analysis(context, api_url, api_key, model,
-                         max_tokens=4096, prompt="", usage_hook=None):
+                         max_tokens=32768, prompt="", usage_hook=None):
     """按学生跨讲次生成阶段诊断；context 提供提示词所需的各项数据。"""
     values = {
         "lecture_count": str(context.get("lecture_count", 0)),

@@ -67,7 +67,7 @@
       {% if s.n_questions %}
         <span class="review-state review-done" title="AI 已完成批阅">✓ AI 已批阅</span>
         {% if s.n_reviewed >= s.n_questions %}
-        <span class="review-state review-done" title="所有题目均已审核">✓ 审核完成</span>
+        <span class="review-state review-done" title="所有题目均已人工复核">✓ 人工复核完成</span>
         {% else %}
         <span class="review-state review-pending"
               title="还有 {{ s.n_questions - s.n_reviewed }} 道题未审核">⚠ 待审核 {{ s.n_reviewed }}/{{ s.n_questions }}</span>
@@ -431,7 +431,7 @@
     </div>
     <div class="kpi">
       <div class="kpi-num">{{ n_reviewed }}</div>
-      <div class="kpi-lbl">已审核</div>
+      <div class="kpi-lbl">已人工复核</div>
     </div>
     <div class="kpi">
       <div class="kpi-num">{{ qstats|length }}</div>

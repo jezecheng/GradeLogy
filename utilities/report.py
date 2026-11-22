@@ -100,46 +100,30 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
     if nxt:
         out += [f"**下一步建议：** {nxt}", ""]
 
-    # 知识图谱诊断：将 KG 的前置知识断层分析直接写入 MD 报告
+    # 知识图谱诊断：以题目为行、关联知识点为列展示掌握状态。
     if kg_diagnosis:
         out += ["## 四、知识图谱诊断", "",
-                "> 基于本课程挂载的知识图谱，分析薄弱知识点的关联概念与前置知识断层。", ""]
-        for d in kg_diagnosis:
-            p = d["perf"]
-            out.append(f"### {d['tag']}")
+                "> 每行是一道题，按题目关联知识点显示状态；绿色✓表示判定正常，黄色!表示需要关注，红色表示可能存在问题。", ""]
+        matrix = kg_diagnosis.get("matrix") if isinstance(kg_diagnosis, dict) else None
+        if matrix and matrix.get("columns"):
+            headers = ["题号", "题目简述"] + [c["name"] for c in matrix["columns"]] + ["知识点点评"]
+            out.append("| " + " | ".join(_md_cell(x) for x in headers) + " |")
+            out.append("| " + " | ".join(["---"] * len(headers)) + " |")
+            for row in matrix.get("rows") or []:
+                cells = [row.get("no", ""), row.get("brief", "")]
+                cells.extend(row.get("cells", {}).get(c["tag"], "—")
+                             for c in matrix["columns"])
+                cells.append(row.get("analysis", ""))
+                out.append("| " + " | ".join(_md_cell(x) for x in cells) + " |")
             out.append("")
-            # 用表格展示判定分布，更清晰
-            out.append("| 判定 | 次数 |")
-            out.append("| :---: | ---: |")
-            if p["right"]:
-                out.append(f"| ✓ 对 | {p['right']} |")
-            if p["partial"]:
-                out.append(f"| ◐ 半对 | {p['partial']} |")
-            if p["wrong"]:
-                out.append(f"| ✗ 错 | {p['wrong']} |")
-            out.append("")
-            if d.get("definition"):
-                out.append(f"> **概念定义**：{d['definition']}")
+        else:
+            # 兼容旧格式的已保存/外部调用数据。
+            for d in (kg_diagnosis if isinstance(kg_diagnosis, list) else []):
+                p = d["perf"]
+                out.append(f"### {d['tag']}（对{p['right']}/半对{p['partial']}/错{p['wrong']}）")
+                if d.get("weak_prereqs"):
+                    out.append("前置知识薄弱：" + "、".join(x["name"] for x in d["weak_prereqs"]))
                 out.append("")
-            if d.get("weak_prereqs"):
-                out.append("**⚠ 前置知识断层**")
-                out.append("")
-                out.append(f"你在「{d['tag']}」上失分，而它的前置概念也掌握不牢，**建议优先补强这些前置概念**：")
-                out.append("")
-                for j, x in enumerate(d["weak_prereqs"], 1):
-                    line = f"{j}. **{x['name']}**"
-                    if x.get("perf"):
-                        line += f"（对{x['perf']['right']}/半对{x['perf']['partial']}/错{x['perf']['wrong']}）"
-                    if x.get("evidence"):
-                        line += f" — {x['evidence']}"
-                    out.append(line)
-                out.append("")
-            if d.get("untested_prereqs"):
-                names = "、".join(x["name"] for x in d["untested_prereqs"])
-                out.append(f"其他前置知识（本次未涉及，如不熟悉可一并复习）：{names}")
-                out.append("")
-            out.append("---")
-            out.append("")
     return "\n".join(out).strip() + "\n"
 
 

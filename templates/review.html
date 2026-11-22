@@ -23,7 +23,7 @@
   · <a href="{{ url_for('uploaded_file', filename=f) }}" target="_blank">扫描件 {{ loop.index + 1 }}</a>
   {% endfor %}
   {% if n_total %}
-  · 已复核 <strong id="reviewed-count">{{ n_reviewed }}</strong>/{{ n_total }} 题
+  · 已人工复核 <strong id="reviewed-count">{{ n_reviewed }}</strong>/{{ n_total }} 题
   {% endif %}
 </p>
 
@@ -84,10 +84,10 @@
 {% else %}
 <div class="card">
   <div class="review-toolbar" aria-label="题目导航与筛选">
-    <button type="button" data-review-filter="pending" aria-pressed="true">待复核</button>
+    <button type="button" data-review-filter="pending" aria-pressed="true">待人工复核</button>
     <button type="button" data-review-filter="all" aria-pressed="false">全部</button>
     <button type="button" data-review-filter="unknown" aria-pressed="false">无法判定</button>
-    <label class="small">跳转题目<select id="review-jump" class="review-jump">{% for q in questions %}<option value="{{ q.id }}">{{ q.no }} · {{ '已复核' if q.reviewed else '待复核' }}</option>{% endfor %}</select></label>
+    <select id="review-jump" class="review-jump" aria-label="跳转到题目">{% for q in questions %}<option value="{{ q.id }}">{{ q.no }} · {{ '已完成' if q.reviewed else '待处理' }}</option>{% endfor %}</select>
     <span id="review-filter-status" class="muted small" role="status"></span>
   </div>
   <form method="post" action="{{ url_for('submission_review_save', sid=sub.id) }}"
@@ -101,8 +101,15 @@
         {% if q.verdict %}
         <span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">判定：{{ q.verdict }}</span>
         {% endif %}
+        {% if q.page_match == 'confirmed' and q.page_no %}
+        <span class="page-chip page-chip-confirmed">原 OCR：PDF 第 {{ q.page_no }} 页</span>
+        {% elif q.page_match in ['uncertain', 'not_found'] %}
+        <span class="page-chip page-chip-uncertain">原 OCR 页码未确认</span>
+        {% elif q.page_no %}
+        <span class="page-chip">历史 OCR 页码：PDF 第 {{ q.page_no }} 页</span>
+        {% endif %}
         <span class="reviewed-badge{% if not q.reviewed %} is-pending{% endif %}"
-              data-reviewed="{{ 1 if q.reviewed else 0 }}">{{ '✓ 已复核' if q.reviewed else '待复核' }}</span>
+              data-reviewed="{{ 1 if q.reviewed else 0 }}">{{ '✓ 已人工复核' if q.reviewed else '待人工复核' }}</span>
         <span class="note-preview muted small" data-note-preview>{{ (q.note or '')[:60] }}</span>
         <span class="save-hint small" data-save-hint style="display:none"></span>
       </summary>
@@ -134,25 +141,27 @@
             <div class="latex-preview" tabindex="0" role="button"
                  title="点击编辑" aria-label="标准答案，点击编辑"></div>
           </div>
-          <p class="muted small">如需核对原卷，可展开下方「题目原图」或点上方「查看原始扫描件」。</p>
+          <p class="muted small">如需核对原卷，可展开下方页码对照或点上方「查看原始扫描件」。</p>
         </div>
       </div>
       {% set media = q_media[loop.index0] if q_media|length > loop.index0 else {} %}
-      {% if media.student_url or media.answer_url %}
+      {% if media.student_url or media.answer_url or media.page_match in ['uncertain', 'not_found'] %}
       <details class="q-media">
-        <summary>题目原图 <span class="muted small">（学生答案 / 标准答案，点击展开）</span></summary>
+        <summary>原卷页码对照 <span class="muted small">（学生 PDF / 标准答案 PDF）</span></summary>
         <div class="q-media-grid">
           {% if media.student_url %}
           <div class="q-media-item">
-            <div class="col-title small">学生答案</div>
+            <div class="col-title small">学生作答 · PDF 第 {{ media.student_pdf_page }} 页（OCR 全局页码 {{ media.student_page_no }}）</div>
             <a href="{{ media.student_full_url }}" target="_blank" rel="noopener" class="q-img-link">
               <img src="{{ media.student_url }}" alt="学生答案 {{ q.no }}" loading="lazy">
             </a>
           </div>
+          {% elif media.page_match in ['uncertain', 'not_found'] %}
+          <p class="page-match-warning">AI 未能通过题干比对确认学生作答页；请打开上方原始扫描件人工核对。</p>
           {% endif %}
           {% if media.answer_url %}
           <div class="q-media-item">
-            <div class="col-title small">标准答案</div>
+            <div class="col-title small">标准答案 · PDF 第 {{ q.answer_page }} 页</div>
             <a href="{{ media.answer_full_url }}" target="_blank" rel="noopener" class="q-img-link">
               <img src="{{ media.answer_url }}" alt="标准答案 {{ q.no }}" loading="lazy">
             </a>
@@ -164,7 +173,7 @@
       <div class="review-actions">
         <button type="button" class="small reviewed-toggle{% if q.reviewed %} reviewed-on{% endif %}"
                 data-qid="{{ q.id }}" data-reviewed="{{ 1 if q.reviewed else 0 }}">
-          {% if q.reviewed %}已审核 ✓{% else %}标记已审核{% endif %}
+          {% if q.reviewed %}已人工复核 ✓{% else %}标记完成人工复核{% endif %}
         </button>
       </div>
     </details>
@@ -179,7 +188,7 @@
           </span>
         </p>
         <p class="muted small" style="margin-top:6px">
-          按「完全答对的题数 ÷ 已判定题数」计算。草稿不公开，全部复核后可公开逐题结果。
+          按「完全答对的题数 ÷ 已判定题数」计算。草稿不公开，全部完成人工复核后可公开逐题结果。
         </p>
       </div>
       <div class="review-col wide">
@@ -190,7 +199,7 @@
                   data-has-result="{{ '1' if (sub.feedback or (summary and summary.evaluation)) else '0' }}"
                   {% if not all_reviewed %}disabled{% endif %}>生成新的总评</button>
           <span class="muted small" id="gen-overall-hint">
-            {% if not all_reviewed %}还有 {{ n_total - n_reviewed }} 题未复核，全部复核后才能生成总评{% else %}已全部复核，可用 AI 重写总评（生成后仍可继续修改）{% endif %}
+            {% if not all_reviewed %}还有 {{ n_total - n_reviewed }} 题待人工复核，全部完成后才能生成总评{% else %}已全部人工复核，可用 AI 重写总评（生成后仍可继续修改）{% endif %}
           </span>
         </div>
       </div>
@@ -198,7 +207,7 @@
     <div class="save-bar">
       <span class="review-save-state" id="review-save-state" role="status">{{ '逐题结果已公开' if sub.status == '已批改' else '草稿 · 学生暂不可见' }}；报告另行公开。</span>
       <button type="submit" name="action" value="draft" class="ghost">保存草稿</button>
-      <button type="submit" name="action" value="publish" id="review-publish" {% if not all_reviewed or job_status in ('queued','running') %}disabled{% endif %}>完成复核并公开逐题结果</button>
+      <button type="submit" name="action" value="publish" id="review-publish" {% if not all_reviewed or job_status in ('queued','running') %}disabled{% endif %}>完成人工复核并公开逐题结果</button>
       {% if sub.report_md %}
       <a class="btn-link ghost" href="{{ url_for('submission_report', sid=sub.id) }}">打开评阅报告</a>
       {% else %}
@@ -216,7 +225,7 @@
   {% if job_status in ('queued','running') %}
   <p class="muted">批阅任务尚未完成，请等待批阅结束，再复核所有题目后生成报告。</p>
   {% else %}
-  <p class="muted">生成批阅报告前需要人工审核每一道题：请在每题下方点「标记已审核」。
+  <p class="muted">生成批阅报告前需要人工复核每一道题：请在每题下方点「标记完成人工复核」。
     当前还有 <strong id="report-blocked-count">{{ n_total - n_reviewed }}</strong> 题未审核。</p>
   {% endif %}
   <div class="modal-actions">
@@ -298,8 +307,8 @@
     }
     if (genHint) {
       genHint.textContent = all
-        ? '已全部复核，可用 AI 重写总评（生成后仍可继续修改）'
-        : '还有 ' + (total - done) + ' 题未复核，全部复核后才能生成总评';
+        ? '已全部人工复核，可用 AI 重写总评（生成后仍可继续修改）'
+        : '还有 ' + (total - done) + ' 题待人工复核，全部完成后才能生成总评';
     }
     document.dispatchEvent(new Event('review-progress'));
   }
@@ -378,13 +387,13 @@
       // 同步复核状态
       if (badge) {
         badge.dataset.reviewed = d.reviewed ? '1' : '0';
-        badge.textContent = d.reviewed ? '✓ 已复核' : '待复核';
+        badge.textContent = d.reviewed ? '✓ 已人工复核' : '待人工复核';
         badge.classList.toggle('is-pending', !d.reviewed);
       }
       var btn = card.querySelector('.reviewed-toggle');
       if (btn) {
         btn.dataset.reviewed = d.reviewed;
-        btn.textContent = d.reviewed ? '已审核 ✓' : '标记已审核';
+        btn.textContent = d.reviewed ? '已人工复核 ✓' : '标记完成人工复核';
         btn.classList.toggle('reviewed-on', !!d.reviewed);
       }
       showHint(card, '✓ 已自动保存');
@@ -436,7 +445,7 @@
       }
     });
 
-    // 「已审核」按钮：切换审核状态并保存；标记已审核后折叠并跳到下一道未审核题
+    // 人工复核按钮：切换状态并保存；完成后折叠并跳到下一道待复核题
     var toggleBtn = card.querySelector('.reviewed-toggle');
     if (toggleBtn) {
       toggleBtn.addEventListener('click', function () {
@@ -457,7 +466,7 @@
     }
   });
 
-  // 全部复核完成后，用 AI 生成一份新总评回填文本框，教师可继续修改
+  // 全部人工复核完成后，用 AI 生成一份新总评回填文本框，教师可继续修改
   if (genBtn) {
     var statusUrlBase = '{{ url_for("submission_report_comment_status", sid=sub.id) }}';
     var pollComment = function (opId) {

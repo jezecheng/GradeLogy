@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from db import get_db
 from model_catalog import MODEL_PRESETS
 from utilities import ai_debug
+from utilities.time_utils import BEIJING_TZ, beijing_wall_now
 
 _log = logging.getLogger("gradelogy.ai")
 
@@ -48,7 +49,7 @@ AI_STATUS_LABEL = {"queued": "排队中", "running": "进行中", "success": "�
 
 def _now_in_peak():
     """返回 (是否高峰, 下一次闲时开始时刻的 HH:MM 描述)。"""
-    now = datetime.now()
+    now = datetime.now(BEIJING_TZ)
     # 周六=5, 周日=6 全天闲时
     if now.weekday() >= 5:
         return False, None
@@ -85,7 +86,7 @@ def _start_ai_operation(teacher_id, operation_type, model, course_id=None,
         "unit": "元/百万 token",
         "source": price_source,
     }
-    started_at = datetime.now().isoformat(sep=" ", timespec="milliseconds")
+    started_at = beijing_wall_now().isoformat(sep=" ", timespec="milliseconds")
     db = get_db()
     cur = db.execute(
         "INSERT INTO ai_operations(teacher_id,operation_type,course_id,lecture_id,"
@@ -255,7 +256,7 @@ def _record_ai_usage(operation, event):
 def _finish_ai_operation(operation, status, error="", result=None):
     if not operation or operation["finished"]:
         return
-    finished_at = datetime.now().isoformat(sep=" ", timespec="milliseconds")
+    finished_at = beijing_wall_now().isoformat(sep=" ", timespec="milliseconds")
     db = get_db()
     if result is None:
         db.execute(
@@ -378,7 +379,7 @@ def _ai_dashboard_data(filters):
     where, params = [], []
     if filters["period"] != "all":
         days = int(filters["period"])
-        start = (datetime.now() - timedelta(days=days - 1)).replace(
+        start = (beijing_wall_now() - timedelta(days=days - 1)).replace(
             hour=0, minute=0, second=0, microsecond=0)
         where.append("o.started_at>=?")
         params.append(start.isoformat(sep=" ", timespec="milliseconds"))
@@ -523,7 +524,7 @@ def _ai_dashboard_data(filters):
     if filters["period"] == "all":
         day_labels = sorted({row["day"] for row in trend_rows})
     else:
-        first_day = datetime.now().date() - timedelta(days=int(filters["period"]) - 1)
+        first_day = beijing_wall_now().date() - timedelta(days=int(filters["period"]) - 1)
         day_labels = [(first_day + timedelta(days=offset)).isoformat()
                       for offset in range(int(filters["period"]))]
     rows_by_day = {}

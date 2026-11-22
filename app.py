@@ -60,6 +60,7 @@ from utilities import knowledge_graph as kg_utils
 from utilities import kg_text
 from utilities import kg_transfer
 from utilities import tags as tag_utils
+from utilities.time_utils import BEIJING_TZ, beijing_wall_now, now_beijing
 from utilities.teacher_views import workload
 from utilities.report import _overall_text, build_report_md, render_markdown
 from utilities.sessions import (
@@ -93,11 +94,7 @@ except ImportError:
     pass
 
 ROLE_LABEL = {"admin": "管理员", "teacher": "老师", "student": "学生"}
-DISPLAY_TIMEZONE_OPTIONS = (
-    "Asia/Shanghai", "UTC", "Asia/Singapore", "Asia/Tokyo", "Europe/London",
-    "Europe/Berlin", "America/New_York", "America/Chicago", "America/Denver",
-    "America/Los_Angeles", "Australia/Sydney",
-)
+DISPLAY_TIMEZONE_OPTIONS = ("Asia/Shanghai",)
 
 DEFAULT_PASSWORDS = ("admin123", "123456")
 
@@ -240,7 +237,7 @@ kg_log = logging.getLogger("gradelogy.kg")
 grading_log = logging.getLogger("gradelogy.grading")
 security_log = logging.getLogger("gradelogy.security")
 
-APP_STARTED_AT = datetime.now()
+APP_STARTED_AT = now_beijing()
 
 
 def _read_git_info():
@@ -363,19 +360,8 @@ def _zone(name):
 
 
 def _display_timezone_name():
-    """当前请求的用户显示时区；无设置、非法旧值和未登录场景回退上海。"""
-    if not has_request_context():
-        return cfg.get("DISPLAY_TIMEZONE") if _is_valid_timezone(cfg.get("DISPLAY_TIMEZONE")) else "Asia/Shanghai"
-    cached = getattr(g, "_display_timezone_name", None)
-    if cached:
-        return cached
-    user = getattr(g, "user", None)
-    preferred = get_setting(user["id"], "display_timezone") if user else ""
-    for name in (preferred, cfg.get("DISPLAY_TIMEZONE"), "Asia/Shanghai"):
-        if _is_valid_timezone(name):
-            g._display_timezone_name = name
-            return name
-    return "Asia/Shanghai"  # pragma: no cover - 最后候选始终有效
+    """系统统一使用北京时间；忽略历史用户偏好和部署环境时区。"""
+    return "Asia/Shanghai"
 
 
 def _parse_display_time(value, source):
@@ -424,13 +410,19 @@ def _datetime_local(value):
 
 
 def _deadline_storage(value):
-    """用户本地截止时间转回旧存储口径，历史数据无需迁移。"""
+    """把 datetime-local 中的北京时间写成带 +08:00 的明确时间戳。"""
     if not value:
         return ""
-    dt = _parse_display_time(value, _display_timezone_name())
+    dt = _parse_display_time(value, "Asia/Shanghai")
     if dt is None:
         return value
-    return dt.astimezone(_zone(cfg.get("LEGACY_TIMEZONE"))).strftime("%Y-%m-%dT%H:%M")
+    return dt.astimezone(BEIJING_TZ).isoformat(timespec="minutes")
+
+
+def _beijing_iso(value, source="UTC"):
+    """将时间转为带 +08:00 偏移的 ISO 时间，供导出日志使用。"""
+    dt = _parse_display_time(value, source)
+    return dt.astimezone(BEIJING_TZ).isoformat(timespec="seconds") if dt else ""
 
 
 def csrf_token():
@@ -968,13 +960,8 @@ def change_password():
 @_routes.route("/preferences/timezone", methods=["POST"])
 @login_required
 def display_timezone_save():
-    name = request.form.get("display_timezone", "").strip()[:100]
-    if not _is_valid_timezone(name):
-        flash("请输入有效的 IANA 时区名称，例如 Asia/Shanghai")
-    else:
-        save_setting(g.user["id"], "display_timezone", name)
-        get_db().commit()
-        flash(f"显示时区已保存为 {name}")
+    # 兼容旧版书签/表单，但不再允许单用户覆盖系统时区。
+    flash("系统时间统一使用北京时间（Asia/Shanghai，UTC+08:00）")
     return redirect(url_for("change_password"))
 
 
@@ -1038,14 +1025,14 @@ def _admin_user_query():
         where.append("u.active=?")
         params.append(int(active))
     if created == "today":
-        where.append("date(u.created_at,'localtime')=date('now','localtime')")
+        where.append("date(u.created_at,'+8 hours')=date('now','+8 hours')")
     elif created in ("7d", "30d"):
         where.append("u.created_at >= datetime('now', ?)")
         params.append("-7 day" if created == "7d" else "-30 day")
     if login == "never":
         where.append("COALESCE(u.last_login_at,'')=''")
     elif login == "today":
-        where.append("date(u.last_login_at,'localtime')=date('now','localtime')")
+        where.append("date(u.last_login_at,'+8 hours')=date('now','+8 hours')")
     elif login in ("7d", "30d"):
         where.append("u.last_login_at >= datetime('now', ?)")
         params.append("-7 day" if login == "7d" else "-30 day")
@@ -1078,7 +1065,8 @@ def admin_logs_page():
     for item in logview.list_logs(cfg.get("LOG_DIR")):
         item = dict(item)
         item["size_text"] = storage.human_size(item["size"])
-        item["mtime_text"] = datetime.fromtimestamp(item["mtime"]).strftime("%Y-%m-%d %H:%M:%S")
+        item["mtime_text"] = datetime.fromtimestamp(item["mtime"], BEIJING_TZ).isoformat(
+            sep=" ", timespec="seconds")
         files.append(item)
     selected = request.args.get("name", "app.log")
     names = {item["name"] for item in files}
@@ -1404,7 +1392,7 @@ def _course_exports(cid):
             "name": name,
             "size": storage.human_size(os.path.getsize(path)),
             "created": datetime.strptime(match.group(2), "%Y%m%d_%H%M%S")
-            .strftime("%Y-%m-%d %H:%M:%S")})
+            .replace(tzinfo=BEIJING_TZ).isoformat(sep=" ", timespec="seconds")})
     return items[:10]
 
 
@@ -1503,7 +1491,7 @@ def course_export_start(cid):
     course = own_course(cid)
     _prune_course_exports()
     os.makedirs(cfg.get("EXPORT_DIR"), exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stamp = now_beijing().strftime("%Y%m%d_%H%M%S")
     name, n = f"course_{cid}_{stamp}.zip", 2
     path = os.path.join(cfg.get("EXPORT_DIR"), name)
     while os.path.exists(path):
@@ -2387,7 +2375,7 @@ def lecture_summary_generate(hid):
         lines.append("\n## 整体总结\n")
         lines.append(result.get("overall", ""))
         md = "\n".join(lines)
-        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        now = now_beijing().isoformat(sep=" ", timespec="minutes")
         database.execute("UPDATE lectures SET summary_md=?, summary_at=? WHERE id=?",
                          (md, now, hid))
         database.commit()
@@ -2652,7 +2640,10 @@ def _save_grading_result(db, sid, gen, answer_pages=None):
     ap_list = list(answer_pages or [])
     for i, q in enumerate(gen["questions"], 1):
         comment = (q.get("comment") or "").strip()
-        sp = int(q.get("student_page") or 1)
+        sp = int(q.get("student_page") or 0)
+        page_match = str(q.get("page_match") or "uncertain")
+        if page_match != "confirmed":
+            sp = 0
         ap_idx = int(q.get("answer_page") or 1)
         # 模型给的 answer_page 是「发送页中的序号」，映射回 PDF 实际页码
         if ap_list:
@@ -2661,11 +2652,12 @@ def _save_grading_result(db, sid, gen, answer_pages=None):
             apage = ap_idx if ap_idx >= 1 else 0
         db.execute(
             "INSERT INTO questions(submission_id,no,page_no,image_path,ocr_text,"
-            "standard_answer,note,verdict,ai_comment,answer_page,student_box,answer_box) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-            (sid, q.get("no") or str(i), sp if sp >= 1 else 1, "",
+            "standard_answer,note,verdict,ai_comment,answer_page,page_match,student_box,answer_box) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, q.get("no") or str(i), sp, "",
              q.get("ocr", ""), q.get("standard_answer", ""), comment,
              q.get("verdict", ""), comment, apage,
+             page_match,
              q.get("student_box", ""), q.get("answer_box", "")))
     summary = gen.get("summary") or {}
     db.execute("UPDATE submissions SET status='待批改', report_published=0, "
@@ -2686,7 +2678,7 @@ def _run_grading_job(teacher_id, sid, operation):
             db = get_db()
             db.execute("UPDATE ai_operations SET status='running', started_at=? "
                        "WHERE id=? AND status='queued'",
-                       (datetime.now().isoformat(sep=" ", timespec="milliseconds"),
+                        (beijing_wall_now().isoformat(sep=" ", timespec="milliseconds"),
                         operation["id"]))
             db.commit()
             sub = db.execute("SELECT * FROM submissions WHERE id=?", (sid,)).fetchone()
@@ -2820,7 +2812,7 @@ def submission_grade(sid):
             flash(str(e))
             return _back_to_page()
         _save_grading_result(db, sid, gen, answer_pages=_page_list(hw["answer_pages"]))
-        flash(f"演示模式：未调用 AI，已生成 {len(gen['questions'])} 道题，请逐题复核后手动生成报告")
+        flash(f"演示模式：未调用 AI，已生成 {len(gen['questions'])} 道题，请完成人工复核后手动生成报告")
         return _back_to_page()
 
     _, err = _enqueue_grading(g.user["id"], sid, hw["course_id"], hw["id"])
@@ -2921,11 +2913,21 @@ def grading_queue():
         "WHERE o.teacher_id=? AND o.status IN ('success','failed') "
         "AND o.finished_at IS NOT NULL ")
 
-    # 最近 60 秒内完成的任务，用于前端 toast 提示
-    finished = db.execute(
-        _FINISHED_SQL
-        + "AND julianday('now') - julianday(o.finished_at) < 60/86400.0 "
-        + "ORDER BY o.id DESC LIMIT 20", (g.user["id"],)).fetchall()
+    # 操作时间为北京时间墙上时间；在 Python 中按配置的旧字段来源转换后再计算间隔，
+    # 避免 SQLite 把无时区的北京时间误当成 UTC。
+    cutoff = datetime.now(timezone.utc)
+    candidates = db.execute(
+        _FINISHED_SQL + "ORDER BY o.id DESC LIMIT 100", (g.user["id"],)).fetchall()
+    finished = []
+    for row in candidates:
+        ended = _parse_display_time(row["finished_at"], "legacy")
+        if ended is None:
+            continue
+        age = (cutoff - ended.astimezone(timezone.utc)).total_seconds()
+        if 0 <= age < 60:
+            finished.append(row)
+            if len(finished) == 20:
+                break
     finished_jobs = [_queue_job(r, finished=True) for r in finished]
 
     # 最近 8 条已完成任务（不限时间），用于弹窗展示历史与时间
@@ -2980,7 +2982,8 @@ def _queue_job(r, finished=False):
     }
     if finished:
         item["error"] = r["error"] or ""
-        item["finished_at"] = (r["finished_at"] or "")[:19]
+        item["finished_at"] = _format_display_time(
+            r["finished_at"], "legacy", "%Y-%m-%d %H:%M:%S")
     return item
 
 
@@ -3038,7 +3041,7 @@ def submission_review(sid):
     answer_pdf = hw["answer_pdf"] or ""
     q_media = []
     for q in questions:
-        sp_file, sp_page = _resolve_student_page(sfiles, int(q["page_no"] or 1))
+        sp_file, sp_page = _resolve_student_page(sfiles, int(q["page_no"] or 0))
         sbox = q["student_box"] or ""
         abox = q["answer_box"] or ""
         def _url(fp, page, box):
@@ -3050,9 +3053,13 @@ def submission_review(sid):
                 u += "&box=" + box.strip("[]").replace(" ", "")
             return u
         q_media.append({
-            "student_url": _url(sp_file, sp_page, sbox),
+            # 原卷页默认展示整页，而非模型可能给出的扁平裁剪框，便于人工确认题干与页码。
+            "student_url": _url(sp_file, sp_page, ""),
             "student_full_url": _url(sp_file, sp_page, "") if sp_file else "",
-            "answer_url": _url(answer_pdf, int(q["answer_page"] or 0), abox),
+            "student_page_no": int(q["page_no"] or 0),
+            "student_pdf_page": sp_page,
+            "page_match": q["page_match"] if "page_match" in q.keys() else "",
+            "answer_url": _url(answer_pdf, int(q["answer_page"] or 0), ""),
             "answer_full_url": _url(answer_pdf, int(q["answer_page"] or 0), "") if answer_pdf else "",
         })
     return render_template("review.html", sub=sub, hw=hw, course=course, questions=questions,
@@ -3108,7 +3115,7 @@ def submission_review_save(sid):
         log.exception("更新学生薄弱点失败 submission=%s student=%s", sid, sub["student_id"])
     if (request.form.get("then") or "") == "report":
         if job and job["status"] in ("queued", "running"):
-            flash("批阅任务尚未完成，请稍后再复核并生成报告。")
+            flash("批阅任务尚未完成，请稍后再完成人工复核并生成报告。")
             return redirect(url_for("submission_review", sid=sid))
         pending = db.execute("SELECT COUNT(*) c FROM questions WHERE submission_id=? AND reviewed=0",
                              (sid,)).fetchone()["c"]
@@ -3132,7 +3139,7 @@ def submission_review_save(sid):
             return redirect(url_for("submission_report", sid=sid))
         flash("批改已保存，报告已生成，可继续修改后发布。")
         return redirect(url_for("submission_report", sid=sid))
-    flash("批改已保存，学生可以查看" if reviewed else "草稿已保存，全部题目复核后再保存即可公开。")
+    flash("批改已保存，学生可以查看" if reviewed else "草稿已保存，全部题目完成人工复核后再保存即可公开。")
     return redirect(url_for("submission_review", sid=sid))
 
 
@@ -4195,7 +4202,7 @@ def knowledge_graph_upload(gid):
         if ext not in kg_text.KG_EXTENSIONS:
             flash(f"「{filename}」格式不支持，只接受 PDF / Markdown / TXT")
             continue
-        stored = f"{datetime.now():%Y%m%d%H%M%S}_{secrets.token_hex(4)}{ext}"
+        stored = f"{now_beijing():%Y%m%d%H%M%S}_{secrets.token_hex(4)}{ext}"
         abs_path = os.path.join(abs_dir, stored)
         digest = hashlib.sha256()
         size = 0
@@ -5069,7 +5076,7 @@ def run_grading(teacher_id, file_name, answer_pdf="", scope="", answer_pages=Non
 
 
 def _scope_instruction(hw):
-    """把老师勾选的作业范围翻译成给模型的约束；未设置范围时返回空串（调用方已拦截）。"""
+    """传入所选题号和标准题干，供模型用题干核对学生答案页。"""
     try:
         keys = json.loads(hw["scope_selected"] or "[]")
         cands = json.loads(hw["scope_candidates"] or "[]")
@@ -5086,11 +5093,16 @@ def _scope_instruction(hw):
     for c in picked:
         no = str(c.get("no", "")).strip()
         # 同一题号在答案里出现多次时，加简要说明以便模型区分
-        labels.append(f"{no}（{c.get('hint')}）" if counts[no] > 1 and c.get("hint") else no)
-    return ("本讲次作业范围只包含以下题目：「" + "、".join(labels) + "」。"
-            "请只批阅这些题目（题目含小问时，该题的全部小问都要批阅），"
-            "范围之外的题目一律不要出现在输出里；"
-            "范围内某题学生没作答时，仍按未作答处理。")
+        label = f"{no}（{c.get('hint')}）" if counts[no] > 1 and c.get("hint") else no
+        stem = str(c.get("stem") or "").strip()
+        labels.append(f"{label}：参考题干「{stem[:2000]}" + ("…" if len(stem) > 2000 else "") + "」"
+                      if stem else f"{label}：参考题干缺失")
+    return ("本讲次作业范围与供题干比对的标准题干如下：\n- " + "\n- ".join(labels) + "\n"
+            "请只批阅这些题目（题目含小问时，该题的全部小问都要批阅），范围之外的题目不得输出。"
+            "对每题必须先将学生 PDF 页上的题号和题干/关键条件与对应参考题干比对；"
+            "只有题干可确认对应时才填写学生页码。参考题干缺失或匹配不确定时 student_page=0，"
+            "page_match 填 uncertain 或 not_found，并判为无法判定，提示人工核对原卷。"
+            "不得仅按题号、答案结果或相邻题推断页面。范围内确实没有作答时，仍按未作答处理。")
 
 
 # ---------- 批改报告（Markdown） ----------
@@ -5144,7 +5156,10 @@ def generate_report(db, sub_id, teacher_id, reuse=False, operation=None):
                     detail = {}
                 completion_error = completion_error or ("" if detail else "AI 未返回可用的报告评价")
     try:
-        stamp = datetime.strptime(str(sub["created_at"])[:10], "%Y-%m-%d")
+        created = _parse_display_time(sub["created_at"], "UTC")
+        stamp = created.astimezone(BEIJING_TZ) if created else None
+        if stamp is None:
+            raise ValueError("invalid submission timestamp")
         date_label = f"{stamp.month}月{stamp.day}日"
     except (TypeError, ValueError):
         date_label = ""
@@ -5440,16 +5455,7 @@ def _kg_weakness_chains(db, course_id, weak_tag_names):
 
 
 def _kg_diagnosis(db, sub):
-    """基于课程挂载的知识图谱，为批阅报告生成知识点诊断。
-
-    对每道错题/半对题关联的知识点：
-    1. 通过 knowledge_tags 匹配 KG 节点（按名称）
-    2. 查询该节点的前置知识（prerequisite 边）
-    3. 交叉比对学生在前置知识所属题目上的判定，找出「知识断层」
-    返回结构化列表，供报告页展示；无 KG 或无错题时返回 None。
-
-    注意：submissions 表没有 course_id 列，需通过 lecture_id 关联 lectures 表获取。
-    """
+    """按题目 × 图谱知识点生成报告矩阵，并保留薄弱前置知识诊断。"""
     lecture = db.execute("SELECT course_id FROM lectures WHERE id=?",
                          (sub["lecture_id"],)).fetchone()
     if not lecture:
@@ -5462,21 +5468,22 @@ def _kg_diagnosis(db, sub):
     graph_ids = [g["graph_id"] for g in graph_rows]
 
     questions = db.execute(
-        "SELECT id,no,verdict FROM questions WHERE submission_id=? ORDER BY id",
+        "SELECT id,no,verdict,note,ai_comment,ocr_text,standard_answer "
+        "FROM questions WHERE submission_id=? ORDER BY id",
         (sub["id"],)).fetchall()
     if not questions:
         return None
 
-    # 本讲次所有 AI 知识标签，建立 qkey→tags 与 tag→qkeys 双向索引
+    # 本讲次的知识标签，按题号关联学生逐题结果。
     tag_rows = db.execute(
-        "SELECT question_no AS qkey,tag FROM question_tags WHERE lecture_id=?",
+        "SELECT question_key,question_no AS qkey,tag FROM question_tags WHERE lecture_id=?",
         (sub["lecture_id"],)).fetchall()
     if not tag_rows:
         return None
-    qkey_to_tags, tag_to_qkeys = {}, {}
+    qkey_to_tags = {}
     for t in tag_rows:
-        qkey_to_tags.setdefault(t["qkey"], []).append(t["tag"])
-        tag_to_qkeys.setdefault(t["tag"], set()).add(t["qkey"])
+        if t["tag"] not in qkey_to_tags.setdefault(t["qkey"], []):
+            qkey_to_tags[t["qkey"]].append(t["tag"])
 
     # 学生在每个知识点上的判定分布
     tag_perf = {}
@@ -5488,13 +5495,8 @@ def _kg_diagnosis(db, sub):
                 p["right"] += 1
             elif q["verdict"] == "半对":
                 p["partial"] += 1
-            else:
+            elif q["verdict"] == "错":
                 p["wrong"] += 1
-
-    # 薄弱知识点（有错题或半对题）
-    weak_tags = {t for t, p in tag_perf.items() if p["wrong"] + p["partial"] > 0}
-    if not weak_tags:
-        return None
 
     # 按名称匹配 KG 节点
     ph = ",".join("?" * len(graph_ids))
@@ -5505,15 +5507,24 @@ def _kg_diagnosis(db, sub):
     node_by_id = {n["id"]: n for n in nodes}
     links = _course_tag_links(db, lecture["course_id"])
 
-    matched_tags, unmatched_tags = [], []
-    diagnoses = []
-    for tag in sorted(weak_tags):
+    matched_tags, unmatched_tags, tag_nodes = [], [], {}
+    all_tags = {tag for question in questions
+                for tag in qkey_to_tags.get(question["no"], [])}
+    for tag in sorted(all_tags):
         node, match_type = _resolve_tag_node(
             db, lecture["course_id"], nodes, name_to_node, tag, links, node_by_id)
         if not node:
             unmatched_tags.append(tag)
             continue
+        tag_nodes[tag] = node
         matched_tags.append(f"{tag}→{node['name']}({match_type})")
+
+    diagnoses = []
+    weak_tags = {tag for tag, perf in tag_perf.items()
+                 if perf["wrong"] + perf["partial"] > 0 and tag in tag_nodes}
+    weak_prereqs_by_tag = {}
+    for tag in sorted(weak_tags):
+        node = tag_nodes[tag]
         neighbors = kg_utils.concept_neighbors(db, node["graph_id"], node["id"])
         prereqs = (neighbors or {}).get("prerequisites", [])
         weak_pre, untested_pre = [], []
@@ -5538,16 +5549,76 @@ def _kg_diagnosis(db, sub):
             "weak_prereqs": weak_pre,
             "untested_prereqs": untested_pre,
         })
+        weak_prereqs_by_tag[tag] = weak_pre
+
+    # 题干简述优先取本讲范围提取的标准题干/提示，缺失时回退到本题评语。
+    scope_candidates = db.execute(
+        "SELECT scope_candidates FROM lectures WHERE id=?", (sub["lecture_id"],)).fetchone()
+    try:
+        candidates = json.loads(scope_candidates["scope_candidates"] or "[]") if scope_candidates else []
+    except (TypeError, ValueError):
+        candidates = []
+    candidate_by_key = {str(c.get("key")): c for c in candidates if isinstance(c, dict)}
+    candidates_by_no = {}
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            candidates_by_no.setdefault(str(candidate.get("no") or ""), candidate)
+
+    def brief_for(question):
+        candidate = candidate_by_key.get(str(question["no"])) or \
+            candidates_by_no.get(str(question["no"]))
+        if candidate:
+            brief = str(candidate.get("hint") or candidate.get("stem") or "").strip()
+            if brief:
+                return brief[:48] + ("…" if len(brief) > 48 else "")
+        brief = str(question["note"] or question["ai_comment"] or
+                    question["standard_answer"] or question["ocr_text"] or "").strip()
+        return brief[:48] + ("…" if len(brief) > 48 else "")
+
+    columns = [{"tag": tag, "name": tag_nodes[tag]["name"]} for tag in sorted(tag_nodes)]
+    matrix_rows = []
+    for question in questions:
+        related = [tag for tag in qkey_to_tags.get(question["no"], []) if tag in tag_nodes]
+        verdict = question["verdict"] or ""
+        if verdict == "对":
+            icon, label = "✅", "掌握良好"
+        elif verdict == "半对":
+            icon, label = "⚠️", "掌握不完整"
+        elif verdict == "错":
+            icon, label = "🔴", "可能存在问题"
+        else:
+            icon, label = "⚠️", "待人工确认"
+        analysis = []
+        cells = {}
+        for tag in related:
+            cells[tag] = icon
+            text = f"{tag}{label}"
+            prereqs = weak_prereqs_by_tag.get(tag) or []
+            if prereqs:
+                text += "；前置薄弱：" + "、".join(x["name"] for x in prereqs[:3])
+            analysis.append(text)
+        if not related:
+            analysis_text = "本题未匹配到课程图谱知识点。"
+        else:
+            analysis_text = "；".join(analysis)
+        matrix_rows.append({"no": question["no"], "brief": brief_for(question),
+                            "cells": cells, "analysis": analysis_text})
+
     kg_log.info("KG 诊断匹配结果 submission=%s: 薄弱知识点=%d, 匹配成功=%d [%s], 未匹配=%d [%s]",
              sub["id"], len(weak_tags), len(matched_tags), "; ".join(matched_tags),
              len(unmatched_tags), ", ".join(unmatched_tags))
-    return diagnoses or None
+    if not columns:
+        return None
+    return {"diagnoses": diagnoses,
+            "matrix": {"columns": columns, "rows": matrix_rows}}
 
 
 def _kg_diagnosis_text(diagnoses):
     """把 KG 诊断结果转成简洁文本，注入 AI 报告 prompt。"""
     if not diagnoses:
         return ""
+    if isinstance(diagnoses, dict):
+        diagnoses = diagnoses.get("diagnoses") or []
     lines = []
     for d in diagnoses:
         p = d["perf"]
@@ -5600,7 +5671,7 @@ def submission_report_build(sid):
         "FROM questions WHERE submission_id=?", (sid,)).fetchone()
     active = latest_operation(db, sid)
     if not rows["total"] or rows["pending"]:
-        flash("请先完成全部题目的逐题复核，再生成或重新生成报告。")
+        flash("请先完成人工复核，再生成或重新生成报告。")
         return redirect(url_for("submission_review", sid=sid))
     if active and active["status"] in ("queued", "running"):
         flash("批阅任务尚未完成，请稍后再复核并生成报告。")
@@ -5644,10 +5715,10 @@ def submission_report_publish(sid):
         rows = db.execute("SELECT COUNT(*),SUM(reviewed=0) FROM questions WHERE submission_id=?",
                           (sid,)).fetchone()
         if not rows[0] or rows[1]:
-            flash("全部题目复核后才能发布报告。")
+            flash("全部题目完成人工复核后才能发布报告。")
             return redirect(url_for("submission_review", sid=sid))
         if latest_operation(db, sid) and latest_operation(db, sid)["status"] in ("queued", "running"):
-            flash("批阅任务尚未完成，请稍后复核新结果。")
+            flash("批阅任务尚未完成，请稍后再人工复核新结果。")
             return redirect(url_for("submission_review", sid=sid))
     if not sub["report_md"]:
         flash("请先生成批改报告，再发布给学生。")
@@ -5662,7 +5733,7 @@ def submission_report_publish(sid):
 @_routes.route("/submission/<oid:sid>/report/comment", methods=["POST"])
 @role_required("teacher")
 def submission_report_comment(sid):
-    """全部题目复核完成后，用 AI 重写一份总评（异步），结果写入 report_detail。"""
+    """全部题目人工复核完成后，用 AI 重写一份总评（异步），结果写入 report_detail。"""
     db = get_db()
     sub, hw, course = own_submission(sid)
     questions = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
@@ -5671,7 +5742,7 @@ def submission_report_comment(sid):
         return {"ok": False, "error": "还没有批阅结果，无法生成总评"}, 400
     pending = [q for q in questions if not q["reviewed"]]
     if pending:
-        return {"ok": False, "error": f"还有 {len(pending)} 道题未复核，全部复核后才能生成总评"}, 400
+        return {"ok": False, "error": f"还有 {len(pending)} 道题待人工复核，全部完成后才能生成总评"}, 400
     api_url = get_setting(g.user["id"], "ai_api_url").rstrip("/")
     api_key = get_setting(g.user["id"], "ai_api_key")
     model = get_setting(g.user["id"], "ai_model")
@@ -6253,8 +6324,8 @@ def consistency_page():
                 backups.append({
                     "name": name,
                     "size": storage.human_size(os.path.getsize(path)),
-                    "mtime": datetime.fromtimestamp(os.path.getmtime(path))
-                    .strftime("%Y-%m-%d %H:%M")})
+                    "mtime": datetime.fromtimestamp(os.path.getmtime(path), BEIJING_TZ)
+                    .isoformat(sep=" ", timespec="minutes")})
     return render_template("consistency.html", issues=_consistency_issues(), stats=stats,
                            data_dir=cfg.get("DATA_DIR"), db_path=_db_path(), backups=backups,
                            auto_backup=cfg.get("AUTO_BACKUP"), backup_keep=cfg.get("BACKUP_KEEP"))
@@ -6294,7 +6365,7 @@ def _build_backup_zip(dest):
     finally:
         con.close()
     manifest = {"app": "GradeLogy", "version": cfg.APP_VERSION,
-                "exported_at": datetime.now().isoformat(timespec="seconds"),
+                "exported_at": now_beijing().isoformat(timespec="seconds"),
                 "counts": counts}
     try:
         with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
@@ -6325,10 +6396,10 @@ def _prune_backups():
 def _run_auto_backup():
     """当天还没有备份就生成一份；命名为 gradelogy_YYYYMMDD_HHMMSS.zip。"""
     os.makedirs(_backup_dir(), exist_ok=True)
-    today = datetime.now().strftime("%Y%m%d")
+    today = now_beijing().strftime("%Y%m%d")
     if any(n.startswith(f"gradelogy_{today}_") for n in os.listdir(_backup_dir())):
         return None
-    path = os.path.join(_backup_dir(), datetime.now().strftime("gradelogy_%Y%m%d_%H%M%S.zip"))
+    path = os.path.join(_backup_dir(), now_beijing().strftime("gradelogy_%Y%m%d_%H%M%S.zip"))
     _build_backup_zip(path)
     _prune_backups()
     log.info("自动备份完成：%s", path)
@@ -6379,14 +6450,14 @@ def admin_export():
     _build_backup_zip(out.name)
     log.info("导出系统数据：%s", out.name)
     return send_file(out.name, as_attachment=True,
-                     download_name=datetime.now().strftime("gradelogy_%Y%m%d_%H%M%S.zip"))
+                     download_name=now_beijing().strftime("gradelogy_%Y%m%d_%H%M%S.zip"))
 
 
 @_routes.route("/admin/backup/now", methods=["POST"])
 @role_required("admin")
 def admin_backup_now():
     """立即生成一份备份，存到数据目录的 backups/ 下。"""
-    path = os.path.join(_backup_dir(), datetime.now().strftime("gradelogy_%Y%m%d_%H%M%S.zip"))
+    path = os.path.join(_backup_dir(), now_beijing().strftime("gradelogy_%Y%m%d_%H%M%S.zip"))
     try:
         _build_backup_zip(path)
     except Exception:
@@ -6454,7 +6525,7 @@ def _apply_restore(extract_root):
     """用已解压的备份覆盖当前数据库与附件，返回 (账号数, 提交数, 旧数据备份目录)。"""
     src_db = os.path.join(extract_root, "data.sqlite")
     # 破坏性操作前，先把当前数据完整备份一份，失败可人工回退
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = now_beijing().strftime("%Y%m%d_%H%M%S")
     bdir = os.path.join(cfg.get("DATA_DIR"), "backups")
     os.makedirs(bdir, exist_ok=True)
     cur = sqlite3.connect(_db_path(), timeout=10)
@@ -6784,6 +6855,7 @@ def _ai_route_deps():
         "get_setting": lazy("get_setting"),
         "save_setting": lazy("save_setting"),
         "now_text": lazy("_now_text"),
+        "beijing_iso": lazy("_beijing_iso"),
         "api_key_rows": lazy("_api_key_rows"),
         "activate_api_key": lazy("_activate_api_key"),
         "build_model_rows": lazy("build_model_rows"),

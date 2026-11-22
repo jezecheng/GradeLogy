@@ -88,7 +88,7 @@
     <tr>
       <td><a href="{{ url_for('lecture_detail', hid=h.id) }}">{{ h.title }}</a></td>
       <td class="muted">{{ h.deadline|legacytime or '—' }}</td>
-      <td>{{ h.n_subs }} / {{ h.n_students }}<div class="muted small">{% set todo = work.get(h.id, {}) %}待批阅 {{ todo.get('pending', 0) }} · 待复核 {{ todo.get('review', 0) }}{% if todo.get('running') %} · 处理中 {{ todo.running }}{% endif %}</div></td>
+      <td>{{ h.n_subs }} / {{ h.n_students }}<div class="muted small">{% set todo = work.get(h.id, {}) %}待批阅 {{ todo.get('pending', 0) }} · 待人工复核 {{ todo.get('review', 0) }}{% if todo.get('running') %} · 处理中 {{ todo.running }}{% endif %}</div></td>
       <td class="small">
         {% if h.student_pdf %}<a href="{{ url_for('uploaded_file', filename=h.student_pdf) }}"
             data-pdf-toggle data-pdf-src="{{ url_for('uploaded_file', filename=h.student_pdf) }}"

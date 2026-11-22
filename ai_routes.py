@@ -22,7 +22,7 @@ from ai_config import MAX_TOKENS_SETTINGS
 from utilities import ai_debug, llm
 
 _REQUIRED = (
-    "role_required", "get_db", "get_setting", "save_setting", "now_text",
+    "role_required", "get_db", "get_setting", "save_setting", "now_text", "beijing_iso",
     "api_key_rows", "activate_api_key", "build_model_rows", "sync_models_for_teacher",
     "start_ai_operation", "finish_ai_operation", "probe_ai_config", "ai_dashboard_data",
     "model_catalog", "est_tokens_input", "est_tokens_output", "env_ai_settings",
@@ -71,6 +71,7 @@ def register(registry, deps):
     get_setting = deps["get_setting"]
     save_setting = deps["save_setting"]
     now_text = deps["now_text"]
+    beijing_iso = deps["beijing_iso"]
     api_key_rows = deps["api_key_rows"]
     activate_api_key = deps["activate_api_key"]
     build_model_rows = deps["build_model_rows"]
@@ -278,6 +279,9 @@ def register(registry, deps):
         operation = owned_debug_operation(operation_id)
         events = debug_events(operation_id)
         operation_data = dict(operation)
+        for field in ("started_at", "finished_at"):
+            if operation_data.get(field):
+                operation_data[field] = beijing_iso(operation_data[field], "legacy")
         if operation_data.get("result_json"):
             try:
                 operation_data["result"] = json.loads(operation_data["result_json"])
@@ -286,6 +290,8 @@ def register(registry, deps):
         event_data = []
         for row in events:
             item = dict(row)
+            if item.get("created_at"):
+                item["created_at"] = beijing_iso(item["created_at"], "UTC")
             for source, target in (("usage_json", "usage"),
                                    ("pricing_json", "pricing"),
                                    ("debug_json", "debug")):
@@ -301,11 +307,13 @@ def register(registry, deps):
         manifest = {
             "format": "gradelogy-ai-debug-v1",
             "generated_at": now_text(),
+            "timezone": "Asia/Shanghai",
             "operation_id": operation_id,
             "event_count": len(events),
             "complete": not debug_failed,
             "missing_files": [],
             "notes": [
+                "导出包中的操作、请求和事件时间均为北京时间（UTC+08:00）。",
                 "请求和响应为安全副本：仅将配置 API Key 的精确出现替换为 [REDACTED]。",
                 "非流式请求不存在可伪造的逐 token 中间状态；每轮完整响应均保存在对应事件中。",
                 "历史操作可能没有原始载荷；网络失败时没有服务商响应正文属于正常情况。",
@@ -532,7 +540,7 @@ def register(registry, deps):
             conf["api_url"], conf["api_key"], conf["model"],
             [{"type": "text", "text": PRICE_IMAGE_PROMPT},
              {"type": "image_url", "image_url": {"url": data_url}}],
-            max_tokens=2000, timeout=120, retries=2, usage_hook=operation["usage_hook"])
+            max_tokens=32768, timeout=120, retries=2, usage_hook=operation["usage_hook"])
         if err:
             finish_ai_operation(operation, "failed", err)
             flash(f"截图识别失败：{err}")

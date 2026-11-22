@@ -16,6 +16,7 @@ except ImportError:
     from tests import _env_bootstrap  # noqa: F401
 
 import app as a
+from utilities import pdfgrade
 
 
 class ReviewRegressionTest(unittest.TestCase):
@@ -178,6 +179,60 @@ class ReviewRegressionTest(unittest.TestCase):
             self.post("submission_review_save", sid=30)
             self.post("submission_report_publish", sid=30)
         self.assertEqual(self.db.execute("SELECT report_published FROM submissions WHERE id=30").fetchone()[0], 1)
+
+    def test_page_match_is_conservative_and_persists_source_page(self):
+        normalized = pdfgrade._normalize([
+            {"no": "1", "student_page": 8, "verdict": "对", "score": 5,
+             "comment": "看起来匹配但没有确认字段"},
+            {"no": "2", "student_page": 9, "page_match": "confirmed",
+             "verdict": "对", "score": 5, "comment": "题干核对一致"},
+        ])
+        self.assertEqual((normalized[0]["student_page"], normalized[0]["page_match"],
+                          normalized[0]["verdict"], normalized[0]["score"]),
+                         (0, "uncertain", "无法判定", 0.0))
+        self.assertEqual((normalized[1]["student_page"], normalized[1]["page_match"]),
+                         (9, "confirmed"))
+        a._save_grading_result(self.db, 30, {"questions": normalized, "summary": {}})
+        rows = self.db.execute(
+            "SELECT no,page_no,page_match,verdict FROM questions ORDER BY no").fetchall()
+        self.assertEqual([tuple(row) for row in rows], [
+            ("1", 0, "uncertain", "无法判定"),
+            ("2", 9, "confirmed", "对"),
+        ])
+
+    def test_ai_grade_request_labels_source_pdf_pages_and_requires_stem_mapping(self):
+        image_part = {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AA=="}}
+        response = {"questions": [{"no": "例1", "ocr": "A", "standard_answer": "A",
+                                   "verdict": "对", "comment": "正确", "student_page": 1,
+                                   "page_match": "confirmed", "answer_page": 1}],
+                    "weak_points": [], "evaluation": "", "total_score": ""}
+        with mock.patch.object(pdfgrade, "_file_parts",
+                               side_effect=[([image_part], ""), ([image_part], "")]), \
+                mock.patch.object(pdfgrade.llm, "chat",
+                                  return_value=(json.dumps(response), "stop", "")) as chat:
+            result = pdfgrade.grade_pdf_submission(
+                "student.pdf", "answer.pdf", "https://api.example/v1", "secret", "vision",
+                extra="参考题干：例1 气体体积如何变化", answer_pages=[4])
+        self.assertEqual(result["questions"][0]["page_match"], "confirmed")
+        payload = chat.call_args.args[3]
+        labels = [part.get("text", "") for part in payload]
+        self.assertTrue(any("题干比对" in text for text in labels))
+        self.assertIn("【学生作业原 PDF 全局第 1 页】", labels)
+        self.assertIn("【标准答案本次输入第 1 页；教师 PDF 第 4 页】", labels)
+        self.assertEqual(chat.call_args.kwargs["max_tokens"], 32768)
+
+    def test_report_knowledge_graph_matrix_is_a_question_by_concept_table(self):
+        md = a.build_report_md(
+            "学生", "讲次", "6月1日", [], {}, {},
+            kg_diagnosis={"matrix": {
+                "columns": [{"tag": "速率常数", "name": "速率常数"}],
+                "rows": [{"no": "例6", "brief": "速率常数求算",
+                          "cells": {"速率常数": "⚠️"},
+                          "analysis": "速率常数掌握不完整；前置薄弱：初始速率"}],
+            }, "diagnoses": []})
+        self.assertIn("| 题号 | 题目简述 | 速率常数 | 知识点点评 |", md)
+        self.assertIn("| 例6 | 速率常数求算 | ⚠️ |", md)
+        self.assertIn("前置薄弱：初始速率", md)
 
     def test_explicit_draft_hides_even_fully_reviewed_results(self):
         with mock.patch.object(a, "generate_report", return_value="draft"):

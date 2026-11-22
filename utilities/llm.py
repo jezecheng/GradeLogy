@@ -201,7 +201,7 @@ def chat_completion(api_url, api_key, payload, timeout=180, retries=3,
     return {}, "", "请求多次失败"
 
 
-def chat(api_url, api_key, model, content, max_tokens=1500, timeout=180, retries=3,
+def chat(api_url, api_key, model, content, max_tokens=32768, timeout=180, retries=3,
          usage_hook=None, report_running=False, stage=""):
     """通用 OpenAI 兼容调用，返回 (reply, finish_reason, error)。失败自动重试（含 429 退避）。"""
     message, finish, error = chat_completion(

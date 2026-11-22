@@ -740,7 +740,7 @@ class KGRouteTest(unittest.TestCase):
         self.assertEqual(listing.status_code, 200)
         self.assertIn("高中化学", listing.get_data(as_text=True))
 
-    def test_graph_times_use_default_and_per_user_display_timezones(self):
+    def test_graph_times_always_use_beijing_display_timezone(self):
         graph = self._create_graph()
         con = self._db()
         con.execute("UPDATE knowledge_graphs SET created_at='2026-01-02 03:04:05',"
@@ -761,9 +761,9 @@ class KGRouteTest(unittest.TestCase):
         con.commit()
         con.close()
         utc_html = self.client.get(detail_url).get_data(as_text=True)
-        self.assertIn("创建于 2026-01-02 03:04，最近更新 2026-01-02 04:05", utc_html)
+        self.assertIn("创建于 2026-01-02 11:04，最近更新 2026-01-02 12:05", utc_html)
         ny_html = self.login(3).get(detail_url).get_data(as_text=True)
-        self.assertIn("创建于 2026-01-01 22:04，最近更新 2026-01-01 23:05", ny_html)
+        self.assertIn("创建于 2026-01-02 11:04，最近更新 2026-01-02 12:05", ny_html)
 
     def test_detail_shows_batch_progress_and_status_badges(self):
         graph = self._create_graph()

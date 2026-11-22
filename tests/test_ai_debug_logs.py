@@ -255,6 +255,10 @@ class AIDebugLogTest(unittest.TestCase):
             self.assertTrue({"operation.json", "requests/index.json", "manifest.json"} <= names)
             index = json.loads(bundle.read("requests/index.json"))
             self.assertEqual(len(index), 1)
+            self.assertTrue(index[0]["created_at"].endswith("+08:00"))
+            manifest = json.loads(bundle.read("manifest.json"))
+            self.assertEqual(manifest["timezone"], "Asia/Shanghai")
+            self.assertTrue(json.loads(bundle.read("operation.json"))["started_at"].endswith("+08:00"))
             request_name = index[0]["files"]["request"]
             response_name = index[0]["files"]["response"]
             self.assertEqual(bundle.read(request_name),

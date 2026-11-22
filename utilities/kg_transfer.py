@@ -11,8 +11,9 @@ import sqlite3
 import stat
 import tempfile
 import zipfile
-from datetime import datetime, timezone
 from pathlib import PurePosixPath
+
+from utilities.time_utils import now_beijing
 
 FORMAT = "gradelogy-kg"
 VERSION = 2
@@ -290,7 +291,7 @@ def _build_metadata(graph, counts, material_files, scope="full"):
             "name": "GradeLogy",
             "description": "从教材、考纲、讲义中抽取学科概念与关系形成的知识图谱",
         },
-        "exported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "exported_at": now_beijing().isoformat(timespec="seconds"),
         "graph_name_omitted": True,
         "graph": {
             "subject": graph.get("subject") or "",
@@ -484,7 +485,7 @@ def export_graph(db, graph_id, upload_dir, output_path, scope="full"):
         "format": FORMAT,
         "version": VERSION,
         "scope": scope,
-        "exported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "exported_at": now_beijing().isoformat(timespec="seconds"),
         "graph_id": graph["id"],
         "counts": counts,
         "materials": [],
@@ -950,7 +951,7 @@ def _new_storage_name(filename, used_names):
     match = re.search(r"\.([A-Za-z0-9]{1,10})$", str(filename or ""))
     suffix = "." + match.group(1).lower() if match else ""
     while True:
-        name = f"{datetime.now():%Y%m%d%H%M%S}_{secrets.token_hex(8)}{suffix}"
+        name = f"{now_beijing():%Y%m%d%H%M%S}_{secrets.token_hex(8)}{suffix}"
         if name not in used_names:
             used_names.add(name)
             return name

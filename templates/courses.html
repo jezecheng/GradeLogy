@@ -20,7 +20,7 @@
     <p class="muted">{{ c.description or '暂无简介' }}</p>
     <p class="muted">{{ c.n_students }} 名学生 · {{ c.n_lectures }} 个讲次 · {{ c.n_exams }} 场考试{% if c.n_teachers > 1 %} · {{ c.n_teachers }} 位老师共同管理{% endif %}</p>
     {% set todo = work.get(c.id, {}) %}
-    <a class="course-todo" href="{{ url_for('course_detail', cid=c.id) }}#course-lectures">待批阅 {{ todo.get('pending', 0) }} 份 · 待复核 {{ todo.get('review', 0) }} 份{% if todo.get('running') %} · 处理中 {{ todo.running }} 份{% endif %}</a>
+    <a class="course-todo" href="{{ url_for('course_detail', cid=c.id) }}#course-lectures">待批阅 {{ todo.get('pending', 0) }} 份 · 待人工复核 {{ todo.get('review', 0) }} 份{% if todo.get('running') %} · 处理中 {{ todo.running }} 份{% endif %}</a>
     {% if c.is_owner %}
     <details class="course-more"><summary>更多操作</summary><form method="post" action="{{ url_for('course_delete', cid=c.id) }}"
           onsubmit="return confirm('删除课程会同时删除其学生关系、讲次、考试和教案，确定？')">

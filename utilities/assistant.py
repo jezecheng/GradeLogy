@@ -11,10 +11,11 @@ import json
 import os
 import re
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import config
 from utilities import llm
+from utilities.time_utils import beijing_wall_now, format_beijing_time
 
 DB_PATH = config.DB_PATH
 DOCS_DIR = os.path.join(config.BASE_DIR, "docs")
@@ -170,6 +171,8 @@ def list_lectures(teacher_id, course):
             ORDER BY h.title COLLATE NOCASE, h.id""", (c["id"],)))
         for r in rows:
             r["enrolled"] = total
+            r["deadline"] = format_beijing_time(r["deadline"], "legacy")
+            r["created_at"] = format_beijing_time(r["created_at"], "UTC")
         return {"course": c["name"], "lectures": rows}
     finally:
         db.close()
@@ -209,7 +212,7 @@ def lecture_status(teacher_id, course, lecture):
         return {
             "course": c["name"],
             "lecture": h["title"],
-            "deadline": h["deadline"] or "不限",
+            "deadline": format_beijing_time(h["deadline"], "legacy") or "不限",
             "enrolled": len(enrolled),
             "submitted": len(submitted_ids),
             "graded": sum(1 for s in subs if s["status"] == "已批改"),
@@ -284,7 +287,7 @@ def student_report(teacher_id, course, student, lecture=None):
             "student": stu["display_name"],
             "course": c["name"],
             "lecture": sub["lecture_title"],
-            "submitted_at": sub["created_at"],
+            "submitted_at": format_beijing_time(sub["created_at"], "UTC"),
             "status": sub["status"],
             "score": sub["score"],
             "feedback": _cut(sub["feedback"], 800),
@@ -373,6 +376,7 @@ def exam_scores(teacher_id, course, exam):
             LEFT JOIN exam_scores s ON s.exam_id=? AND s.student_id=u.id
             WHERE e.course_id=? ORDER BY u.display_name""", (x["id"], c["id"])))
         for row in rows:
+            row["updated_at"] = format_beijing_time(row["updated_at"], "UTC")
             if row["score_status"] == "absent":
                 row["status"] = "缺考"
             elif row["score_status"] == "recorded":
@@ -420,6 +424,7 @@ def course_overview(teacher_id, course):
         for h in lectures:
             h["enrolled"] = enrolled
             h["missing"] = max(0, enrolled - h["submitted"])
+            h["deadline"] = format_beijing_time(h["deadline"], "legacy")
         students = _rows(db.execute("""
             SELECT u.id, u.username, u.display_name AS student,
               COUNT(s.id) AS submitted,
@@ -505,7 +510,8 @@ def pending_work(teacher_id, course=None, lecture=None, limit=50):
                             buckets["not_graded"].append({
                                 "submission_id": s["id"], "course": c["name"],
                                 "lecture": h["title"], "student": s["student"],
-                                "status": s["status"], "submitted_at": s["created_at"]})
+                                "status": s["status"],
+                                "submitted_at": format_beijing_time(s["created_at"], "UTC")})
                     elif s["unreviewed"]:
                         counts["pending_review"] += 1
                         if len(buckets["pending_review"]) < limit:
@@ -539,6 +545,8 @@ def grading_queue(teacher_id, limit=20):
         recent = _rows(db.execute(
             base + "AND o.status IN ('success','failed') ORDER BY o.id DESC LIMIT ?",
             (teacher_id, limit)))
+        for row in active + recent:
+            row["started_at"] = format_beijing_time(row["started_at"], "legacy")
         for r in active + recent:
             r["status_label"] = labels.get(r["status"], r["status"])
         return {
@@ -654,7 +662,7 @@ def search_reports(teacher_id, keyword, course=None, limit=20):
 def ai_usage(teacher_id, days=7):
     """老师自己的 AI 用量与估算成本：先按操作聚合，再汇总，避免重试放大操作数。"""
     days = _clamp(days, 7, 90)
-    start = (datetime.now() - timedelta(days=days - 1)).strftime("%Y-%m-%d 00:00:00")
+    start = (beijing_wall_now() - timedelta(days=days - 1)).strftime("%Y-%m-%d 00:00:00")
     base = """
         WITH operation_usage AS (
           SELECT o.*, COUNT(e.id) AS request_count,
@@ -714,6 +722,7 @@ def list_prompts(teacher_id, kind=None):
             sql + " ORDER BY p.kind, p.is_default DESC, p.id", params))
         for r in rows:
             r["editable"] = bool(not r["is_default"] and r["teacher_id"] == teacher_id)
+            r["updated_at"] = format_beijing_time(r["updated_at"], "UTC")
         return {"kind": kind or "", "prompts": rows}
     finally:
         db.close()
@@ -739,6 +748,7 @@ def get_prompt(teacher_id, prompt_id):
             return {"error": f"没有找到提示词 #{pid}"}
         out = dict(row)
         out.pop("builtin", None)
+        out["updated_at"] = format_beijing_time(out["updated_at"], "UTC")
         out["content"] = _cut(out["content"], 8000)
         return out
     finally:
@@ -756,6 +766,7 @@ def lesson_plan(teacher_id, course):
             "SELECT id, title, updated_at, content FROM lesson_plans "
             "WHERE course_id=? ORDER BY id DESC", (c["id"],)))
         for r in rows:
+            r["updated_at"] = format_beijing_time(r["updated_at"], "UTC")
             r["content"] = _cut(r["content"], 4000)
         return {"course": c["name"], "plan_count": len(rows), "plans": rows}
     finally:
@@ -783,7 +794,7 @@ def lecture_scope(teacher_id, course, lecture):
                   for k in keys if str(k) in by_key]
         return {
             "course": c["name"], "lecture": h["title"],
-            "deadline": h["deadline"] or "不限",
+            "deadline": format_beijing_time(h["deadline"], "legacy") or "不限",
             "description": _cut(h["description"], 800),
             "answer_pdf": h["answer_pdf"] or "",
             "answer_pages": _pages(h["answer_pages"]),
@@ -887,6 +898,7 @@ def my_lectures(student_id, course=None):
             ORDER BY h.title COLLATE NOCASE, h.id""",
             params))
         for r in rows:
+            r["deadline"] = format_beijing_time(r["deadline"], "legacy")
             if not r["submission_id"]:
                 r["my_status"] = "未提交"
             elif r["status"] == "已批改" or r["report_published"]:
@@ -914,7 +926,7 @@ def my_pending(student_id):
             ORDER BY CASE WHEN h.deadline IS NULL OR h.deadline='' THEN 1 ELSE 0 END,
                      h.deadline, c.id, h.title""", (student_id, student_id)))
         for r in rows:
-            r["deadline"] = (r["deadline"] or "").replace("T", " ") or "不限"
+            r["deadline"] = format_beijing_time(r["deadline"], "legacy") or "不限"
         return {"count": len(rows), "pending": rows}
     finally:
         db.close()
@@ -1026,7 +1038,7 @@ def admin_overview():
             SELECT substr(o.started_at,1,10) AS date, COUNT(*) AS operations,
               COALESCE(SUM(CASE WHEN o.status='failed' THEN 1 ELSE 0 END),0) AS failed
             FROM ai_operations o
-            WHERE o.started_at>=datetime('now','-7 days','localtime')
+            WHERE o.started_at>=datetime('now','+8 hours','-7 days')
             GROUP BY substr(o.started_at,1,10) ORDER BY date DESC"""))
         return {"counts": counts, "ai_last_7_days": recent}
     finally:
@@ -1051,6 +1063,8 @@ def admin_list_users(role=None, keyword=None, limit=50):
         rows = _rows(db.execute(sql, params))
         for r in rows:
             r["active"] = bool(r["active"])
+            r["created_at"] = format_beijing_time(r["created_at"], "UTC")
+            r["last_login_at"] = format_beijing_time(r["last_login_at"], "UTC")
         return {"users": rows}
     finally:
         db.close()
@@ -1077,7 +1091,7 @@ def admin_list_courses():
 def admin_ai_usage(days=7):
     """全平台 AI 用量：总量、按操作类型、按老师。"""
     days = _clamp(days, 7, 90)
-    start = (datetime.now() - timedelta(days=days - 1)).strftime("%Y-%m-%d 00:00:00")
+    start = (beijing_wall_now() - timedelta(days=days - 1)).strftime("%Y-%m-%d 00:00:00")
     base = """
         WITH operation_usage AS (
           SELECT o.id, o.teacher_id, o.operation_type, o.status,
@@ -1134,7 +1148,7 @@ TOOLS = [
           {}, []),
     _spec("list_lectures", "列出某门课程下的讲次，含截止时间、已交人数、已批改数。",
           {"course": {"type": "string", "description": "课程名称或 ID"}}, ["course"]),
-    _spec("lecture_status", "某讲次作业的整体情况：已交/已批改/已审核人数、未交学生、"
+    _spec("lecture_status", "某讲次作业的整体情况：已交/已批改/已人工复核人数、未交学生、"
                             "每题的对/半对/错分布、讲次汇总。",
           {"course": {"type": "string", "description": "课程名称或 ID"},
            "lecture": {"type": "string", "description": "讲次标题（可只给片段）或 ID"}},
@@ -1154,7 +1168,7 @@ TOOLS = [
           {"course": {"type": "string", "description": "课程名称或 ID"},
            "exam": {"type": "string", "description": "考试名称（可只给片段）或 ID"}},
           ["course", "exam"]),
-    _spec("course_overview", "课程整体进度：每讲的提交/已批改/报告已发布/待复核人数，"
+    _spec("course_overview", "课程整体进度：每讲的提交/已批改/报告已发布/待人工复核人数，"
                              "以及每个学生的提交与批改统计。问「这门课进度如何」时优先调用。",
           {"course": {"type": "string", "description": "课程名称或 ID"}},
           ["course"]),

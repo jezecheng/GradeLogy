@@ -20,10 +20,12 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 from html.parser import HTMLParser
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import config as cfg
 from db import DB_PATH, database_path
 from utilities import llm
+from utilities.time_utils import BEIJING_TZ, beijing_now_text
 
 try:
     import fcntl  # 仅类 Unix 可用，用于保证每日同步只在一个进程里跑
@@ -191,7 +193,7 @@ def _is_tokenhub_url(url):
 
 
 def _now_text():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return beijing_now_text()
 
 
 def fetch_available_models(base_url, api_key, timeout=20, usage_hook=None):
@@ -428,8 +430,15 @@ def sync_models_for_teacher(teacher_id, force=False, fetch_models=None, fetch_pr
                 (teacher_id, base_url)).fetchone()
             if st and st["last"]:
                 try:
-                    last = datetime.strptime(st["last"], "%Y-%m-%d %H:%M:%S")
-                    if datetime.now() - last < timedelta(hours=cfg.get("MODEL_SYNC_HOURS")):
+                    last = datetime.fromisoformat(st["last"])
+                    if last.tzinfo is None:
+                        try:
+                            legacy_zone = ZoneInfo(cfg.get("LEGACY_TIMEZONE"))
+                        except (ZoneInfoNotFoundError, ValueError):
+                            legacy_zone = BEIJING_TZ
+                        last = last.replace(tzinfo=legacy_zone)
+                    if datetime.now(BEIJING_TZ) - last.astimezone(BEIJING_TZ) < timedelta(
+                            hours=cfg.get("MODEL_SYNC_HOURS")):
                         return -1, ""
                 except ValueError:
                     pass

@@ -20,7 +20,7 @@
       <tr><th>状态</th><td>{{ ai_status_label.get(operation.status, operation.status) }}</td></tr>
       <tr><th>模型</th><td>{{ operation.model or '未指定模型' }}</td></tr>
       <tr><th>关联内容</th><td>{{ operation.course_name or '未关联课程' }}{% if operation.lecture_title %} · {{ operation.lecture_title }}{% endif %}{% if operation.student_name %} · {{ operation.student_name }}{% endif %}</td></tr>
-      <tr><th>开始 / 结束</th><td>{{ operation.started_at|localtime }} / {{ operation.finished_at|localtime if operation.finished_at else '尚未结束' }}</td></tr>
+      <tr><th>开始 / 结束</th><td>{{ operation.started_at|legacytime }} / {{ operation.finished_at|legacytime if operation.finished_at else '尚未结束' }}</td></tr>
       {% if operation.error %}<tr><th>操作错误</th><td class="danger-text">{{ operation.error }}</td></tr>{% endif %}
       {% if operation.debug_error %}<tr><th>日志写入错误</th><td class="danger-text">{{ operation.debug_error }}</td></tr>{% endif %}
     </tbody>

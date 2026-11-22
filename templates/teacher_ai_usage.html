@@ -49,7 +49,7 @@
       <tbody>
       {% for row in operation_rows %}
         <tr>
-          <td class="nowrap">{{ row.started_at|localtime }}</td>
+          <td class="nowrap">{{ row.started_at|legacytime }}</td>
           <td>{{ ai_operation_label.get(row.operation_type, row.operation_type) }} <span class="muted">#{{ row.id }}</span></td>
           <td>{{ row.course_name or '未关联课程' }}{% if row.lecture_title %} · {{ row.lecture_title }}{% endif %}{% if row.student_name %} · {{ row.student_name }}{% endif %}</td>
           <td class="request-model">{{ row.model or '未指定模型' }}</td>

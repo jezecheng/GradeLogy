@@ -11,6 +11,7 @@ from utilities.kg_transfer import (
     import_graph,
     inspect_graph,
 )
+from utilities.time_utils import format_beijing_time
 
 _ERROR_KINDS = {"material": "材料", "chunk": "文本块", "audit": "体检"}
 
@@ -45,7 +46,8 @@ def _print_status(result):
     counts = result["counts"]
     print(f"图谱 #{graph['id']}：{graph['name']}")
     print(f"学科：{graph.get('subject') or '-'}；年级：{graph.get('grade_level') or '-'}")
-    print(f"创建者用户 ID：{graph.get('created_by')}；更新时间：{graph.get('updated_at') or '-'}")
+    updated = format_beijing_time(graph.get("updated_at"), "UTC") or "-"
+    print(f"创建者用户 ID：{graph.get('created_by')}；更新时间：{updated}")
     print("数量：" + "；".join(f"{label} {counts[key]}" for key, label in (
         ("nodes", "节点"), ("edges", "关系"), ("materials", "材料"),
         ("chunks", "文本块"), ("audits", "体检"), ("members", "成员"))))
@@ -60,7 +62,8 @@ def _print_status(result):
     if not result["recent_errors"]:
         print("  （无）")
     for row in result["recent_errors"]:
-        timestamp = f" [{row['timestamp']}]" if row.get("timestamp") else ""
+        timestamp = (f" [{format_beijing_time(row['timestamp'], 'UTC')}]"
+                     if row.get("timestamp") else "")
         material = f"（材料 #{row['material_id']}）" if row.get("material_id") else ""
         print(f"  {_ERROR_KINDS.get(row['kind'], row['kind'])} #{row['id']}{material}{timestamp}："
               f"{row.get('error') or ''}")

@@ -97,8 +97,9 @@ class StudentDeadlineTest(unittest.TestCase):
         self.assertIn("查看批改", panel)
         self.assertIn("去提交", panel)
 
-        expected_utc = (self.now + timedelta(days=1)).strftime("%Y-%m-%d %H:%M")
-        self.assertIn(expected_utc, panel)
+        expected_beijing = (self.now + timedelta(days=1)).astimezone(self.asia_shanghai).strftime(
+            "%Y-%m-%d %H:%M")
+        self.assertIn(expected_beijing, panel)
 
     def test_no_deadline_or_other_students_course_is_exposed_in_panel(self):
         response = self.student_client(uid=4).get("/student")

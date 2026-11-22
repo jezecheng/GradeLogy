@@ -9,12 +9,11 @@
 import json
 import os
 import secrets
-from datetime import datetime
-
 from werkzeug.utils import secure_filename
 
 import config as cfg
 from db import get_db
+from utilities.time_utils import now_beijing
 
 ALLOWED_EXT = {"png", "jpg", "jpeg", "webp", "pdf"}
 
@@ -72,7 +71,7 @@ def _validate_upload(file_storage):
         file_storage.stream.seek(0)
     if size > cfg.get("MAX_UPLOAD_MB") * 1024 * 1024:
         raise ValueError(f"单个文件不能超过 {cfg.get("MAX_UPLOAD_MB")}MB")
-    return f"{datetime.now():%Y%m%d%H%M%S}_{secrets.token_hex(3)}_{orig or 'file.' + ext}"
+    return f"{now_beijing():%Y%m%d%H%M%S}_{secrets.token_hex(3)}_{orig or 'file.' + ext}"
 
 
 def save_upload(file_storage, course_id, lecture_id, student_id=0, filename=None):

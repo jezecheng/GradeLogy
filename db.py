@@ -497,6 +497,7 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=(), reco
             con.execute(f"ALTER TABLE questions ADD COLUMN {col} {ddl}")
     # 轻量迁移：逐题图片锚点（学生答案页/标准答案页 + 可选裁剪区域）
     for col, ddl in (("answer_page", "INTEGER DEFAULT 0"),
+                     ("page_match", "TEXT DEFAULT ''"),
                      ("student_box", "TEXT DEFAULT ''"),
                      ("answer_box", "TEXT DEFAULT ''")):
         if col not in qcols:
@@ -655,11 +656,11 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=(), reco
     if recover_interrupted:
         # 上次进程退出时未完成的操作标记失败；知识图谱随后由启动恢复自动续建
         con.execute("UPDATE ai_operations SET status='failed', error=?, "
-                    "finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running') "
+                    "finished_at=datetime('now','+8 hours') WHERE status IN ('queued','running') "
                     "AND operation_type='kg_build'",
                     ("服务重启，知识图谱建图已中断，已自动重新排队，将从未完成块续建",))
         con.execute("UPDATE ai_operations SET status='failed', error=?, "
-                    "finished_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running') "
+                    "finished_at=datetime('now','+8 hours') WHERE status IN ('queued','running') "
                     "AND operation_type<>'kg_build'",
                     ("服务重启，后台 AI 任务已中断，请重新提交",))
         con.execute("""

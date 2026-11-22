@@ -316,7 +316,7 @@ details summary { cursor: pointer; color: #1456f0; }
 .review-item[open] > summary::before { transform: rotate(90deg); }
 .review-item > summary:hover { background: #fafbfc; }
 .review-item[open] > summary { border-bottom: 1px dashed #eef0f3; }
-.review-item .q-no { font-size: 15px; }
+.review-item .q-no { font-size: 19px; }
 .review-item .verdict { font-weight: 500; }
 .reviewed-badge { background: #e6f6ec; color: #18794e; border-radius: 999px;
                   padding: 1px 8px; font-size: 12px; font-weight: 500; }
@@ -358,6 +358,9 @@ details summary { cursor: pointer; color: #1456f0; }
 .report-body li { margin-bottom: 4px; }
 .report-body table.report-table { margin: 8px 0 12px; }
 .report-body table.report-table th, .report-body table.report-table td { font-size: 14px; vertical-align: top; }
+.report-body .kg-sourced { overflow-x: auto; }
+.report-body .kg-sourced table.report-table { min-width: 760px; width: max-content; }
+.report-body .kg-sourced table.report-table td:last-child { min-width: 220px; max-width: 360px; white-space: normal; }
 .report-body td .katex-display, .lecture-summary-body .katex-display,
 .tag-analysis-body .katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; }
 .report-body .katex, .lecture-summary-body .katex, .tag-analysis-body .katex { font-size: 1.05em; }
@@ -371,7 +374,7 @@ details summary { cursor: pointer; color: #1456f0; }
                                border: 1px solid #b7e2c6; }
 .reviewed-toggle.reviewed-on:hover { background: #d8f0e2; }
 
-/* 逐题复核：内嵌学生答案 / 标准答案原图（折叠） */
+/* 人工复核：内嵌学生答案 / 标准答案原图与页码 */
 .q-media { margin-top: 8px; padding: 8px 12px; background: #f7f8fa;
            border: 1px solid #e3e7ee; border-radius: 8px; }
 .q-media > summary { cursor: pointer; font-weight: 600; color: #3a4252;
@@ -379,16 +382,21 @@ details summary { cursor: pointer; color: #1456f0; }
 .q-media > summary::-webkit-details-marker { display: none; }
 .q-media > summary::before { content: "▸ "; display: inline-block; transition: transform .15s; }
 .q-media[open] > summary::before { transform: rotate(90deg); }
-.q-media-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
+.q-media-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; margin-top: 10px; }
 .q-media-item { min-width: 0; }
 .q-media-item .col-title { margin-bottom: 4px; }
+.page-chip { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 9px;
+             font-size: 12px; font-weight: 600; }
+.page-chip-confirmed { background: #e6f6ec; color: #18794e; }
+.page-chip-uncertain { background: #fff4e0; color: #a75a00; }
+.page-match-warning { padding: 10px 12px; border-radius: 6px; background: #fff4e0; color: #8b4b00; }
 .q-img-link { display: block; overflow: hidden; border-radius: 6px;
-              border: 1px solid #e0e4eb; background: #fff; }
-.q-img-link img { display: block; width: 100%; max-height: 360px;
+              border: 1px solid #e0e4eb; background: #fff; text-align: center; }
+.q-img-link img { display: block; width: auto; max-width: min(100%, 980px); max-height: 72vh;
+                  margin: 0 auto;
                   object-fit: contain; background: #fafafa; }
 @media (max-width: 720px) {
-  .q-media-grid { grid-template-columns: 1fr; }
-  .q-img-link img { max-height: 300px; }
+  .q-img-link img { max-height: 65vh; }
 }
 
 /* AI 逐题判定与汇总 */
