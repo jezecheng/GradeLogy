@@ -61,7 +61,7 @@
 | UX-04 准备范围可靠性 | `2f02351` | `tests.test_lecture_preparation`、标签路由回归；旧的“范围保存自动标注”断言已改为不触发 AI |
 | UX-06 登录帮助 | `f2b4a64` | `tests.test_login_help`、会话与认证回归 |
 
-主工作区在此基础上实现 UX-05 (`332ccd9`) 与 UX-03；目前完整测试数为 293。所有测试仅使用临时/合成数据并 mock AI。
+主工作区在此基础上实现 UX-05 (`332ccd9`) 与 UX-03，并补充异步标签任务过期保护及旧测试预期更新。最终集成提交为 `64b49f3`。全套测试 **294 项通过**；Python compile、JS syntax、`pip check`、`git diff --check` 均通过。所有测试仅使用临时/合成数据并 mock AI。
 
 ## 建议的代码修改计划
 
