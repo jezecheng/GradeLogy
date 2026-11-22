@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS submissions(
   report_md TEXT DEFAULT '',
   report_detail TEXT DEFAULT '',
   report_published INTEGER DEFAULT 0,
+  review_skipped INTEGER DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS questions(
@@ -109,6 +110,7 @@ CREATE TABLE IF NOT EXISTS questions(
   max_score REAL DEFAULT 0,
   verdict TEXT DEFAULT '',
   ai_comment TEXT DEFAULT '',
+  confidence REAL DEFAULT NULL,
   reviewed INTEGER DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS lesson_plans(
@@ -492,6 +494,7 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=(), reco
     for col, ddl in (("max_score", "REAL DEFAULT 0"),
                      ("verdict", "TEXT DEFAULT ''"),
                      ("ai_comment", "TEXT DEFAULT ''"),
+                     ("confidence", "REAL DEFAULT NULL"),
                      ("reviewed", "INTEGER DEFAULT 0")):
         if col not in qcols:
             con.execute(f"ALTER TABLE questions ADD COLUMN {col} {ddl}")
@@ -512,6 +515,8 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=(), reco
         con.execute("ALTER TABLE submissions ADD COLUMN report_detail TEXT DEFAULT ''")
     if "report_published" not in scols:
         con.execute("ALTER TABLE submissions ADD COLUMN report_published INTEGER DEFAULT 0")
+    if "review_skipped" not in scols:
+        con.execute("ALTER TABLE submissions ADD COLUMN review_skipped INTEGER DEFAULT 0")
     # 轻量迁移：讲次新增「学生版」讲义 PDF，与「教师版」标准答案并存
     lcols = {r[1] for r in con.execute("PRAGMA table_info(lectures)")}
     if "student_pdf" not in lcols:

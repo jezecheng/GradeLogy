@@ -20,6 +20,7 @@
            {{ '撤回发布' if sub.report_published else '一键发布给学生' }}</button>
       </form>
       <a class="btn-link" href="{{ url_for('submission_report_download', sid=sub.id) }}">下载 .md</a>
+      <a class="btn-link" href="{{ url_for('submission_report_download_pdf', sid=sub.id) }}">下载 PDF</a>
       {% endif %}
     </div>
     {% endif %}
@@ -29,6 +30,7 @@
     {{ student_name }} · {{ hw.title }}
     {% if sub.report_published %}<span class="reviewed-badge">报告与逐题批改已发布</span>
     {% elif is_teacher and md %}<span class="pending-badge">草稿（报告与逐题内容均不可见）</span>{% endif %}
+    {% if is_teacher and sub.review_skipped %}<span class="pending-badge">人工复核已跳过</span>{% endif %}
     {% if is_teacher %}
       · <a href="{{ url_for('submission_review', sid=sub.id) }}">返回人工复核</a>
       · <a href="{{ url_for('lecture_detail', hid=hw.id) }}">返回讲次</a>
@@ -48,6 +50,9 @@
   {% endif %}
 
   {% if md %}
+  {% if is_teacher and sub.review_skipped %}
+  <p class="ai-review-skip-notice" role="status">本报告完全由 AI 批阅生成，人工复核已跳过。请检查报告后，再决定是否发布给学生。</p>
+  {% endif %}
   <div class="report-body">{{ body|safe }}</div>
 
   {% if not is_teacher %}

@@ -294,6 +294,11 @@ class ScopeStemTest(unittest.TestCase):
 
 
 class TagAITest(unittest.TestCase):
+    def test_question_tags_allow_up_to_six_distinct_tags(self):
+        tags = ["概念一", "概念二", "概念三", "概念四", "概念五", "概念六", "概念七"]
+        self.assertEqual(pdfgrade._clean_tags(tags), tags[:6])
+        self.assertIn("每题 1~6 个", pdfgrade.TAG_RULES)
+
     def test_analyze_question_tags_keeps_sibling_subquestions_independent(self):
         captured = {}
 
@@ -443,7 +448,7 @@ class TagAITest(unittest.TestCase):
             rows, err = pdfgrade.analyze_question_tags(
                 "/tmp/a.pdf", [{"no": "1"}], "u", "k", "m")
         self.assertEqual(err, "")
-        self.assertEqual(rows[0]["tags"], ["重复", "概念辨析", "一", "二"])
+        self.assertEqual(rows[0]["tags"], ["重复", "概念辨析", "一", "二", "三", "四"])
         self.assertEqual(rows[0]["category"], "概念")
 
     def test_analyze_question_tags_batches_large_question_sets(self):

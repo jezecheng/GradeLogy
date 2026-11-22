@@ -253,6 +253,14 @@ td.right > * + * { margin-left: 10px; }
 .sub-head { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
 .sub-head form { margin-left: auto; }
 .score { font-weight: 700; color: #1456f0; }
+.confidence-chip { --confidence-hue: 60; display: inline-flex; align-items: center;
+                   padding: 3px 9px; border: 1px solid hsl(var(--confidence-hue), 55%, 76%);
+                   border-radius: 999px; background: hsl(var(--confidence-hue), 75%, 96%);
+                   color: hsl(var(--confidence-hue), 62%, 31%); font-size: 12px;
+                   font-weight: 700; white-space: nowrap; }
+.ai-review-skip-notice { padding: 10px 12px; border: 1px solid #e7a535; border-radius: 8px;
+                         background: #fff8e8; color: #86520a; }
+.submission-actions .skip-review-form { margin: 0; }
 .feedback { white-space: pre-wrap; background: #f8f9fb; border-radius: 6px;
             padding: 12px; font-size: 13px; max-height: 320px; overflow: auto; margin: 8px 0; }
 details summary { cursor: pointer; color: #1456f0; }

@@ -63,6 +63,7 @@ from utilities import tags as tag_utils
 from utilities.time_utils import BEIJING_TZ, beijing_wall_now, now_beijing
 from utilities.teacher_views import workload
 from utilities.report import build_report_md, render_markdown
+from utilities.report_pdf import markdown_report_pdf
 from utilities.sessions import (
     IDLE_TIMEOUT_SECONDS, auth_session_activity, create_auth_session,
     revoke_auth_session, revoke_sessions, session_epoch, touch_auth_session)
@@ -1722,7 +1723,11 @@ def lecture_detail(hid):
     subs = db.execute("""
         SELECT s.*, u.display_name, u.username,
           (SELECT COUNT(*) FROM questions q WHERE q.submission_id=s.id) AS n_questions,
-          (SELECT COUNT(*) FROM questions q WHERE q.submission_id=s.id AND q.reviewed=1) AS n_reviewed
+          (SELECT COUNT(*) FROM questions q WHERE q.submission_id=s.id AND q.reviewed=1) AS n_reviewed,
+          (SELECT AVG(q.confidence) FROM questions q WHERE q.submission_id=s.id
+             AND q.confidence IS NOT NULL) AS ai_confidence,
+          (SELECT status FROM ai_operations o WHERE o.submission_id=s.id
+             AND o.operation_type='report_generate' ORDER BY o.id DESC LIMIT 1) AS report_job_status
         FROM submissions s
         JOIN users u ON u.id=s.student_id
         WHERE s.lecture_id=? ORDER BY s.created_at DESC""", (hid,)).fetchall()
@@ -2044,7 +2049,8 @@ def _invalidate_lecture_scope_results(db, lecture_id, course_id):
             graded_marks = ",".join("?" for _ in graded_ids)
             db.execute(
                 f"UPDATE submissions SET status='已提交',score='',feedback='',grader='',ai_summary='',"
-                f"report_md='',report_detail='',report_published=0,updated_at=CURRENT_TIMESTAMP "
+                f"report_md='',report_detail='',report_published=0,review_skipped=0,"
+                f"updated_at=CURRENT_TIMESTAMP "
                 f"WHERE id IN ({graded_marks})", graded_ids)
 
     # 问题编号/结构改变后，旧的 AI 和手动题目标签、讲次/全班分析都不再可靠。
@@ -2891,15 +2897,15 @@ def _save_grading_result(db, sid, gen, answer_pages=None):
             apage = ap_idx if ap_idx >= 1 else 0
         db.execute(
             "INSERT INTO questions(submission_id,no,page_no,image_path,ocr_text,"
-            "standard_answer,note,verdict,ai_comment,answer_page,page_match,student_box,answer_box) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "standard_answer,note,verdict,ai_comment,confidence,answer_page,page_match,student_box,answer_box) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (sid, q.get("no") or str(i), sp, "",
              q.get("ocr", ""), q.get("standard_answer", ""), comment,
-             q.get("verdict", ""), comment, apage,
+             q.get("verdict", ""), comment, q.get("confidence"), apage,
              page_match,
              q.get("student_box", ""), q.get("answer_box", "")))
     summary = gen.get("summary") or {}
-    db.execute("UPDATE submissions SET status='待批改', report_published=0, "
+    db.execute("UPDATE submissions SET status='待批改', report_published=0,review_skipped=0, "
                "report_md='',report_detail='',feedback='',grader='',score='',ai_summary=?, "
                "updated_at=CURRENT_TIMESTAMP WHERE id=?",
                (json.dumps(summary, ensure_ascii=False) if summary else "", sid))
@@ -3362,7 +3368,7 @@ def submission_review_save(sid):
     # 完成人工复核或提交报告生成时都只保存审核状态；对学生的公开仅由报告页的一键发布控制。
     draft = request.form.get("action") == "draft"
     reviewed = reviewed and not draft
-    db.execute("UPDATE submissions SET score='', ai_summary=?, status=?, "
+    db.execute("UPDATE submissions SET score='', ai_summary=?, status=?,review_skipped=0, "
                "report_published=CASE WHEN ? THEN report_published ELSE 0 END,grader=?, "
                "updated_at=CURRENT_TIMESTAMP WHERE id=?",
                  (json.dumps(review_summary, ensure_ascii=False),
@@ -3404,7 +3410,7 @@ def question_reviewed(qid):
     避免老师改完判定点「已复核」却只存了审核状态、修改被丢弃。"""
     db = get_db()
     q = db.execute("""
-        SELECT q.id, s.lecture_id FROM questions q
+        SELECT q.id, s.id AS submission_id,s.lecture_id FROM questions q
         JOIN submissions s ON s.id=q.submission_id WHERE q.id=?""", (qid,)).fetchone()
     if not q:
         abort(404)
@@ -3424,6 +3430,7 @@ def question_reviewed(qid):
          str(payload.get("ocr_text", "")).strip(),
          str(payload.get("standard_answer", "")).strip(),
          str(payload.get("note", "")).strip(), qid))
+    db.execute("UPDATE submissions SET review_skipped=0 WHERE id=?", (q["submission_id"],))
     db.commit()
     log.info("复核保存 question=%s reviewed=%s verdict=%s", qid, reviewed, verdict)
     return {"ok": True, "reviewed": reviewed, "verdict": verdict}
@@ -5469,6 +5476,10 @@ def generate_report(db, sub_id, teacher_id, reuse=False, operation=None):
     md = build_report_md(sub["display_name"], sub["lecture_title"], date_label,
                          report_questions, summary, detail,
                          kg_diagnosis=_kg_diagnosis(db, sub))
+    if sub["review_skipped"]:
+        lines = md.splitlines()
+        notice = "> ⚠️ 本报告由 AI 自动批阅生成，人工复核已跳过；发布前请在此页检查报告内容。"
+        md = "\n".join([lines[0], "", notice, *lines[1:]]) if lines else notice + "\n"
     if completion_error:
         # AI 评价请求失败时保留旧报告；没有旧报告时保持空值，供界面显示“生成”。
         _finish_ai_operation(operation, "failed", completion_error)
@@ -5991,12 +6002,22 @@ def submission_report_build(sid):
         "SELECT COUNT(*) AS total, SUM(reviewed=0) AS pending "
         "FROM questions WHERE submission_id=?", (sid,)).fetchone()
     active = latest_operation(db, sid)
-    if not rows["total"] or rows["pending"]:
+    if not rows["total"] or (rows["pending"] and not sub["review_skipped"]):
         flash("请先完成人工复核，再生成或重新生成报告。")
         return redirect(url_for("submission_review", sid=sid))
     if active and active["status"] in ("queued", "running"):
         flash("批阅任务尚未完成，请稍后再复核并生成报告。")
         return redirect(url_for("submission_review", sid=sid))
+    queue_err = _queue_submission_report(sid, hw, course, teacher_id)
+    if queue_err:
+        flash(queue_err)
+    else:
+        flash("批改报告生成已加入后台队列，可离开当前页面。")
+    return redirect(url_for("submission_report", sid=sid))
+
+
+def _queue_submission_report(sid, hw, course, teacher_id):
+    """将逐题结果组装为报告并排队；调用方已完成复核/跳过门槛检查。"""
     model = get_setting(teacher_id, "ai_model") or "report"
 
     def runner(database, operation):
@@ -6020,10 +6041,37 @@ def submission_report_build(sid):
         teacher_id, "report_generate", model=model, runner=runner,
         course_id=course["id"], lecture_id=hw["id"], submission_id=sid,
         dedup_key=f"report_generate|{sid}")
+    return queue_err
+
+
+@_routes.route("/submission/<oid:sid>/review/skip-and-report", methods=["POST"])
+@role_required("teacher")
+def submission_review_skip_and_report(sid):
+    """明确跳过逐题人工复核，直接用现有 AI 批阅结果生成未发布报告。"""
+    sub, hw, course = own_submission(sid)
+    db = get_db()
+    if sub["report_md"]:
+        flash("这份作业已有评阅报告，请打开报告检查或重新生成。")
+        return redirect(url_for("submission_report", sid=sid))
+    total = db.execute(
+        "SELECT COUNT(*) FROM questions WHERE submission_id=?", (sid,)).fetchone()[0]
+    if not total:
+        flash("尚无 AI 批阅结果；请先完成 AI 批阅，再使用跳过人工复核生成报告。")
+        return redirect(url_for("lecture_detail", hid=hw["id"]))
+    active = latest_operation(db, sid)
+    if active and active["status"] in ("queued", "running"):
+        flash("这份作业仍有 AI 任务运行中，请完成后再生成报告。")
+        return redirect(url_for("lecture_detail", hid=hw["id"]))
+    db.execute(
+        "UPDATE submissions SET status='已批改',review_skipped=1,report_published=0,"
+        "grader='AI 自动批阅（人工复核已跳过）',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        (sid,))
+    db.commit()
+    queue_err = _queue_submission_report(sid, hw, course, g.user["id"])
     if queue_err:
-        flash(queue_err)
+        flash("已标记跳过人工复核，但报告未能加入队列：" + queue_err)
     else:
-        flash("批改报告生成已加入后台队列，可离开当前页面。")
+        flash("已跳过人工复核，AI 批改报告正在生成。报告不会自动发布，请在报告页检查后手动发布。")
     return redirect(url_for("submission_report", sid=sid))
 
 
@@ -6056,7 +6104,7 @@ def submission_report_publish(sid):
     if not sub["report_published"]:
         rows = db.execute("SELECT COUNT(*),SUM(reviewed=0) FROM questions WHERE submission_id=?",
                           (sid,)).fetchone()
-        if not rows[0] or rows[1]:
+        if not rows[0] or (rows[1] and not sub["review_skipped"]):
             flash("全部题目完成人工复核后才能发布报告。")
             return redirect(url_for("submission_review", sid=sid))
         if latest_operation(db, sid) and latest_operation(db, sid)["status"] in ("queued", "running"):
@@ -6103,6 +6151,19 @@ def submission_report_download(sid):
     import io as _io
     return send_file(_io.BytesIO(sub["report_md"].encode("utf-8")),
                      mimetype="text/markdown", as_attachment=True, download_name=name)
+
+
+@_routes.route("/submission/<oid:sid>/report/download.pdf")
+@role_required("teacher")
+def submission_report_download_pdf(sid):
+    """下载与报告页渲染内容一致的 PDF 版本。"""
+    sub, hw, _ = own_submission(sid)
+    if not sub["report_md"]:
+        abort(404)
+    name = f"{hw['title']}_批改报告.pdf".replace("/", "_")
+    data = markdown_report_pdf(sub["report_md"], title=f"{hw['title']} 批改报告")
+    return send_file(io.BytesIO(data), mimetype="application/pdf",
+                     as_attachment=True, download_name=name)
 
 
 @_routes.route("/student/submission/<oid:sid>/report")

@@ -8,6 +8,7 @@ import sys
 import unittest
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import unquote
 from unittest import mock
 
 try:
@@ -212,21 +213,23 @@ class ReviewRegressionTest(unittest.TestCase):
     def test_page_match_is_conservative_and_persists_source_page(self):
         normalized = pdfgrade._normalize([
             {"no": "1", "student_page": 8, "verdict": "对", "score": 5,
-             "comment": "看起来匹配但没有确认字段"},
+             "confidence": 0.9, "comment": "看起来匹配但没有确认字段"},
             {"no": "2", "student_page": 9, "page_match": "confirmed",
-             "verdict": "对", "score": 5, "comment": "题干核对一致"},
+             "verdict": "对", "score": 5, "confidence": 0.82, "comment": "题干核对一致"},
         ])
         self.assertEqual((normalized[0]["student_page"], normalized[0]["page_match"],
                           normalized[0]["verdict"], normalized[0]["score"]),
                          (0, "uncertain", "无法判定", 0.0))
         self.assertEqual((normalized[1]["student_page"], normalized[1]["page_match"]),
                          (9, "confirmed"))
+        self.assertEqual(normalized[0]["confidence"], 0.35)
+        self.assertEqual(normalized[1]["confidence"], 0.82)
         a._save_grading_result(self.db, 30, {"questions": normalized, "summary": {}})
         rows = self.db.execute(
-            "SELECT no,page_no,page_match,verdict FROM questions ORDER BY no").fetchall()
+            "SELECT no,page_no,page_match,verdict,confidence FROM questions ORDER BY no").fetchall()
         self.assertEqual([tuple(row) for row in rows], [
-            ("1", 0, "uncertain", "无法判定"),
-            ("2", 9, "confirmed", "对"),
+            ("1", 0, "uncertain", "无法判定", 0.35),
+            ("2", 9, "confirmed", "对", 0.82),
         ])
 
     def test_ai_grade_request_labels_source_pdf_pages_and_requires_stem_mapping(self):
@@ -383,7 +386,7 @@ class ReviewRegressionTest(unittest.TestCase):
         }]
         self.db.execute("UPDATE lectures SET scope_candidates=?,scope_selected=? WHERE id=20",
                         (json.dumps(candidates, ensure_ascii=False), json.dumps(["q0"])))
-        self.db.execute("UPDATE questions SET no='1.1' WHERE id=40")
+        self.db.execute("UPDATE questions SET no='1.1',confidence=0.73 WHERE id=40")
         self.db.execute(
             "INSERT INTO questions(id,submission_id,no,verdict,reviewed) VALUES(41,30,'1.2','对',1)")
         self.db.commit()
@@ -394,6 +397,7 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertIn("母题公共条件。", teacher_page)
         self.assertIn("第 1.1 小问", teacher_page)
         self.assertIn("第 1.2 小问", teacher_page)
+        self.assertIn("AI 信心 73%", teacher_page)
         self.assertIn('name="verdict_40"', teacher_page)
         self.assertIn('name="verdict_41"', teacher_page)
 
@@ -403,6 +407,49 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertIn("母题公共条件。", student_page)
         self.assertIn("第 1.1 小问", student_page)
         self.assertIn("第 1.2 小问", student_page)
+
+    def test_lecture_confidence_average_and_ai_only_report_skip_review_flow(self):
+        self.db.execute("UPDATE questions SET reviewed=0,confidence=0.64 WHERE id=40")
+        self.db.execute("UPDATE submissions SET report_md='',report_published=0 WHERE id=30")
+        self.db.commit()
+        page = self.client(2).get(self.url("lecture_detail", hid=20)).get_data(as_text=True)
+        self.assertIn("AI 信心均值 64%", page)
+        self.assertIn("--confidence-hue:77", page)
+        self.assertIn("跳过人工复核并生成报告", page)
+
+        captured = []
+
+        def capture(teacher_id, operation_type, **kwargs):
+            captured.append((teacher_id, operation_type, kwargs))
+            return {"id": len(captured)}, None
+
+        with mock.patch.object(a._ai_task_queue, "submit", side_effect=capture):
+            response = self.post("submission_review_skip_and_report", sid=30)
+        self.assertEqual(response.status_code, 302)
+        saved = self.db.execute(
+            "SELECT status,review_skipped,report_published FROM submissions WHERE id=30").fetchone()
+        self.assertEqual(tuple(saved), ("已批改", 1, 0))
+        self.assertEqual(self.db.execute(
+            "SELECT reviewed FROM questions WHERE id=40").fetchone()[0], 0)
+        self.assertEqual(captured[0][1], "report_generate")
+        review_page = self.client(2).get(self.url("submission_review", sid=30)).get_data(as_text=True)
+        self.assertIn("AI 信心 64%", review_page)
+        self.assertIn("人工复核已跳过", review_page)
+
+        # 跳过复核后仍允许显式重生成报告，而不是被未审核题目拦回复核页。
+        with mock.patch.object(a._ai_task_queue, "submit", side_effect=capture):
+            response = self.post("submission_report_build", sid=30)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(captured[1][1], "report_generate")
+
+        self.db.execute("UPDATE submissions SET report_md='AI report' WHERE id=30")
+        self.db.commit()
+        report_page = self.client(2).get(self.url("submission_report", sid=30)).get_data(as_text=True)
+        self.assertIn("人工复核已跳过", report_page)
+        self.assertIn("一键发布给学生", report_page)
+        self.post("submission_report_publish", sid=30)
+        self.assertEqual(self.db.execute(
+            "SELECT report_published FROM submissions WHERE id=30").fetchone()[0], 1)
 
     def test_explicit_publication_requires_all_questions_and_no_running_grade(self):
         def publish():
@@ -548,6 +595,7 @@ class ReviewRegressionTest(unittest.TestCase):
                             [(100, 2, "A", "PROMPT_A"), (101, 3, "B", "PROMPT_B")])
         self.db.execute("UPDATE courses SET report_prompt_id=100 WHERE id=10")
         self.db.execute("INSERT INTO courses(id,name,teacher_id,report_prompt_id) VALUES(20,'Other',3,101)")
+        self.db.execute("UPDATE submissions SET review_skipped=1 WHERE id=30")
         self.db.commit()
         with (a.app.app_context(),
               mock.patch.object(a, "get_setting", side_effect=lambda tid, key, default="": {
@@ -558,11 +606,35 @@ class ReviewRegressionTest(unittest.TestCase):
         saved = self.db.execute(
             "SELECT report_md,report_detail FROM submissions WHERE id=30").fetchone()
         self.assertIn("OK", saved["report_md"])
+        self.assertIn("人工复核已跳过", saved["report_md"])
         self.assertEqual(json.loads(saved["report_detail"]), {"good": "OK"})
         operation = self.db.execute(
             "SELECT status FROM ai_operations WHERE submission_id=30 "
             "AND operation_type='report_generate' ORDER BY id DESC LIMIT 1").fetchone()
         self.assertEqual(operation["status"], "success")
+
+    def test_report_pdf_download_renders_chinese_report_and_table(self):
+        self.db.execute(
+            "UPDATE submissions SET report_md=? WHERE id=30",
+            ("# 化学作业报告\n\n| 题号 | 题干 | 判定 |\n| --- | --- | --- |\n"
+             "| 1.1 | $\\mathrm{Fe^{3+}}$ + $\\mathrm{Cl^-}$ | 对 |",))
+        self.db.commit()
+        response = self.client(2).get(self.url("submission_report_download_pdf", sid=30))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "application/pdf")
+        self.assertTrue(response.data.startswith(b"%PDF"))
+        self.assertIn("批改报告.pdf", unquote(response.headers["Content-Disposition"]))
+        document = pdfgrade.pdfium.PdfDocument(response.data)
+        try:
+            text = "\n".join(document[index].get_textpage().get_text_range()
+                              for index in range(len(document)))
+        finally:
+            document.close()
+        self.assertIn("化学作业报告", text)
+        self.assertIn("1.1", text)
+        self.assertIn("Fe³⁺", text)
+        self.assertIn("Cl⁻", text)
+        self.assertIn("对", text)
 
     def test_env_key_takes_over_entire_ai_configuration(self):
         import ai_config

@@ -9,6 +9,7 @@ import base64
 import io
 import json
 import logging
+import math
 import os
 import re
 
@@ -51,7 +52,7 @@ DEFAULT_GRADE_PROMPT = (
 GRADE_OUTPUT_CONTRACT = (
     "输出格式（必须严格遵守）：只输出 JSON，不要输出解释或代码块标记：\n"
     '{"questions":[{"no":"题号","ocr":"学生实际作答内容","standard_answer":"标准答案要点",'
-    '"verdict":"对|半对|错|无法判定","score":0,"max_score":0,"comment":"给分/扣分说明",'
+    '"verdict":"对|半对|错|无法判定","confidence":0.0,"score":0,"max_score":0,"comment":"给分/扣分说明",'
     '"student_page":1,"page_match":"confirmed|uncertain|not_found","answer_page":1,'
     '"student_box":[0,0,1,1],"answer_box":[0,0,1,1]}],'
     '"weak_points":[{"no":"题号","type":"失分类型","detail":"具体说明"}],'
@@ -67,7 +68,10 @@ GRADE_OUTPUT_CONTRACT = (
     "不能仅凭答案相似或题号推断。题干缺失、冲突或不能确认时，student_page=0，"
     "page_match=uncertain 或 not_found，verdict=无法判定，并在 comment 提醒人工核对原卷。\n"
     "4. student_box / answer_box：裁剪框 [x, y, w, h]，均为 0~1 的比例（左上角为原点），"
-    "大致圈住该题的学生答案/标准答案区域；不确定就用 [0,0,1,1] 表示整页。"
+    "大致圈住该题的学生答案/标准答案区域；不确定就用 [0,0,1,1] 表示整页。\n"
+    "5. confidence：你对本题批阅判定可靠性的自评，0~1 小数；依据学生作答是否清晰、题页是否确认、"
+    "与标准答案是否匹配及判定是否有充分依据综合估计。证据充分时接近 1，含糊或需猜测时接近 0；"
+    "page_match 未确认或 verdict=无法判定时应给低值（通常不高于 0.35）。这不是正确率，禁止一律填写高值。"
 )
 
 PDF_GRADE_PROMPT = DEFAULT_GRADE_PROMPT + "\n" + GRADE_OUTPUT_CONTRACT
@@ -314,11 +318,22 @@ def _normalize(raw):
             comment = "学生页未能通过题干比对确认，请人工核对原卷。"
         else:
             comment = str(q.get("comment", "")).strip()
+        confidence = _as_num(q.get("confidence"), None)
+        if confidence is not None and math.isfinite(confidence):
+            if 1 < confidence <= 100:
+                confidence /= 100
+            confidence = max(0.0, min(1.0, confidence))
+            if page_match != "confirmed" or verdict == "无法判定":
+                confidence = min(confidence, 0.35)
+        else:
+            # 新批阅保证每题都有数值，模型漏填时按无可靠置信度处理；历史 NULL 仍不回填。
+            confidence = 0.0
         questions.append({
             "no": no,
             "ocr": str(q.get("ocr", "")).strip(),
             "standard_answer": str(q.get("standard_answer", "")).strip(),
             "verdict": verdict,
+            "confidence": confidence,
             "score": _as_num(q.get("score"), 0.0) if page_match == "confirmed" else 0.0,
             "max_score": _as_num(q.get("max_score"), 0.0),
             "comment": comment,
@@ -399,14 +414,14 @@ TAG_RULES = (
     '{"questions":[{"no":"题号","category":"主要考查类型","tags":["知识点1","知识点2"]}]}\n'
     "规则：\n"
     "1. tags 用教材/考纲里的通用知识点术语（如 氧化还原反应、离子方程式、化学平衡常数），"
-    "每题 1~4 个，按主要程度排序。\n"
+    "每题 1~6 个，按主要程度排序；只输出与本题直接相关、可区分的知识点。\n"
     "2. 不要输出题号、分数、难度（如「基础题」「综合题」）这类非知识点标签。\n"
     "3. 只输出清单里的独立批改项编号，不要补题；子题 stem 已包含母题公共条件和本小问题干，"
     "每个小问单独标注，不要把同一大题的各小问合并。\n"
     "4. 标准答案看不清时，可结合题目本身与清单里的说明推断；仍无法判断就把 tags 留空。"
 )
 
-MAX_TAGS_PER_QUESTION = 4
+MAX_TAGS_PER_QUESTION = 6
 
 
 def _clean_tags(raw):

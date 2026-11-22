@@ -17,14 +17,24 @@
   <summary>
     <span class="q-no">{{ ('第 ' ~ q.no ~ (' 小问' if q.parent_no else ' 题')) if q.no[:1].isdigit() else q.no }}</span>
     {% for t in tag_by_key.get(q.no) or [] %}<span class="tag tag-knowledge">{{ t }}</span>{% endfor %}
+    {% if q.confidence is not none %}
+    {% set confidence_pct = (q.confidence * 100)|round|int %}
+    <span class="confidence-chip" style="--confidence-hue:{{ (q.confidence * 120)|round|int }}"
+          title="AI 对本题批阅判定可靠性的自评，不是实际正确率">AI 信心 {{ confidence_pct }}%</span>
+    {% endif %}
     {% if q.verdict %}<span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">判定：{{ q.verdict }}</span>{% endif %}
     {% if q.page_match == 'confirmed' and q.page_no %}
     <span class="page-chip page-chip-confirmed">原 OCR：PDF 第 {{ q.page_no }} 页</span>
     {% elif q.page_match in ['uncertain', 'not_found'] %}
     <span class="page-chip page-chip-uncertain">原 OCR 页码未确认</span>
     {% elif q.page_no %}<span class="page-chip">历史 OCR 页码：PDF 第 {{ q.page_no }} 页</span>{% endif %}
+    {% if sub.review_skipped %}
+    <span class="reviewed-badge is-pending" data-reviewed="0"
+          title="本报告由 AI 生成，人工复核已跳过">人工复核已跳过</span>
+    {% else %}
     <span class="reviewed-badge{% if not q.reviewed %} is-pending{% endif %}"
           data-reviewed="{{ 1 if q.reviewed else 0 }}">{{ '✓ 已人工复核' if q.reviewed else '待人工复核' }}</span>
+    {% endif %}
     <span class="note-preview muted small" data-note-preview>{{ (q.note or '')[:60] }}</span>
     <span class="save-hint small" data-save-hint style="display:none"></span>
   </summary>
@@ -104,6 +114,9 @@
    · 已人工复核 <strong id="reviewed-count">{{ n_reviewed }}</strong>/{{ n_total }} 个独立批改项
   {% endif %}
 </p>
+{% if sub.review_skipped %}
+<p class="ai-review-skip-notice" role="status">这份报告由 AI 自动批阅生成，逐题人工复核已跳过；发布前建议检查判定与评语。</p>
+{% endif %}
 
 {% if summary and summary.errors %}
 <div class="card ai-alert">

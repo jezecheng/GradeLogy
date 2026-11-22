@@ -43,6 +43,7 @@
 .course-more summary { cursor: pointer; color: #66758a; min-height: 44px; }
 .teacher-ui .course-card .course-todo { display: inline-block; margin-top: 8px; }
 .teacher-ui .submission-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; max-width: 100%; }
+.teacher-ui .submission-actions form { margin: 0; }
 .teacher-ui .submission-action { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 8px 12px; border: 1px solid #1456f0; border-radius: 6px; background: #1456f0; color: #fff; font-size: 14px; font-weight: 600; line-height: 1.4; text-decoration: none; white-space: nowrap; }
 .teacher-ui .submission-action:hover { background: #0e45c8; border-color: #0e45c8; text-decoration: none; }
 .review-workspace .container, .graph-workspace .container { max-width: 1800px; }

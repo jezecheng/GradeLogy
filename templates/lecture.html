@@ -66,7 +66,9 @@
       <span class="tag tag-{{ s.status }}">{{ s.status }}</span>
       {% if s.n_questions %}
         <span class="review-state review-done" title="AI 已完成批阅">✓ AI 已批阅</span>
-        {% if s.n_reviewed >= s.n_questions %}
+        {% if s.review_skipped %}
+        <span class="review-state review-pending" title="报告由 AI 生成，逐题人工复核已跳过">⚠ 人工复核已跳过</span>
+        {% elif s.n_reviewed >= s.n_questions %}
         <span class="review-state review-done" title="所有题目均已人工复核">✓ 人工复核完成</span>
         {% else %}
         <span class="review-state review-pending"
@@ -75,6 +77,11 @@
       {% endif %}
       {% set acc = acc_by.get(s.id) %}
       {% if acc %}<span class="score" title="正确率">{{ acc }}</span>{% endif %}
+      {% if s.ai_confidence is not none %}
+      {% set confidence_pct = (s.ai_confidence * 100)|round|int %}
+      <span class="confidence-chip" style="--confidence-hue:{{ (s.ai_confidence * 120)|round|int }}"
+            title="各题 AI 批阅信心值均值；模型自评，不是正确率，也不代表已人工复核">AI 信心均值 {{ confidence_pct }}%</span>
+      {% endif %}
       {% set sfiles = s.file_path|file_list %}
       <div class="submission-actions" aria-label="{{ s.display_name }}的提交操作">
         {% for f in sfiles %}
@@ -83,7 +90,19 @@
            data-pdf-title="{{ s.display_name }} · 扫描件{% if sfiles|length > 1 %} {{ loop.index }}{% endif %}">查看扫描件{% if sfiles|length > 1 %} {{ loop.index }}{% endif %}</a>
         {% endfor %}
         <a class="submission-action" href="{{ url_for('submission_review', sid=s.id) }}">人工复核</a>
-        {% if s.report_md %}<a class="submission-action" href="{{ url_for('submission_report', sid=s.id) }}">批改报告</a>{% endif %}
+        {% if s.report_md %}
+        <a class="submission-action" href="{{ url_for('submission_report', sid=s.id) }}">打开评阅报告</a>
+        {% elif s.report_job_status in ('queued', 'running') %}
+        <button type="button" class="submission-action" disabled>报告生成中…</button>
+        {% elif s.n_questions %}
+        <form method="post" action="{{ url_for('submission_review_skip_and_report', sid=s.id) }}"
+              class="skip-review-form">
+          <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+          <button type="submit" class="submission-action">跳过人工复核并生成报告</button>
+        </form>
+        {% else %}
+        <button type="button" class="submission-action" disabled title="请先完成 AI 批阅">先完成 AI 批阅</button>
+        {% endif %}
       </div>
       {% if s.report_published %}
         <span class="reviewed-badge">已发布给学生</span>
@@ -747,6 +766,21 @@
   if (!form) return;
   form.addEventListener('submit', function () {
     busyOn(form.querySelector('button'), '标注中…');
+  });
+})();
+// 从讲次页直接生成 AI-only 报告时，明确告知会跳过全部人工复核；不自动发布。
+(function () {
+  document.querySelectorAll('.skip-review-form').forEach(function (form) {
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var btn = form.querySelector('button[type="submit"]');
+      confirmDialog('将使用现有 AI 批阅结果直接生成报告，并跳过逐题人工复核。报告不会自动发布，仍需在报告页检查后手动发布给学生。确定继续吗？',
+                    '跳过人工复核并生成报告').then(function (ok) {
+        if (!ok) return;
+        busyOn(btn, '生成中…');
+        form.submit();
+      });
+    });
   });
 })();
 (function () {
