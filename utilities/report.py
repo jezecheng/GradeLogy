@@ -128,23 +128,6 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
     return "\n".join(out).strip() + "\n"
 
 
-def _overall_text(detail, fallback=""):
-    """把 AI 返回的三段式评价拼成纯文本总评，供逐题核对页的文本框直接编辑。"""
-    if not detail:
-        return fallback or ""
-    parts = []
-    good = (detail.get("good") or "").strip()
-    if good:
-        parts.append(good)
-    improve = [str(x).strip() for x in (detail.get("improve") or []) if str(x).strip()]
-    if improve:
-        parts.append("需要改的几处：\n" + "\n".join(f"{i}. {x}" for i, x in enumerate(improve, 1)))
-    nxt = (detail.get("next") or "").strip()
-    if nxt:
-        parts.append("下一步建议：" + nxt)
-    return "\n\n".join(parts) or (fallback or "")
-
-
 def render_markdown(md, *, server_mathml=True):
     """把报告用的极简 Markdown（标题/表格/列表/粗体）渲染成 HTML。
 

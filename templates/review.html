@@ -6,10 +6,6 @@
 {% set job_status = grade_job.status if grade_job else '' %}
 {% set verdict_cls = {'对': 'right', '半对': 'partial', '错': 'wrong', '无法判定': 'unknown'} %}
 {% set n_total = questions|length %}
-{% set n_right = questions|selectattr('verdict', 'equalto', '对')|list|length %}
-{% set n_partial = questions|selectattr('verdict', 'equalto', '半对')|list|length %}
-{% set n_wrong = questions|selectattr('verdict', 'equalto', '错')|list|length %}
-{% set n_unknown = questions|selectattr('verdict', 'equalto', '无法判定')|list|length %}
 {% set n_reviewed = questions|selectattr('reviewed')|list|length %}
 {% set all_reviewed = n_total > 0 and n_reviewed == n_total %}
 {% set pdf_files = sub.file_path|file_list %}
@@ -35,29 +31,6 @@
     {% for e in summary.errors %}<li>{{ e }}</li>{% endfor %}
   </ul>
 </div>
-{% endif %}
-
-{% if summary %}
-<details class="card ai-summary ui-fold" data-fold="review-summary">
-  <summary><h2>AI 汇总与失分归因</h2></summary>
-  <p>正确率 <span class="score">{{ accuracy(n_right, n_partial, n_wrong)|default('—', true) }}</span>
-    <span class="muted small">
-      对 {{ n_right }} 题 · 半对 {{ n_partial }} 题 · 错 {{ n_wrong }} 题
-      {% if n_unknown %}· 无法判定 {{ n_unknown }} 题{% endif %}
-    </span>
-  </p>
-  {% if summary.weak_points %}
-  <div class="col-title">失分点归因</div>
-  <ul class="weak-list">
-    {% for w in summary.weak_points %}
-    <li><strong>第 {{ w.no }} 题</strong>
-      <span class="verdict verdict-wrong">{{ w.type }}</span>
-      {{ w.detail }}</li>
-    {% endfor %}
-  </ul>
-  {% endif %}
-  {% if summary.evaluation %}<p class="muted">总评：{{ summary.evaluation }}</p>{% endif %}
-</details>
 {% endif %}
 
 {% if not questions %}
@@ -179,43 +152,21 @@
     </details>
     {% endfor %}
 
-    <div class="review-row total-row">
-      <div class="review-col">
-        <div class="col-title">正确率统计</div>
-        <p>正确率 <strong>{{ accuracy(n_right, n_partial, n_wrong)|default('—', true) }}</strong>
-          <span class="muted small">
-            （对 {{ n_right }} · 半对 {{ n_partial }} · 错 {{ n_wrong }}{% if n_unknown %} · 无法判定 {{ n_unknown }}{% endif %}，共 {{ n_total }} 个小问）
-          </span>
-        </p>
-        <p class="muted small" style="margin-top:6px">
-          按「完全答对的题数 ÷ 已判定题数」计算。完成复核仍是草稿；在评阅报告页一键发布后学生才能查看。
-        </p>
-      </div>
-      <div class="review-col wide">
-        <div class="col-title">总评（学生可见）</div>
-        <textarea name="overall" id="overall" rows="4">{{ sub.feedback or (summary.evaluation if summary else '') }}</textarea>
-        <div class="overall-actions">
-          <button type="button" id="gen-overall" class="small ghost"
-                  data-has-result="{{ '1' if (sub.feedback or (summary and summary.evaluation)) else '0' }}"
-                  {% if not all_reviewed %}disabled{% endif %}>生成新的总评</button>
-          <span class="muted small" id="gen-overall-hint">
-            {% if not all_reviewed %}还有 {{ n_total - n_reviewed }} 题待人工复核，全部完成后才能生成总评{% else %}已全部人工复核，可用 AI 重写总评（生成后仍可继续修改）{% endif %}
-          </span>
-        </div>
-      </div>
-    </div>
     <div class="save-bar">
       <span class="review-save-state" id="review-save-state" role="status">{{ '报告与逐题结果已发布' if sub.report_published else ('人工复核已完成 · 学生暂不可见' if sub.status == '已批改' else '草稿 · 学生暂不可见') }}；发布报告时会一并公开。</span>
       <button type="submit" name="action" value="draft" class="ghost">保存草稿</button>
-      <button type="submit" name="action" value="complete" id="review-complete" {% if not all_reviewed or job_status in ('queued','running') %}disabled{% endif %}>保存并完成人工复核</button>
       {% if sub.report_md %}
-       <a class="report-open-button" href="{{ url_for('submission_report', sid=sub.id) }}">打开评阅报告</a>
-      {% else %}
+      <a class="report-open-button" href="{{ url_for('submission_report', sid=sub.id) }}">打开评阅报告</a>
+      <span class="muted small">单题修改自动保存；报告重生成前会先保存并完成复核。</span>
       <button type="submit" name="then" value="report" id="gen-report"
               class="ghost{% if not all_reviewed or job_status in ('queued','running') %} is-disabled{% endif %}"
-              data-blocked="{{ 0 if all_reviewed and job_status not in ('queued','running') else 1 }}">生成评阅报告</button>
+              data-blocked="{{ 0 if all_reviewed and job_status not in ('queued','running') else 1 }}">重新生成评阅报告（保存并完成人工复核）</button>
+      {% else %}
+      <span class="muted small">单题修改自动保存；发布入口仅在评阅报告页。</span>
+      <button type="submit" name="then" value="report" id="gen-report"
+              class="ghost{% if not all_reviewed or job_status in ('queued','running') %} is-disabled{% endif %}"
+              data-blocked="{{ 0 if all_reviewed and job_status not in ('queued','running') else 1 }}">完成并生成评阅报告</button>
       {% endif %}
-      <span class="muted small">单题修改自动保存；完成人工复核不会自动公开，须在评阅报告页一键发布报告与逐题结果。</span>
     </div>
   </form>
 </div>
@@ -270,19 +221,12 @@
   var csrf = '{{ csrf_token() }}';
   var total = {{ n_total }};
   var countEl = document.getElementById('reviewed-count');
-  var genBtn = document.getElementById('gen-overall');
-  var genHint = document.getElementById('gen-overall-hint');
   var reportBtn = document.getElementById('gen-report');
-  var completeBtn = document.getElementById('review-complete');
   var active = {{ 'true' if job_status in ('queued', 'running') else 'false' }};
   var saves = new Map(), failed = new Set(), dirty = new Set();
   var inFlight = 0;
-  var overallDirty = false;
-  var overallField = document.getElementById('overall');
-  if (overallField) overallField.addEventListener('input', function () { overallDirty = true; });
   if (active && document.getElementById('review-form')) {
     document.getElementById('review-form').querySelectorAll('input, textarea, select, button').forEach(function (el) { el.disabled = true; });
-    if (genBtn) genBtn.disabled = true;
   }
   window.flushReview = function () {
     document.querySelectorAll('details.review-item[data-qid]').forEach(function (card) {
@@ -291,7 +235,7 @@
     return Promise.all(Array.from(saves.values())).then(function () { return failed.size === 0; });
   };
   window.addEventListener('beforeunload', function (e) {
-    if (!window.reviewSubmitting && (dirty.size || failed.size || inFlight || overallDirty)) { e.preventDefault(); e.returnValue = ''; }
+    if (!window.reviewSubmitting && (dirty.size || failed.size || inFlight)) { e.preventDefault(); e.returnValue = ''; }
   });
   var verdictCls = {'对':'right','半对':'partial','错':'wrong','无法判定':'unknown'};
 
@@ -299,16 +243,9 @@
     var done = document.querySelectorAll('.reviewed-badge[data-reviewed="1"]').length;
     if (countEl) countEl.textContent = done;
     var all = total > 0 && done === total;
-    if (completeBtn) completeBtn.disabled = !all || active;
-    if (genBtn) genBtn.disabled = !all || active;
     if (reportBtn) {
       reportBtn.dataset.blocked = all ? '0' : '1';
       reportBtn.classList.toggle('is-disabled', !all);
-    }
-    if (genHint) {
-      genHint.textContent = all
-        ? '已全部人工复核，可用 AI 重写总评（生成后仍可继续修改）'
-        : '还有 ' + (total - done) + ' 题待人工复核，全部完成后才能生成总评';
     }
     document.dispatchEvent(new Event('review-progress'));
   }
@@ -466,66 +403,6 @@
     }
   });
 
-  // 全部人工复核完成后，用 AI 生成一份新总评回填文本框，教师可继续修改
-  if (genBtn) {
-    var statusUrlBase = '{{ url_for("submission_report_comment_status", sid=sub.id) }}';
-    var pollComment = function (opId) {
-      fetch(statusUrlBase + '?operation_id=' + opId)
-        .then(function (r) { return r.json(); })
-        .then(function (d) {
-          if (!d.ok) { alert(d.error || '查询总评状态失败'); busyOff(genBtn); syncProgress(); return; }
-          if (d.status === 'queued' || d.status === 'running') {
-            genHint.textContent = (d.status === 'queued' ? '排队中…' : '生成中…') + ' 可离开本页，完成后会在右上角提示。';
-            setTimeout(function () { pollComment(opId); }, 3000);
-            return;
-          }
-          if (d.status === 'failed') {
-            alert('生成总评失败：' + (d.error || ''));
-          } else if (d.text) {
-            document.getElementById('overall').value = d.text;
-            overallDirty = true;
-            genBtn.dataset.hasResult = '1';
-            genHint.textContent = '已生成新的总评，可继续修改后保存';
-          }
-          busyOff(genBtn);
-          syncProgress();
-        });
-    };
-    genBtn.addEventListener('click', function () {
-      var run = function () {
-        busyOn(genBtn, '排队中…');
-        fetch('{{ url_for("submission_report_comment", sid=sub.id) }}', {
-          method: 'POST', headers: { 'X-CSRF-Token': csrf }
-        }).then(function (r) {
-          var ct = r.headers.get('content-type') || '';
-          if (!ct.includes('json')) {
-            throw new Error('服务器内部错误（HTTP ' + r.status + '），请稍后重试');
-          }
-          return r.json();
-        }).then(function (data) {
-          if (!data.ok) throw new Error(data.error || '生成失败');
-          if (data.queued) {
-            genHint.textContent = '已加入后台队列，正在生成总评…';
-            pollComment(data.operation_id);
-          }
-        }).catch(function (e) {
-          var msg = e.message || '生成总评失败，请稍后重试';
-          if (msg === 'Failed to fetch') {
-            msg = '网络请求失败，请检查网络连接或稍后重试。';
-          }
-          alert(msg);
-          busyOff(genBtn);
-          syncProgress();
-        });
-      };
-      if (genBtn.dataset.hasResult === '1') {
-        confirmDialog('重新生成会用 AI 新写的总评覆盖当前总评内容（含手工修改的部分），确定继续吗？',
-                      '重新生成').then(function (ok) { if (ok) run(); });
-        return;
-      }
-      run();
-    });
-  }
   syncProgress();
 })();
 
@@ -634,7 +511,7 @@
     var hidden = document.createElement('input');
     hidden.type = 'hidden'; hidden.name = btn.name; hidden.value = btn.value;
     form.appendChild(hidden);
-    busyOn(btn, btn.value === 'report' ? '生成中…' : '保存中…');
+    busyOn(btn, btn.value === 'report' ? '保存并生成中…' : '保存中…');
     window.reviewSubmitting = true;
     form.submit();
   });

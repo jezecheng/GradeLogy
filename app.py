@@ -62,7 +62,7 @@ from utilities import kg_transfer
 from utilities import tags as tag_utils
 from utilities.time_utils import BEIJING_TZ, beijing_wall_now, now_beijing
 from utilities.teacher_views import workload
-from utilities.report import _overall_text, build_report_md, render_markdown
+from utilities.report import build_report_md, render_markdown
 from utilities.sessions import (
     IDLE_TIMEOUT_SECONDS, auth_session_activity, create_auth_session,
     revoke_auth_session, revoke_sessions, session_epoch, touch_auth_session)
@@ -3072,7 +3072,7 @@ def submission_review(sid):
 @_routes.route("/submission/<oid:sid>/review/save", methods=["POST"])
 @role_required("teacher")
 def submission_review_save(sid):
-    """保存逐题的 OCR 文本、判定、评语，以及总评；作业不再单独赋分。"""
+    """保存逐题 OCR、判定与评语；可同时完成复核并跳转生成评阅报告。"""
     db = get_db()
     sub = db.execute("SELECT * FROM submissions WHERE id=?", (sid,)).fetchone()
     if not sub:
@@ -3096,16 +3096,14 @@ def submission_review_save(sid):
     total = db.execute("SELECT COUNT(*) FROM questions WHERE submission_id=?", (sid,)).fetchone()[0]
     job = latest_operation(db, sid)
     reviewed = bool(total) and not pending and not (job and job["status"] in ("queued", "running"))
-    # 草稿保存和报告预览不隐式公开；旧客户端省略 action 时兼容原保存行为。
-    draft = request.form.get("action") == "draft" or (
-        request.form.get("then") == "report" and sub["status"] != "已批改")
+    # 完成人工复核或提交报告生成时都只保存审核状态；对学生的公开仅由报告页的一键发布控制。
+    draft = request.form.get("action") == "draft"
     reviewed = reviewed and not draft
-    db.execute("UPDATE submissions SET score='', feedback=?, status=?, "
+    db.execute("UPDATE submissions SET score='', status=?, "
                "report_published=CASE WHEN ? THEN report_published ELSE 0 END,grader=?, "
                "updated_at=CURRENT_TIMESTAMP WHERE id=?",
-               (request.form.get("overall", "").strip(),
-                "已批改" if reviewed else "待批改", reviewed,
-                f"{g.user['display_name']} 逐题批改", sid))
+                ("已批改" if reviewed else "待批改", reviewed,
+                 f"{g.user['display_name']} 逐题批改", sid))
     db.commit()
     public_now = bool(db.execute(
         "SELECT report_published FROM submissions WHERE id=?", (sid,)).fetchone()[0])
@@ -3122,26 +3120,10 @@ def submission_review_save(sid):
             return redirect(url_for("submission_review", sid=sid))
         pending = db.execute("SELECT COUNT(*) c FROM questions WHERE submission_id=? AND reviewed=0",
                              (sid,)).fetchone()["c"]
-        if pending:
+        if not total or pending:
             flash(f"生成批阅报告前需要人工审核每一道题，还有 {pending} 题未审核")
             return redirect(url_for("submission_review", sid=sid))
-    if (request.form.get("then") or "") == "report":
-        current = db.execute("SELECT report_md FROM submissions WHERE id=?", (sid,)).fetchone()
-        if current and current["report_md"]:
-            flash("批改已保存，已打开现有报告；如需同步本次修改，请在报告页重新生成。")
-            return redirect(url_for("submission_report", sid=sid))
-        try:
-            generate_report(db, sid, g.user["id"], reuse=True)
-        except Exception:  # 报告生成失败不影响批改保存，可在报告页重试
-            log.exception("生成批改报告失败 submission=%s", sid)
-            flash("批改已保存，但报告生成失败；可稍后在报告页重试。")
-            return redirect(url_for("submission_report", sid=sid))
-        generated = db.execute("SELECT report_md FROM submissions WHERE id=?", (sid,)).fetchone()
-        if not generated or not generated["report_md"]:
-            flash("批改已保存，但报告评价生成失败；可稍后在报告页重试。")
-            return redirect(url_for("submission_report", sid=sid))
-        flash("批改已保存，报告已生成，可继续修改后发布。")
-        return redirect(url_for("submission_report", sid=sid))
+        return redirect(url_for("submission_report", sid=sid, generate=1))
     if reviewed and public_now:
         flash("批改已保存，学生可以查看")
     elif reviewed:
@@ -5785,92 +5767,6 @@ def submission_report_publish(sid):
     flash("评阅报告和逐题批改已一并发布，学生可在「我的学习」里查看。"
           if publish else "报告和逐题批改已撤回，学生不再可见。")
     return redirect(url_for("submission_report", sid=sid))
-
-
-@_routes.route("/submission/<oid:sid>/report/comment", methods=["POST"])
-@role_required("teacher")
-def submission_report_comment(sid):
-    """全部题目人工复核完成后，用 AI 重写一份总评（异步），结果写入 report_detail。"""
-    db = get_db()
-    sub, hw, course = own_submission(sid)
-    questions = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
-                           (sid,)).fetchall()
-    if not questions:
-        return {"ok": False, "error": "还没有批阅结果，无法生成总评"}, 400
-    pending = [q for q in questions if not q["reviewed"]]
-    if pending:
-        return {"ok": False, "error": f"还有 {len(pending)} 道题待人工复核，全部完成后才能生成总评"}, 400
-    api_url = get_setting(g.user["id"], "ai_api_url").rstrip("/")
-    api_key = get_setting(g.user["id"], "ai_api_key")
-    model = get_setting(g.user["id"], "ai_model")
-    if not (api_url and api_key and model):
-        return {"ok": False, "error": "尚未配置 AI 接口，无法生成总评"}, 400
-    if get_setting(g.user["id"], "ai_demo") == "1":
-        return {"ok": False, "error": "演示模式不会调用 AI，无法生成总评"}, 400
-    summary = _json_or_none(sub["ai_summary"]) or {}
-    teacher_id = g.user["id"]
-    course_id = course["id"]
-    lecture_id = hw["id"]
-    max_tokens = _get_max_tokens(teacher_id, "max_tokens_report")
-    prompt = _prompt_content("report", course["report_prompt_id"])
-    # 在线程序列化 questions（sqlite3.Row 不可跨线程）
-    questions_plain = [dict(q) for q in questions]
-    kg_diag = _kg_diagnosis(db, sub)
-    kg_context = _kg_diagnosis_text(kg_diag) if kg_diag else ""
-
-    def runner(database, operation):
-        try:
-            detail = ai_report_comment(
-                questions_plain, summary.get("weak_points") or [],
-                summary.get("evaluation", ""), api_url, api_key, model,
-                prompt=prompt, usage_hook=operation["usage_hook"],
-                max_tokens=max_tokens, kg_context=kg_context)
-        except Exception as e:  # noqa: BLE001
-            _finish_ai_operation(operation, "failed", str(e))
-            log.exception("生成总评异常 submission=%s", sid)
-            return
-        error = "" if detail else "AI 生成总评失败，请稍后重试"
-        if not detail:
-            _finish_ai_operation(operation, "failed", error)
-            return
-        if detail:
-            database.execute("UPDATE submissions SET report_detail=? WHERE id=?",
-                             (json.dumps(detail, ensure_ascii=False), sid))
-            _finish_ai_operation(operation, "success")
-            log.info("总评生成成功 submission=%s", sid)
-
-    operation, queue_err = _ai_task_queue.submit(
-        teacher_id, "report_comment", model=model, runner=runner,
-        course_id=course_id, lecture_id=lecture_id, submission_id=sid,
-        dedup_key=f"report_comment|{sid}")
-    if queue_err:
-        return {"ok": False, "error": queue_err}, 409
-    return {"ok": True, "queued": True, "operation_id": operation["id"]}
-
-
-@_routes.route("/submission/<oid:sid>/report/comment/status")
-@role_required("teacher")
-def submission_report_comment_status(sid):
-    """前端轮询异步总评生成状态；完成时返回可回填的总评文本。"""
-    own_submission(sid)
-    op_id = request.args.get("operation_id", type=int)
-    if not op_id:
-        return {"ok": False, "error": "缺少 operation_id"}, 400
-    op = get_db().execute(
-        "SELECT status,error FROM ai_operations WHERE id=? AND teacher_id=?",
-        (op_id, g.user["id"])).fetchone()
-    if not op:
-        return {"ok": False, "error": "任务不存在"}, 404
-    if op["status"] in ("queued", "running"):
-        return {"ok": True, "status": op["status"]}
-    if op["status"] == "failed":
-        return {"ok": True, "status": "failed", "error": op["error"] or "生成失败"}
-    sub = get_db().execute("SELECT ai_summary,report_detail FROM submissions WHERE id=?",
-                           (sid,)).fetchone()
-    summary = _json_or_none(sub["ai_summary"]) or {}
-    detail = _json_or_none(sub["report_detail"]) or {}
-    return {"ok": True, "status": "success",
-            "text": _overall_text(detail, summary.get("evaluation", ""))}
 
 
 @_routes.route("/submission/<oid:sid>/report/save", methods=["POST"])

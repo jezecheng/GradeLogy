@@ -271,13 +271,20 @@ class ReviewRegressionTest(unittest.TestCase):
     def test_review_uses_manual_review_label_and_report_button_is_conditional(self):
         html = self.client(2).get(self.url("submission_review", sid=30)).get_data(as_text=True)
         self.assertIn("人工复核：Student", html)
+        self.assertNotIn("AI 汇总与失分归因", html)
+        self.assertNotIn("总评（学生可见）", html)
+        self.assertNotIn('name="overall"', html)
         self.assertIn('class="report-open-button"', html)
         self.assertIn("打开评阅报告", html)
+        self.assertLess(html.index("保存草稿"), html.index("打开评阅报告"))
+        self.assertLess(html.index("打开评阅报告"), html.index("重新生成评阅报告"))
         self.db.execute("UPDATE submissions SET report_md='' WHERE id=30")
         self.db.commit()
         html_without_report = self.client(2).get(
             self.url("submission_review", sid=30)).get_data(as_text=True)
         self.assertNotIn("打开评阅报告", html_without_report)
+        self.assertIn("完成并生成评阅报告", html_without_report)
+        self.assertNotIn("重新生成评阅报告", html_without_report)
 
     def test_student_report_keeps_latex_for_client_katex_rendering(self):
         latex = r"$\mathrm{H_2O}$"
@@ -298,13 +305,16 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertEqual(tuple(row), ("待批改", 0))
         self.assertEqual(self.client(4).get(self.url("student_report", sid=30)).status_code, 404)
 
-    def test_report_preview_does_not_publish_draft(self):
+    def test_complete_and_generate_saves_review_without_publishing(self):
         self.db.execute("UPDATE submissions SET status='待批改',report_published=0")
         self.db.commit()
-        with mock.patch.object(a, "generate_report", return_value="draft"):
-            self.client(2).post(self.url("submission_review_save", sid=30),
-                data={"_csrf": "test-token", "then": "report"})
-        self.assertEqual(self.db.execute("SELECT status FROM submissions WHERE id=30").fetchone()[0], "待批改")
+        response = self.client(2).post(self.url("submission_review_save", sid=30),
+            data={"_csrf": "test-token", "then": "report"})
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("generate=1", response.headers["Location"])
+        row = self.db.execute(
+            "SELECT status,report_published FROM submissions WHERE id=30").fetchone()
+        self.assertEqual(tuple(row), ("已批改", 0))
 
     def test_explicit_publication_requires_all_questions_and_no_running_grade(self):
         def publish():

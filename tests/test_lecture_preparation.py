@@ -189,6 +189,10 @@ class LecturePreparationTest(unittest.TestCase):
         page = self.client.get(self._url("lecture_detail", hid=20)).get_data(as_text=True)
         self.assertIn("查看题干", page)
         self.assertIn("Fe^{3+}", page)
+        self.assertIn("<th>题干</th>", page)
+        self.assertNotIn("<th>满分</th>", page)
+        self.assertIn('<details class="stem-details">', page)  # 默认折叠
+        self.assertNotIn('class="scope-stem-row"', page)
         # 勾选框通过 form 属性关联，避免在表格里嵌套表单
         self.assertIn('form="scope-form"', page)
         self.assertIn("编辑标签", page)

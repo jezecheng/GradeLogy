@@ -269,7 +269,7 @@
 
   {% if cands %}
   <table>
-    <tr><th style="width:40px">#</th><th style="width:60px">选中</th><th>题号</th><th>满分</th><th>说明</th><th>知识点标签</th></tr>
+    <tr><th style="width:40px">#</th><th style="width:60px">选中</th><th>题号</th><th>题干</th><th>说明</th><th>知识点标签</th></tr>
     {% for q in cands %}
     {% set qkey = q.key or q.no %}
     {% set qtags = tag_by_key.get(qkey) or [] %}
@@ -278,7 +278,14 @@
       <td><input type="checkbox" name="no" value="{{ qkey }}" form="scope-form" style="width:auto"
                  {% if not chosen or qkey in chosen %}checked{% endif %}></td>
       <td>{{ q.no }}</td>
-      <td>{% if q.max %}{{ '%g'|format(q.max|float) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td>
+        {% if q.stem %}
+        <details class="stem-details">
+          <summary class="small">查看题干</summary>
+          <div class="question-stem">{{ q.stem }}</div>
+        </details>
+        {% else %}<span class="muted">—</span>{% endif %}
+      </td>
       <td class="muted">{{ q.hint or '—' }}</td>
       <td>
         <div class="tag-list">
@@ -299,17 +306,6 @@
         </details>
       </td>
     </tr>
-    {% if q.stem %}
-    <tr class="scope-stem-row">
-      <td></td>
-      <td colspan="5">
-        <details class="stem-details">
-          <summary class="small">查看题干</summary>
-          <div class="question-stem">{{ q.stem }}</div>
-        </details>
-      </td>
-    </tr>
-    {% endif %}
     {% endfor %}
   </table>
   <form method="post" action="{{ url_for('lecture_scope_save', hid=hw.id) }}" id="scope-form">

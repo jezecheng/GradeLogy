@@ -83,6 +83,11 @@
     }
     busyOn(btn, '生成中…');
   });
+  if ({{ 'true' if request.args.get('generate') == '1' else 'false' }}) {
+    // 从人工复核页点“完成并生成/重新生成”时，保存后自动启动同一份异步生成任务。
+    form.dataset.confirmed = '1';
+    setTimeout(function () { btn.click(); }, 0);
+  }
 })();
 </script>
 {% endif %}

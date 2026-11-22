@@ -279,8 +279,10 @@ details summary { cursor: pointer; color: #1456f0; }
 .tag-editor[open] > summary::before { content: "－ "; }
 .tag-edit-form { display: flex; gap: 8px; align-items: center; margin: 6px 0 4px; flex-wrap: wrap; }
 .tag-edit-form input[type="text"] { flex: 1; min-width: 220px; }
-.scope-stem-row td { padding-top: 0; background: #fafbfc; }
-.stem-details > summary { color: #1456f0; cursor: pointer; }
+.stem-details > summary { color: #1456f0; cursor: pointer; list-style: none; white-space: nowrap; }
+.stem-details > summary::-webkit-details-marker { display: none; }
+.stem-details > summary::before { content: "▸ "; display: inline-block; transition: transform .15s; }
+.stem-details[open] > summary::before { transform: rotate(90deg); }
 .question-stem { white-space: pre-wrap; line-height: 1.75; font-size: 14px; color: #3b4351;
                  border: 1px solid #e3e7ee; border-radius: 10px; background: #fff;
                  padding: 10px 12px; margin: 6px 0 10px; }
@@ -300,8 +302,6 @@ details summary { cursor: pointer; color: #1456f0; }
 .review-row:last-of-type { border-bottom: none; }
 .review-col { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .col-title { font-size: 13px; color: #8a8f99; }
-.total-row { grid-template-columns: 200px 1fr; background: #fafbfc;
-             border-radius: 8px; padding: 14px; margin-top: 12px; }
 .save-bar { display: flex; gap: 12px; align-items: center; margin-top: 16px; }
 .qa-item { border-bottom: 1px dashed #eef0f3; padding: 6px 0; font-size: 14px; }
 .qa-item:target { scroll-margin-top: 24px; background: #fffbe6; outline: 2px solid #f0c75e;
@@ -340,10 +340,6 @@ details summary { cursor: pointer; color: #1456f0; }
 .latex-edit > .latex-preview:focus-visible { outline: 2px solid #1456f0; outline-offset: 1px; }
 .latex-edit > .latex-preview.is-empty { color: #98a2b3; }
 .latex-edit .katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
-
-/* 总评区下方的「生成新的总评」 */
-.overall-actions { display: flex; align-items: center; gap: 10px; margin-top: 6px; flex-wrap: wrap; }
-.overall-actions button[disabled] { opacity: .5; cursor: not-allowed; }
 
 /* 报告页：编辑 Markdown 源文 */
 .report-editor { margin-top: 18px; border-top: 1px solid #eef0f3; padding-top: 12px; }
@@ -433,7 +429,7 @@ details summary { cursor: pointer; color: #1456f0; }
 .ai-alert p { margin-bottom: 6px; }
 .weak-list { margin: 6px 0 8px 18px; font-size: 14px; }
 .weak-list li { margin-bottom: 4px; }
-@media (max-width: 860px) { .review-row, .total-row { grid-template-columns: 1fr; } }
+@media (max-width: 860px) { .review-row { grid-template-columns: 1fr; } }
 
 /* 批改页右侧同页 PDF 面板：打开后左侧内容自动收窄，不跳新标签 */
 .pdf-panel { position: fixed; top: 0; right: 0; height: 100vh; width: 46vw; min-width: 400px;
