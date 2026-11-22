@@ -1813,13 +1813,16 @@ def lecture_upload_for(hid):
     names = [save_upload(f, course["id"], hid, student_id, filename=fname)
              for f, fname in prepared]
     stored = names[0] if len(names) == 1 else json.dumps(names, ensure_ascii=False)
-    db.execute("INSERT INTO submissions(lecture_id,student_id,file_path) VALUES(?,?,?)",
-               (hid, student_id, stored))
+    cur = db.execute("INSERT INTO submissions(lecture_id,student_id,file_path) VALUES(?,?,?)",
+                     (hid, student_id, stored))
     db.commit()
     student = db.execute("SELECT display_name FROM users WHERE id=?", (student_id,)).fetchone()
     log.info("老师代传作业 lecture=%s student=%s files=%s operator=%s",
              hid, student_id, len(names), g.user["username"])
-    flash(f"已替 {student['display_name']} 上传 {len(names)} 个文件，可点「AI 批阅」开始批改")
+    if _auto_enqueue_submission(cur.lastrowid):
+        flash(f"已替 {student['display_name']} 上传 {len(names)} 个文件，已自动进入批改队列。")
+    else:
+        flash(f"已替 {student['display_name']} 上传 {len(names)} 个文件，可点「AI 批阅」开始批改")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
@@ -2164,7 +2167,10 @@ def lecture_scope_save(hid):
             _advance_scope_analysis_generation(hid)
         db.execute("UPDATE lectures SET scope_selected=? WHERE id=?", (selected_json, hid))
         db.commit()
-    flash(f"已保存作业范围：{len(keys)} 道题。")
+    # 范围补齐后，已提交但尚未批改的作业可以立即进入自动批改队列。
+    queued = _grading_queue.auto_enqueue_lecture(hid)
+    flash(f"已保存作业范围：{len(keys)} 道题。" +
+          (f" 已自动加入批改队列 {queued} 份。" if queued else ""))
     return redirect(url_for("lecture_detail", hid=hid))
 
 
@@ -2755,6 +2761,22 @@ def _configure_queues(application):
 def _enqueue_grading(teacher_id, sid, course_id, lecture_id):
     """统一入队入口：手动点击和定时扫描共用，返回 (operation, 错误提示)。"""
     return _grading_queue.enqueue(teacher_id, sid, course_id, lecture_id)
+
+
+def _auto_enqueue_submission(sid):
+    """上传后立即尝试自动批改，返回是否已进入队列。"""
+    queued, reason = _grading_queue.auto_enqueue(sid)
+    if queued:
+        grading_log.info("上传后自动批阅入队 submission=%s", sid)
+    elif reason:
+        grading_log.info("上传后未自动批阅 submission=%s：%s", sid, reason)
+    return queued
+
+
+def _submission_grade_active(db, sid):
+    """这份作业最近的批阅任务是否仍在排队/执行中。"""
+    row = latest_operation(db, sid)
+    return bool(row and row["status"] in ("queued", "running"))
 
 
 @_routes.route("/submission/<oid:sid>/grade", methods=["POST"])
@@ -4787,7 +4809,7 @@ def _probe_ai_config(api_url, api_key, model):
 def student_lecture(hid):
     db = get_db()
     hw = db.execute("""
-        SELECT h.*, c.name AS course_name FROM lectures h
+        SELECT h.*, c.name AS course_name, c.teacher_id AS teacher_id FROM lectures h
         JOIN courses c ON c.id=h.course_id WHERE h.id=?""", (hid,)).fetchone()
     if not hw:
         abort(404)
@@ -4871,6 +4893,16 @@ def student_home():
         ORDER BY h.title COLLATE NOCASE, h.id""",
         (g.user["id"],) * 4).fetchall()
     acc_by = _accuracy_by_submission(db, [h["last_sub_id"] for h in lectures])
+    grading_active_ids = {
+        r["submission_id"] for r in db.execute(
+            "SELECT o.submission_id FROM ai_operations o "
+            "JOIN submissions s ON s.id=o.submission_id "
+            "WHERE s.student_id=? AND o.operation_type='grade' "
+            "AND o.status IN ('queued','running') "
+            "AND o.id=(SELECT MAX(x.id) FROM ai_operations x "
+            " WHERE x.submission_id=o.submission_id AND x.operation_type='grade')",
+            (g.user["id"],))
+    }
     by_course = {}
     for h in lectures:
         by_course.setdefault(h["course_id"], []).append(h)
@@ -4891,6 +4923,7 @@ def student_home():
         ORDER BY x.id DESC""", (g.user["id"], g.user["id"])).fetchall()
     return render_template("student_home.html", course_groups=course_groups,
                            exams=exams, acc_by=acc_by,
+                           grading_active_ids=grading_active_ids,
                            due_soon_tasks=due_soon_tasks, overdue_tasks=overdue_tasks,
                            deadline_window_days=STUDENT_DEADLINE_WINDOW_DAYS)
 
@@ -4905,6 +4938,8 @@ def student_lecture_page(hid):
                  if f and f.filename]
         if not files:
             flash("请选择要提交的作业图片或 PDF")
+        elif _submission_grade_active(db, _latest_submission_id(db, hid, g.user["id"])):
+            flash("这份作业正在批改中，已暂时锁定；请稍后回来再提交新的版本。")
         elif len(files) > 20:
             flash("一次最多提交 20 个文件，请合并或分次提交")
         else:
@@ -4917,10 +4952,15 @@ def student_lecture_page(hid):
             names = [save_upload(f, hw["course_id"], hid, g.user["id"], filename=fname)
                      for f, fname in prepared]
             stored = names[0] if len(names) == 1 else json.dumps(names, ensure_ascii=False)
-            db.execute("INSERT INTO submissions(lecture_id,student_id,file_path) VALUES(?,?,?)",
-                       (hid, g.user["id"], stored))
+            cur = db.execute("INSERT INTO submissions(lecture_id,student_id,file_path) "
+                             "VALUES(?,?,?)", (hid, g.user["id"], stored))
             db.commit()
-            flash(f"提交成功（{len(names)} 个文件），等待老师批改")
+            sid = cur.lastrowid
+            if _auto_enqueue_submission(sid):
+                flash(f"提交成功（{len(names)} 个文件），已自动进入批改队列；"
+                      "批改期间作业暂时锁定，完成后可回来修改提交。")
+            else:
+                flash(f"提交成功（{len(names)} 个文件），等待老师批改")
         return redirect(url_for("student_lecture_page", hid=hid))
     subs = db.execute("SELECT * FROM submissions WHERE lecture_id=? AND student_id=? "
                       "ORDER BY id DESC", (hid, g.user["id"])).fetchall()
@@ -4932,8 +4972,16 @@ def student_lecture_page(hid):
     if revealed:
         items = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
                            (latest["id"],)).fetchall()
+    locked = bool(latest) and _submission_grade_active(db, latest["id"])
     return render_template("student_lecture.html", hw=hw, subs=subs, items=items,
-                           revealed=revealed)
+                           revealed=revealed, locked=locked,
+                           auto_grade_limit=_grading_queue.attempt_limit(hw["teacher_id"]))
+
+
+def _latest_submission_id(db, lecture_id, student_id):
+    row = db.execute("SELECT id FROM submissions WHERE lecture_id=? AND student_id=? "
+                     "ORDER BY id DESC LIMIT 1", (lecture_id, student_id)).fetchone()
+    return row["id"] if row else None
 
 
 # ---------- 工具 ----------

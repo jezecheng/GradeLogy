@@ -14,6 +14,10 @@
 
 <div class="card">
   <h2>提交作业</h2>
+  {% if locked %}
+  <p><span class="tag tag-批改中">锁定中</span> 这份作业正在批改，暂时不能修改或重复提交。</p>
+  <p class="muted small">批改结束后可以回来修改并重新提交；同一份作业前 {{ auto_grade_limit }} 次提交会自动批改，之后需要老师手动发起。</p>
+  {% else %}
   <form method="post" enctype="multipart/form-data" class="stack-form" data-draft-upload>
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <input type="file" data-draft-picker accept=".png,.jpg,.jpeg,.webp,.pdf" multiple hidden>
@@ -36,7 +40,8 @@
     </div>
     <input type="file" name="files" data-draft-final multiple hidden>
   </form>
-  <p class="muted small">提交前可先在草稿箱里预览、删除不满意的图片，确认后再最终上传。可以重复提交，老师以最新一次为准批阅。</p>
+  <p class="muted small">提交前可先在草稿箱里预览、删除不满意的图片，确认后再最终上传。老师划定范围并上传答案后，提交会自动进入批改；批改期间不可重复提交，完成后可回来修改。同一份作业前 {{ auto_grade_limit }} 次提交会自动批改。</p>
+  {% endif %}
 </div>
 
 <div class="card">
@@ -55,7 +60,8 @@
       {% endfor %}
       </span>
       <span class="muted">{{ s.created_at|localtime }}</span>
-      <span class="tag tag-{{ s.status }}">{{ s.status }}</span>
+      {% set st = '批改中' if locked and loop.first else s.status %}
+      <span class="tag tag-{{ st }}">{{ st }}</span>
       {% if revealed and sm_acc %}<span class="score" title="正确率">{{ sm_acc }}</span>{% endif %}
       {% if s.report_published %}<a class="btn-link" href="{{ url_for('student_report', sid=s.id) }}">查看批改报告</a>{% endif %}
     </div>

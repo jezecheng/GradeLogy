@@ -71,7 +71,8 @@
       <td class="muted">{{ h.deadline|legacytime or '—' }}</td>
       <td>
         {% if h.my_subs %}
-          <span class="tag tag-{{ h.my_status }}">{{ h.my_status }}</span>
+          {% set st = '批改中' if h.last_sub_id in grading_active_ids else h.my_status %}
+          <span class="tag tag-{{ st }}">{{ st }}</span>
         {% else %}
           <span class="tag tag-未提交">未提交</span>
         {% endif %}

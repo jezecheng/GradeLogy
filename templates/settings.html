@@ -285,6 +285,15 @@
       开启后：工作日 9:00-12:00、14:00-18:00 会阻止所有 AI 调用（整份批阅、范围分析、讲次汇总、报告评语），
       提示你在闲时（夜间、午休、周末）再操作。其他时间不受影响。
     </p>
+    <label style="display:block; margin-top:10px">
+      每次作业自动批改的提交次数上限
+      <input type="number" name="ai_auto_grade_attempts" min="1" step="1"
+             value="{{ cfg.ai_auto_grade_attempts or '' }}" placeholder="3"
+             style="width:110px; margin-left:6px">
+    </label>
+    <p class="muted small" style="margin-top:-4px; margin-left:20px">
+      同一学生同一份作业的前 N 次提交会自动批改；超过后需要老师手动点「AI 批阅」。留空按默认 3 次。
+    </p>
 
     <details class="ui-fold" data-fold="output-limit"><summary>高级：AI 输出上限</summary>
     <p class="muted small">留空使用默认值；推理模型会把大量 token 花在思考上，遇到「输出被截断」时可调大对应场景的上限。

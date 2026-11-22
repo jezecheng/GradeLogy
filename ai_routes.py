@@ -182,7 +182,8 @@ def register(registry, deps):
     # ---------- 老师：AI 设置 ----------
     def settings_context(extra=None):
         conf = {k: get_setting(g.user["id"], k)
-                for k in ("ai_api_url", "ai_api_key", "ai_model", "ai_demo", "ai_offpeak_only")}
+                for k in ("ai_api_url", "ai_api_key", "ai_model", "ai_demo",
+                          "ai_offpeak_only", "ai_auto_grade_attempts")}
         # 各场景 max_tokens：未设置时显示注册表默认值（占位符），保存时才写入 settings
         max_tokens = {
             key: get_setting(g.user["id"], key, "") or str(cfg["default"])
@@ -222,6 +223,13 @@ def register(registry, deps):
                 save_setting(g.user["id"], "ai_demo", "1" if request.form.get("ai_demo") else "")
                 save_setting(g.user["id"], "ai_offpeak_only",
                              "1" if request.form.get("ai_offpeak_only") else "")
+                raw_limit = (request.form.get("ai_auto_grade_attempts") or "").strip()
+                try:
+                    limit = int(raw_limit)
+                except (TypeError, ValueError):
+                    limit = 0
+                save_setting(g.user["id"], "ai_auto_grade_attempts",
+                             str(limit) if limit > 0 else "")
                 for key in MAX_TOKENS_SETTINGS:
                     raw = (request.form.get(key) or "").strip()
                     if raw:
