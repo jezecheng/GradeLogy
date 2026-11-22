@@ -268,6 +268,25 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertIn("前置薄弱：初始速率", md)
         self.assertNotIn("纵向批阅", md)
 
+    def test_report_renders_parent_stem_and_independent_child_rows(self):
+        md = a.build_report_md(
+            "学生", "讲次", "6月1日",
+            [{"no": "1.1", "parent_no": "1", "parent_stem": "母题公共条件",
+              "stem": "第一小问", "verdict": "对", "note": "正确"},
+             {"no": "1.2", "parent_no": "1", "parent_stem": "母题公共条件",
+              "stem": "第二小问", "verdict": "无法判定", "note": "需核对"}],
+            {}, {})
+        self.assertIn("1.1", md)
+        self.assertIn("1.2", md)
+        self.assertIn("母题公共条件", md)
+        self.assertIn("正确率 50%（完全答对 1/2 个独立批改项）", md)
+        self.assertEqual(a.accuracy_text(1, 0, 0, 2), "50%")
+        summary = a._build_summary(
+            [{"no": "1.1", "verdict": "对"},
+             {"no": "1.2", "verdict": "无法判定"}], [], "", [])
+        self.assertEqual(summary["accuracy"], "50%")
+        self.assertEqual(summary["total"], 2)
+
     def test_review_uses_manual_review_label_and_report_button_is_conditional(self):
         html = self.client(2).get(self.url("submission_review", sid=30)).get_data(as_text=True)
         self.assertIn("人工复核：Student", html)
@@ -353,6 +372,37 @@ class ReviewRegressionTest(unittest.TestCase):
             "submission_review", sid=30)).get_data(as_text=True)
         self.assertIn("打开评阅报告", refreshed_review)
         self.assertNotIn("评阅报告生成中…", refreshed_review)
+
+    def test_subquestions_are_grouped_but_each_has_an_independent_review_row(self):
+        candidates = [{
+            "key": "q0", "no": "1", "source_no": "例7", "stem": "母题公共条件。",
+            "subquestions": [
+                {"key": "q0.1", "no": "1.1", "source_no": "(1)", "stem": "求速率。"},
+                {"key": "q0.2", "no": "1.2", "source_no": "(2)", "stem": "求级数。"},
+            ],
+        }]
+        self.db.execute("UPDATE lectures SET scope_candidates=?,scope_selected=? WHERE id=20",
+                        (json.dumps(candidates, ensure_ascii=False), json.dumps(["q0"])))
+        self.db.execute("UPDATE questions SET no='1.1' WHERE id=40")
+        self.db.execute(
+            "INSERT INTO questions(id,submission_id,no,verdict,reviewed) VALUES(41,30,'1.2','对',1)")
+        self.db.commit()
+
+        teacher_page = self.client(2).get(
+            self.url("submission_review", sid=30)).get_data(as_text=True)
+        self.assertIn('class="review-parent" data-parent-no="1"', teacher_page)
+        self.assertIn("母题公共条件。", teacher_page)
+        self.assertIn("第 1.1 小问", teacher_page)
+        self.assertIn("第 1.2 小问", teacher_page)
+        self.assertIn('name="verdict_40"', teacher_page)
+        self.assertIn('name="verdict_41"', teacher_page)
+
+        student_page = self.client(4).get(
+            self.url("student_lecture_page", hid=20)).get_data(as_text=True)
+        self.assertIn('class="student-question-group"', student_page)
+        self.assertIn("母题公共条件。", student_page)
+        self.assertIn("第 1.1 小问", student_page)
+        self.assertIn("第 1.2 小问", student_page)
 
     def test_explicit_publication_requires_all_questions_and_no_running_grade(self):
         def publish():

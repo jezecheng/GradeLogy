@@ -56,20 +56,29 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
     skipped = [q for q in qs if "未作答" in (q.get("ai_comment") or "")]
 
     out = [f"# {student_name} · {date_label}作业《{lecture_title}》批改结果", "",
-           f"## 一、逐题明细（{n_total} 题）", "",
-           "| # | 题目 | 判定 | 批改说明 |", "| ---: | --- | :---: | --- |"]
-    for i, q in enumerate(qs, 1):
+           f"## 一、逐题明细（{n_total} 个独立批改项）", "",
+           "| 题号 | 题干/小问 | 判定 | 批改说明 |", "| --- | --- | :---: | --- |"]
+    last_parent = None
+    for q in qs:
+        parent_no = str(q.get("parent_no") or "").strip()
+        if parent_no and parent_no != last_parent:
+            parent_stem = _md_cell(q.get("parent_stem"))
+            out.append(f"| **第 {parent_no} 题** | {parent_stem} | — | 母题（各小问独立判定） |")
+            last_parent = parent_no
         icon = VERDICT_ICON.get(q.get("verdict") or "", q.get("verdict") or "—")
         # 优先用老师复核后的评语（note），为空时回退到 AI 原始评语
         comment = (q.get("note") or "").strip() or (q.get("ai_comment") or "").strip()
-        out.append(f"| {i} | {_md_cell(q.get('no'))} | {icon} | {_md_cell(comment)} |")
+        stem = _md_cell(q.get("stem"))
+        out.append(f"| {_md_cell(q.get('no'))} | {stem} | {icon} | {_md_cell(comment)} |")
 
     def _nos(items, limit=6):
         names = [str(q.get("no")) for q in items]
         text = "、".join(f"第 {n} 题" for n in names[:limit])
         return text + ("等" if len(names) > limit else "")
 
-    stat = [f"统计：{VERDICT_ICON['对']} {len(right)}"]
+    accuracy = round(len(right) * 100 / n_total) if n_total else 0
+    stat = [f"正确率 {accuracy}%（完全答对 {len(right)}/{n_total} 个独立批改项）",
+            f"统计：{VERDICT_ICON['对']} {len(right)}"]
     stat.append(f"{VERDICT_ICON['错']} {len(wrong)}" + (f"（{_nos(wrong)}）" if wrong else ""))
     stat.append(f"{VERDICT_ICON['半对']} {len(partial)}" + (f"（{_nos(partial)}）" if partial else ""))
     if unknown:

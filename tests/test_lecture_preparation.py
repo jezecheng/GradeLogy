@@ -51,12 +51,16 @@ class LecturePreparationTest(unittest.TestCase):
     def setUp(self):
         app_module.app.config.update(TESTING=True)
         con = self._db()
-        for table in ("ai_usage_events", "ai_operations", "question_tags",
-                      "lectures", "course_teachers", "courses", "users"):
+        for table in ("ai_usage_events", "ai_operations", "student_question_reviews",
+                      "questions", "submissions", "student_weak_points", "tag_analyses",
+                      "question_tags", "lectures", "course_teachers", "courses", "users"):
             con.execute(f"DELETE FROM {table}")
         con.execute(
             "INSERT INTO users(id,username,password_hash,display_name,role,active,"
             "must_change_password) VALUES(2,'teacher','x','老师','teacher',1,0)")
+        con.execute(
+            "INSERT INTO users(id,username,password_hash,display_name,role,active,"
+            "must_change_password) VALUES(4,'student','x','学生','student',1,0)")
         con.execute("INSERT INTO courses(id,name,teacher_id) VALUES(10,'化学',2)")
         con.execute("INSERT INTO course_teachers(course_id,teacher_id) VALUES(10,2)")
         candidates = [{"key": "q0", "no": "3", "max": 5, "hint": "配平",
@@ -165,6 +169,162 @@ class LecturePreparationTest(unittest.TestCase):
         self.assertEqual(json.loads(self._lecture()["scope_selected"]), ["q1"])
         analyze.assert_not_called()
 
+    def test_subquestion_scope_selects_each_child_and_parent_selects_all(self):
+        candidates = [{
+            "key": "q0", "no": "1", "source_no": "例7", "hint": "计算",
+            "stem": "母题公共条件",
+            "subquestions": [
+                {"key": "q0.1", "no": "1.1", "source_no": "(1)",
+                 "hint": "求速率", "stem": "求速率常数"},
+                {"key": "q0.2", "no": "1.2", "source_no": "(2)",
+                 "hint": "求级数", "stem": "求反应级数"},
+            ],
+        }]
+        con = self._db()
+        con.execute("UPDATE lectures SET scope_candidates=?,scope_selected='' WHERE id=20",
+                    (json.dumps(candidates, ensure_ascii=False),))
+        con.commit()
+        con.close()
+        with mock.patch.object(app_module._grading_queue, "auto_enqueue_lecture", return_value=0):
+            response = self._post("lecture_scope_save", {"no": ["q0.2"]}, hid=20)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(json.loads(self._lecture()["scope_selected"]), ["q0.2"])
+        with app_module.app.app_context():
+            hw = app_module.get_db().execute("SELECT * FROM lectures WHERE id=20").fetchone()
+            instruction = app_module._scope_instruction(hw)
+        self.assertIn("1.2", instruction)
+        self.assertIn("母题公共条件", instruction)
+        self.assertNotIn("1.1", instruction)
+
+        with mock.patch.object(app_module._grading_queue, "auto_enqueue_lecture", return_value=0):
+            response = self._post("lecture_scope_save", {"no": ["q0"]}, hid=20)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(json.loads(self._lecture()["scope_selected"]), ["q0"])
+        page = self.client.get(self._url("lecture_detail", hid=20)).get_data(as_text=True)
+        self.assertIn("1.1", page)
+        self.assertIn("1.2", page)
+        self.assertIn("data-scope-parent=\"1\"", page)
+        self.assertIn("data-scope-child=\"1\"", page)
+
+    def test_scope_change_requires_confirmation_and_recomputes_old_results(self):
+        con = self._db()
+        con.executemany(
+            "INSERT INTO lectures(id,course_id,title) VALUES(?,10,?)",
+            [(21, "第二讲")])
+        con.execute("UPDATE lectures SET summary_md='旧讲次汇总',summary_at='now' WHERE id=20")
+        con.execute(
+            "INSERT INTO submissions(id,lecture_id,student_id,file_path,status,score,feedback,"
+            "ai_summary,report_md,report_detail,report_published) "
+            "VALUES(30,20,4,'student/original.pdf','已批改','4','旧反馈','{}','旧报告','{}',1)")
+        con.execute(
+            "INSERT INTO submissions(id,lecture_id,student_id,file_path,status,report_published) "
+            "VALUES(31,21,4,'student/other.pdf','已批改',1)")
+        con.executemany(
+            "INSERT INTO questions(id,submission_id,no,verdict,reviewed) VALUES(?,?,?,?,1)",
+            [(40, 30, "3", "错"), (41, 30, "4", "错"), (42, 31, "2.1", "半对")])
+        con.executemany(
+            "INSERT INTO question_tags(lecture_id,question_key,question_no,tag,source) "
+            "VALUES(?,?,?,?, 'ai')",
+            [(20, "q0", "3", "仅本讲标签"), (20, "q1", "4", "跨讲共享标签"),
+             (21, "q0.1", "2.1", "跨讲共享标签")])
+        con.executemany(
+            "INSERT INTO student_weak_points(student_id,course_id,tag,node_name,status,"
+            "wrong_count,partial_count,right_count,total_count,source_submission_id,"
+            "status_lecture_id,student_note) VALUES(4,10,?,'节点','mastered',?,?,?,? ,30,20,'我的备注')",
+            [("仅本讲标签", 1, 0, 0, 1), ("跨讲共享标签", 1, 0, 0, 1)])
+        con.execute(
+            "INSERT INTO student_question_reviews(student_id,question_id,status) "
+            "VALUES(4,40,'reviewed')")
+        con.execute(
+            "INSERT INTO tag_analyses(teacher_id,course_id,lecture_id,student_id,kind,content_md) "
+            "VALUES(2,10,20,0,'horizontal','旧横向分析')")
+        con.execute(
+            "INSERT INTO tag_analyses(teacher_id,course_id,lecture_id,student_id,kind,content_md) "
+            "VALUES(2,10,0,4,'vertical','旧纵向分析')")
+        con.commit()
+        con.close()
+
+        with mock.patch.object(app_module._grading_queue, "auto_enqueue_lecture", return_value=0):
+            refused = self._post("lecture_scope_save", {"no": ["q1"]}, hid=20)
+        self.assertEqual(refused.status_code, 302)
+        self.assertEqual(json.loads(self._lecture()["scope_selected"]), ["q0"])
+        con = self._db()
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM questions WHERE submission_id=30").fetchone()[0], 2)
+        con.close()
+
+        with mock.patch.object(app_module._grading_queue, "auto_enqueue_lecture", return_value=0):
+            confirmed = self._post("lecture_scope_save",
+                                   {"no": ["q1"], "confirm_scope_reset": "1"}, hid=20)
+        self.assertEqual(confirmed.status_code, 302)
+        con = self._db()
+        self.assertEqual(json.loads(con.execute(
+            "SELECT scope_selected FROM lectures WHERE id=20").fetchone()[0]), ["q1"])
+        sub = con.execute(
+            "SELECT status,file_path,score,feedback,ai_summary,report_md,report_published "
+            "FROM submissions WHERE id=30").fetchone()
+        self.assertEqual(tuple(sub), ("已提交", "student/original.pdf", "", "", "", "", 0))
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM questions WHERE submission_id=30").fetchone()[0], 0)
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM student_question_reviews WHERE question_id=40").fetchone()[0], 0)
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM question_tags WHERE lecture_id=20").fetchone()[0], 0)
+        self.assertEqual(con.execute(
+            "SELECT summary_md FROM lectures WHERE id=20").fetchone()[0], "")
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM tag_analyses WHERE lecture_id=20 OR student_id=4").fetchone()[0], 0)
+        weak = {row["tag"]: row for row in con.execute(
+            "SELECT * FROM student_weak_points WHERE student_id=4 AND course_id=10")}
+        self.assertNotIn("仅本讲标签", weak)
+        self.assertEqual((weak["跨讲共享标签"]["wrong_count"],
+                          weak["跨讲共享标签"]["partial_count"],
+                          weak["跨讲共享标签"]["total_count"]), (0, 1, 1))
+        self.assertEqual(weak["跨讲共享标签"]["source_submission_id"], 31)
+        self.assertEqual(weak["跨讲共享标签"]["status"], "mastered")
+        self.assertEqual(weak["跨讲共享标签"]["student_note"], "我的备注")
+        con.close()
+
+    def test_reextracting_scope_list_requires_confirmation_before_clearing_grades(self):
+        con = self._db()
+        con.execute(
+            "INSERT INTO submissions(id,lecture_id,student_id,file_path,status,report_md,"
+            "report_published) VALUES(30,20,4,'student/original.pdf','已批改','旧报告',1)")
+        con.execute("INSERT INTO questions(id,submission_id,no,verdict,reviewed) "
+                    "VALUES(40,30,'3','错',1)")
+        con.commit()
+        con.close()
+
+        queue = DeferredQueue()
+        patches = self._page_route_mocks(queue)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                mock.patch.object(app_module, "analyze_answer_pdf", return_value=([{
+                    "key": "q0", "no": "1", "source_no": "3", "stem": "新题干",
+                    "subquestions": [],
+                }], "")) as analyze:
+            refused = self._post("lecture_answer_pages", {"page": ["2"]}, hid=20)
+            self.assertEqual(refused.status_code, 302)
+            con = self._db()
+            self.assertEqual(con.execute(
+                "SELECT COUNT(*) FROM questions WHERE submission_id=30").fetchone()[0], 1)
+            con.close()
+            analyze.assert_not_called()
+
+            confirmed = self._post("lecture_answer_pages",
+                                  {"page": ["2"], "confirm_scope_reset": "1"}, hid=20)
+            self.assertEqual(confirmed.status_code, 302)
+            self.assertEqual(len(queue.pending), 1)
+            DeferredQueue.run(queue.pending[0])
+        con = self._db()
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM questions WHERE submission_id=30").fetchone()[0], 0)
+        sub = con.execute(
+            "SELECT status,report_md,report_published,file_path FROM submissions WHERE id=30"
+        ).fetchone()
+        self.assertEqual(tuple(sub), ("已提交", "", 0, "student/original.pdf"))
+        con.close()
+        analyze.assert_called_once()
+
     def test_stale_tag_task_cannot_write_after_scope_changes(self):
         queue = DeferredQueue()
         rows = [{"key": "q0", "no": "3", "category": "化学", "tags": ["旧标签"]}]
@@ -189,7 +349,7 @@ class LecturePreparationTest(unittest.TestCase):
         page = self.client.get(self._url("lecture_detail", hid=20)).get_data(as_text=True)
         self.assertIn("查看题干", page)
         self.assertIn("Fe^{3+}", page)
-        self.assertIn("<th>题干</th>", page)
+        self.assertIn("<th>题干/小问</th>", page)
         self.assertNotIn("<th>满分</th>", page)
         self.assertIn('<details class="stem-details">', page)  # 默认折叠
         self.assertNotIn('class="scope-stem-row"', page)

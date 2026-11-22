@@ -60,7 +60,7 @@
     <div class="wq-item">
       <div class="wq-head">
         <strong><a class="wq-question-link"
-                   href="{{ url_for('student_lecture_page', hid=lecture.id) }}#question-{{ q.id }}">第 {{ q.no }} 题 ↗</a></strong>
+                   href="{{ url_for('student_lecture_page', hid=lecture.id) }}#question-{{ q.id }}">第 {{ q.no }} {{ '小问' if '.' in q.no else '题' }} ↗</a></strong>
         <span class="verdict verdict-{{ 'wrong' if q.verdict == '错' else 'partial' }}">{{ q.verdict }}</span>
         {% for t in q.tags %}<span class="chip">{{ t }}</span>{% endfor %}
         {% if q.reviewed %}<span class="tag tag-已提交">已复习</span>{% endif %}

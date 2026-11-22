@@ -1,5 +1,5 @@
 // 右下角数字助手（管理员/老师/学生共用）：保持当前标签页内的对话上下文（sessionStorage）
-// 桌面端支持拖拽左上角调整尺寸；支持一键切换字号；回答按 Markdown + LaTeX 渲染。
+// 桌面端支持拖拽左上/左下角调整尺寸；提供 15/18 两档字号；回答按 Markdown + LaTeX 渲染。
 (function () {
   const root = document.getElementById('assistant');
   if (!root) return;
@@ -12,8 +12,8 @@
   const sendBtn = document.getElementById('assistant-send');
   const resetBtn = document.getElementById('assistant-reset');
   const closeBtn = document.getElementById('assistant-close');
-  const fontBtn = document.getElementById('assistant-font');
-  const resizeHandle = document.getElementById('assistant-resize');
+  const fontButtons = Array.from(document.querySelectorAll('.assistant-font-choice'));
+  const resizeHandles = Array.from(document.querySelectorAll('.assistant-resize[data-anchor]'));
   const callout = document.getElementById('assistant-callout');
   const csrf = document.querySelector('meta[name="csrf-token"]');
   const user = root.dataset.user || 'me';
@@ -22,7 +22,7 @@
   const sizeKey = 'gradelogy.assistant.size.' + user;
   const fontKey = 'gradelogy.assistant.font.' + user;
   const hintText = root.dataset.hint || '可以问我系统怎么用，或查询你的数据。';
-  const FONT_SIZES = [14, 15, 16, 18, 20];
+  const FONT_SIZES = [15, 18];
 
   let messages = [];
   try {
@@ -379,79 +379,139 @@
     if (!savedSize || !isDesktop()) {
       panel.style.width = '';
       panel.style.height = '';
+      panel.style.top = '';
+      panel.style.bottom = '';
       return;
     }
     const limit = sizeLimits();
     panel.style.width = Math.round(Math.max(MIN_W, Math.min(savedSize.w, limit.w))) + 'px';
-    panel.style.height = Math.round(Math.max(MIN_H, Math.min(savedSize.h, limit.h))) + 'px';
+    const height = Math.round(Math.max(MIN_H, Math.min(savedSize.h, limit.h)));
+    panel.style.height = height + 'px';
+    const maxOffset = Math.max(8, window.innerHeight - height - 12);
+    if (typeof savedSize.top === 'number') {
+      const top = Math.max(8, Math.min(savedSize.top, maxOffset));
+      panel.style.top = Math.round(top) + 'px';
+      panel.style.bottom = 'auto';
+    } else if (typeof savedSize.bottom === 'number') {
+      const bottom = Math.max(8, Math.min(savedSize.bottom, maxOffset));
+      panel.style.bottom = Math.round(bottom) + 'px';
+      panel.style.top = 'auto';
+    } else {
+      panel.style.top = '';
+      panel.style.bottom = '';
+    }
   }
 
   let drag = null;
-  if (resizeHandle) {
-    resizeHandle.addEventListener('pointerdown', function (e) {
+  function startResize(e) {
       if (!isDesktop() || e.button !== 0) return;
       e.preventDefault();
       const rect = panel.getBoundingClientRect();
-      drag = { x: e.clientX, y: e.clientY, w: rect.width, h: rect.height };
-      if (resizeHandle.setPointerCapture) resizeHandle.setPointerCapture(e.pointerId);
+      const topAnchored = root.dataset.resizeAnchor === 'top';
+      drag = {
+        anchor: e.currentTarget.dataset.anchor,
+        handle: e.currentTarget,
+        pointerId: e.pointerId,
+        x: e.clientX,
+        y: e.clientY,
+        w: rect.width,
+        h: rect.height,
+        top: rect.top,
+        bottom: rect.bottom,
+        topAnchored: topAnchored
+      };
+      if (drag.handle.setPointerCapture) drag.handle.setPointerCapture(e.pointerId);
       document.body.classList.add('assistant-resizing');
-    });
-    resizeHandle.addEventListener('pointermove', function (e) {
+  }
+
+  function resizePanel(e) {
       if (!drag) return;
       const limit = sizeLimits();
-      // 面板固定在右下角，向左上拖拽即放大
-      const w = Math.max(MIN_W, Math.min(drag.w + (drag.x - e.clientX), limit.w));
-      const h = Math.max(MIN_H, Math.min(drag.h + (drag.y - e.clientY), limit.h));
+      const dx = e.clientX - drag.x;
+      const dy = e.clientY - drag.y;
+      const w = Math.max(MIN_W, Math.min(drag.w - dx, limit.w));
+      const growsUp = drag.anchor === 'top-left';
+      let h = drag.h + (growsUp ? -dy : dy);
+      const maxH = Math.max(MIN_H, Math.min(
+        limit.h,
+        growsUp ? drag.bottom - 12 : window.innerHeight - drag.top - 12));
+      h = Math.max(MIN_H, Math.min(h, maxH));
       panel.style.width = Math.round(w) + 'px';
       panel.style.height = Math.round(h) + 'px';
-    });
-    function endDrag(e) {
+
+      // 左上锚点固定面板右下角；左下锚点固定右上角。
+      if (drag.anchor === 'top-left' && drag.topAnchored) {
+        panel.style.top = Math.round(drag.bottom - h) + 'px';
+        panel.style.bottom = 'auto';
+      } else if (drag.anchor === 'bottom-left' && !drag.topAnchored) {
+        panel.style.bottom = Math.round(window.innerHeight - drag.top - h) + 'px';
+        panel.style.top = 'auto';
+      }
+  }
+
+  function endResize(e) {
       if (!drag) return;
+      const activeDrag = drag;
       drag = null;
       document.body.classList.remove('assistant-resizing');
-      if (resizeHandle.hasPointerCapture && resizeHandle.hasPointerCapture(e.pointerId)) {
-        resizeHandle.releasePointerCapture(e.pointerId);
+      if (activeDrag.handle.hasPointerCapture &&
+          activeDrag.handle.hasPointerCapture(activeDrag.pointerId)) {
+        activeDrag.handle.releasePointerCapture(activeDrag.pointerId);
       }
       savedSize = {
         w: Math.round(parseFloat(panel.style.width) || panel.offsetWidth),
         h: Math.round(parseFloat(panel.style.height) || panel.offsetHeight)
       };
+      const top = parseFloat(panel.style.top);
+      const bottom = parseFloat(panel.style.bottom);
+      if (Number.isFinite(top)) savedSize.top = top;
+      else if (Number.isFinite(bottom)) savedSize.bottom = bottom;
       try {
         localStorage.setItem(sizeKey, JSON.stringify(savedSize));
       } catch (err) { /* 隐私模式忽略 */ }
-    }
-    resizeHandle.addEventListener('pointerup', endDrag);
-    resizeHandle.addEventListener('pointercancel', endDrag);
+  }
+
+  resizeHandles.forEach(function (handle) {
+    handle.addEventListener('pointerdown', startResize);
+    handle.addEventListener('pointermove', resizePanel);
+    handle.addEventListener('pointerup', endResize);
+    handle.addEventListener('pointercancel', endResize);
+  });
+  if (resizeHandles.length) {
     applySize();
     window.addEventListener('resize', applySize);
   }
 
-  // ---------- 一键切换字号 ----------
-  let fontIndex = 0;
+  // ---------- 明确选择 15 / 18 号字号 ----------
+  let fontSize = 15;
   try {
-    fontIndex = parseInt(localStorage.getItem(fontKey) || '0', 10);
-  } catch (e) { fontIndex = 0; }
-  if (!(fontIndex >= 0 && fontIndex < FONT_SIZES.length)) fontIndex = 0;
+    const stored = parseInt(localStorage.getItem(fontKey) || '', 10);
+    if (FONT_SIZES.includes(stored)) {
+      fontSize = stored;
+    } else if (stored >= 0 && stored <= 4) {
+      // 兼容旧版循环字号索引 [14, 15, 16, 18, 20]。
+      fontSize = stored >= 3 ? 18 : 15;
+    }
+  } catch (e) { fontSize = 15; }
 
   function applyFont() {
-    const px = FONT_SIZES[fontIndex];
-    root.style.setProperty('--assistant-font-size', px + 'px');
-    if (fontBtn) {
-      fontBtn.textContent = '字号 ' + px;
-      fontBtn.title = '当前字号 ' + px + 'px，点击切换';
-      fontBtn.setAttribute('aria-label', '当前字号 ' + px + 'px，点击切换');
-    }
+    root.style.setProperty('--assistant-font-size', fontSize + 'px');
+    fontButtons.forEach(function (button) {
+      const active = Number(button.dataset.fontSize) === fontSize;
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+      button.title = active ? '当前字号 ' + fontSize + 'px' : '切换到 ' + button.dataset.fontSize + 'px';
+    });
   }
 
-  if (fontBtn) {
-    fontBtn.addEventListener('click', function () {
-      fontIndex = (fontIndex + 1) % FONT_SIZES.length;
+  fontButtons.forEach(function (button) {
+    button.addEventListener('click', function () {
+      fontSize = Number(button.dataset.fontSize);
       try {
-        localStorage.setItem(fontKey, String(fontIndex));
+        localStorage.setItem(fontKey, String(fontSize));
       } catch (e) { /* 隐私模式忽略 */ }
       applyFont();
     });
-  }
+  });
   applyFont();
 
   function open() {

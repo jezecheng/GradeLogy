@@ -12,6 +12,7 @@
   'student': '作业、批改、成绩，都可以问我'
 }.get(_role, '有问题可以问我') %}
 <div class="assistant" id="assistant" data-user="{{ g.user.username }}" data-role="{{ _role }}"
+     data-resize-anchor="{{ 'top' if _role == 'teacher' else 'bottom' }}"
      data-avatar="{{ url_for('static', filename='gradelogy-mark.png') }}"
      data-hint="{{ _hint }}">
   <div class="assistant-callout" id="assistant-callout" hidden>
@@ -27,8 +28,12 @@
   </button>
 
   <section class="assistant-panel" id="assistant-panel" hidden aria-label="{{ _label }}">
-    <div class="assistant-resize" id="assistant-resize" role="separator"
-         aria-label="拖动调整对话框大小" title="拖动调整大小"></div>
+    <div class="assistant-resize assistant-resize-top-left" id="assistant-resize-top-left"
+         data-anchor="top-left" role="separator" aria-label="拖动左上角调整面板大小"
+         title="拖动左上角调整大小"></div>
+    <div class="assistant-resize assistant-resize-bottom-left" id="assistant-resize-bottom-left"
+         data-anchor="bottom-left" role="separator" aria-label="拖动左下角调整面板大小"
+         title="拖动左下角调整大小"></div>
     <header class="assistant-head">
       <div class="assistant-title">
         <strong>{{ _label }}</strong>
@@ -39,8 +44,10 @@
         </span>
       </div>
       <div class="assistant-head-actions">
-        <button type="button" class="btn-link" id="assistant-font"
-                aria-label="调整字号" title="点击切换字号">字号 14</button>
+        <button type="button" class="btn-link assistant-font-choice" id="assistant-font-small"
+                data-font-size="15" aria-label="小字号，15号字体" aria-pressed="false">小</button>
+        <button type="button" class="btn-link assistant-font-choice" id="assistant-font-large"
+                data-font-size="18" aria-label="大字号，18号字体" aria-pressed="false">大</button>
         <button type="button" class="btn-link" id="assistant-reset">新对话</button>
         <button type="button" class="btn-link" id="assistant-close">收起</button>
       </div>

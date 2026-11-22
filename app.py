@@ -307,12 +307,13 @@ def _json_or_none(value):
         return None
 
 
-def accuracy_text(n_right, n_partial, n_wrong):
-    """作业正确率 = 完全答对题数 / 已判定题数；半对、无法判定不计为正确。"""
-    judged = (n_right or 0) + (n_partial or 0) + (n_wrong or 0)
-    if not judged:
+def accuracy_text(n_right, n_partial, n_wrong, n_total=None):
+    """正确率 = 完全答对的独立批改项 / 独立批改项总数（含无法判定）。"""
+    total = ((n_right or 0) + (n_partial or 0) + (n_wrong or 0)
+             if n_total is None else n_total)
+    if not total:
         return ""
-    return f"{round(n_right * 100 / judged)}%"
+    return f"{round((n_right or 0) * 100 / total)}%"
 
 
 def _question_no_key(value):
@@ -330,10 +331,12 @@ def _accuracy_by_submission(db, sub_ids):
         "SELECT submission_id, "
         "SUM(CASE WHEN verdict='对' THEN 1 ELSE 0 END) AS n_right, "
         "SUM(CASE WHEN verdict='半对' THEN 1 ELSE 0 END) AS n_partial, "
-        "SUM(CASE WHEN verdict='错' THEN 1 ELSE 0 END) AS n_wrong "
+        "SUM(CASE WHEN verdict='错' THEN 1 ELSE 0 END) AS n_wrong, "
+        "COUNT(*) AS n_total "
         f"FROM questions WHERE submission_id IN ({','.join('?' * len(ids))}) "
         "GROUP BY submission_id", ids).fetchall()
-    return {r["submission_id"]: accuracy_text(r["n_right"], r["n_partial"], r["n_wrong"])
+    return {r["submission_id"]: accuracy_text(r["n_right"], r["n_partial"],
+                                               r["n_wrong"], r["n_total"])
             for r in rows}
 
 
@@ -1708,6 +1711,14 @@ def lecture_detail(hid):
     if not hw:
         abort(404)
     course = own_course(hw["course_id"])
+    try:
+        scope_candidates = json.loads(hw["scope_candidates"] or "[]")
+        scope_selected = json.loads(hw["scope_selected"] or "[]")
+    except (TypeError, ValueError):
+        scope_candidates, scope_selected = [], []
+    scope_item_count = (len(_scope_items(scope_candidates, scope_selected))
+                        if scope_selected else len(_scope_items(scope_candidates)))
+    scope_reset_impact = _lecture_scope_reset_impact(db, hid)
     subs = db.execute("""
         SELECT s.*, u.display_name, u.username,
           (SELECT COUNT(*) FROM questions q WHERE q.submission_id=s.id) AS n_questions,
@@ -1758,9 +1769,11 @@ def lecture_detail(hid):
                          if s.get("n_wrong", 0) > 0 or s.get("n_partial", 0) > 0]
     lecture_kg_chains = _kg_weakness_chains(db, course["id"], lecture_weak_tags)
     return render_template("lecture.html", hw=hw, course=course, subs=subs, students=students,
-                           qstats=qstats, n_subs=n_subs, n_graded=n_graded, n_reviewed=n_reviewed,
-                           answer_total=answer_total, answer_picked=answer_picked,
-                           grade_jobs=grade_jobs,
+                            qstats=qstats, n_subs=n_subs, n_graded=n_graded, n_reviewed=n_reviewed,
+                            answer_total=answer_total, answer_picked=answer_picked,
+                            scope_item_count=scope_item_count,
+                            scope_reset_impact=scope_reset_impact,
+                            grade_jobs=grade_jobs,
                            grading_active=any(j["status"] in ("queued", "running")
                                               for j in grade_jobs.values()),
                            acc_by=acc_by, tag_by_key=tag_by_key, tag_stats=tag_stats,
@@ -1842,6 +1855,16 @@ def lecture_answer(hid):
     own_course(hw["course_id"])
     f = request.files.get("answer_pdf")
     if f and f.filename and allowed_file(f.filename):
+        if _lecture_scope_reset_busy(db, hid, hw["course_id"]):
+            flash("本讲仍有批阅、报告或知识点分析任务在后台运行；等待任务完成后再更换教师版答案。")
+            return redirect(url_for("lecture_detail", hid=hid))
+        impact = _lecture_scope_reset_impact(db, hid)
+        if impact["has_derived"] and request.form.get("confirm_scope_reset") != "1":
+            flash(f"更换教师版答案将清除本讲 {impact['graded'] or 0} 份旧批阅（"
+                  f"{impact['questions']} 道逐题结果）、{impact['tags']} 个旧标签及相关分析，"
+                  "并重算相关错题/薄弱点。"
+                  "学生原始提交文件会保留；请重新选择文件并确认。")
+            return redirect(url_for("lecture_detail", hid=hid))
         try:
             name = save_upload(f, hw["course_id"], hid)
         except ValueError as e:
@@ -1849,10 +1872,11 @@ def lecture_answer(hid):
             return redirect(url_for("lecture_detail", hid=hid))
         with _scope_analysis_lock:
             _advance_scope_analysis_generation(hid)
+            _invalidate_lecture_scope_results(db, hid, hw["course_id"])
             db.execute("UPDATE lectures SET answer_pdf=?, answer_pages='', "
                         "scope_candidates='', scope_selected='' WHERE id=?", (name, hid))
             db.commit()
-        flash("教师版答案已更新；旧页码和题目范围已清除，请重新生成题目清单。")
+        flash("教师版答案已更新；旧题目范围与批阅结果已作废，请重新生成题目清单。")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
@@ -1863,6 +1887,208 @@ def _answer_pages_note(picked, total):
     if len(picked) == total:
         return f"已保存页码：全部 {total} 页（与不限制相同）。"
     return f"已保存页码：{len(picked)}/{total} 页，只发送这些页。"
+
+
+def _candidate_parts(candidate):
+    parts = candidate.get("subquestions") or []
+    return [part for part in parts if isinstance(part, dict)] if isinstance(parts, list) else []
+
+
+def _scope_items(candidates, selected_keys=None):
+    """展平范围里的独立批改项；小问带上母题题干作为匹配/标签上下文。"""
+    selected = None if selected_keys is None else {str(key) for key in selected_keys}
+    items = []
+    for index, parent in enumerate(candidates or [], 1):
+        if not isinstance(parent, dict):
+            continue
+        parent_key = str(parent.get("key") or parent.get("no") or "").strip()
+        parent_no = str(parent.get("no") or index).strip()
+        parent_stem = str(parent.get("stem") or "").strip()
+        parts = _candidate_parts(parent)
+        if parts:
+            for part_index, part in enumerate(parts, 1):
+                key = str(part.get("key") or f"{parent_key}.{part_index}").strip()
+                if selected is not None and parent_key not in selected and key not in selected:
+                    continue
+                child_stem = str(part.get("stem") or "").strip()
+                combined = "\n".join(x for x in (parent_stem, child_stem) if x)
+                items.append({
+                    **part, "key": key,
+                    "no": str(part.get("no") or f"{parent_no}.{part_index}"),
+                    "parent_key": parent_key, "parent_no": parent_no,
+                    "parent_stem": parent_stem, "stem": child_stem,
+                    "combined_stem": combined,
+                    "hint": str(part.get("hint") or parent.get("hint") or ""),
+                    "source_no": str(part.get("source_no") or "").strip(),
+                    "parent_source_no": str(parent.get("source_no") or "").strip(),
+                })
+        elif selected is None or parent_key in selected:
+            # Legacy flat scope rows are treated as standalone items until regenerated.
+            items.append({**parent, "key": parent_key, "no": parent_no,
+                          "parent_key": "", "parent_no": "", "parent_stem": "",
+                          "combined_stem": parent_stem,
+                          "source_no": str(parent.get("source_no") or "").strip()})
+    return items
+
+
+def _normalize_scope_selection(candidates, raw_keys):
+    """保存选择状态：全选子项收敛为母题 key，部分选择保留独立小问 key。"""
+    raw = {str(key).strip() for key in raw_keys if str(key).strip()}
+    normalized = []
+    for parent in candidates or []:
+        if not isinstance(parent, dict):
+            continue
+        parent_key = str(parent.get("key") or parent.get("no") or "").strip()
+        parts = _candidate_parts(parent)
+        if parts:
+            part_keys = [str(part.get("key") or f"{parent_key}.{i}").strip()
+                         for i, part in enumerate(parts, 1)]
+            chosen_parts = [key for key in part_keys if key in raw]
+            if parent_key in raw or (part_keys and len(chosen_parts) == len(part_keys)):
+                normalized.append(parent_key)
+            else:
+                normalized.extend(chosen_parts)
+        elif parent_key in raw:
+            normalized.append(parent_key)
+    return normalized
+
+
+def _group_submission_questions(questions, candidates, selected_keys=None):
+    """按范围里的母题结构把逐题记录分组；没有小问的题仍是独立条目。"""
+    scope_by_no = {str(item["no"]): item
+                   for item in _scope_items(candidates, selected_keys)}
+    groups, grouped = [], {}
+    for row in questions:
+        question = dict(row)
+        item = scope_by_no.get(str(question.get("no") or ""), {})
+        parent_no = str(item.get("parent_no") or "")
+        question["parent_no"] = parent_no
+        question["stem"] = str(item.get("stem") or item.get("combined_stem") or "")
+        if parent_no:
+            group = grouped.get(parent_no)
+            if group is None:
+                group = {"parent_no": parent_no,
+                         "parent_stem": str(item.get("parent_stem") or ""),
+                         "questions": [], "grouped": True}
+                grouped[parent_no] = group
+                groups.append(group)
+            group["questions"].append(question)
+        else:
+            groups.append({"parent_no": question.get("no") or "",
+                           "parent_stem": question["stem"],
+                           "questions": [question], "grouped": False})
+    return groups
+
+
+def _lecture_scope_reset_impact(db, lecture_id):
+    row = db.execute(
+        "SELECT COUNT(*) AS submissions, "
+        "SUM(CASE WHEN EXISTS(SELECT 1 FROM questions q WHERE q.submission_id=s.id) "
+        "OR COALESCE(s.report_md,'')<>'' OR COALESCE(s.ai_summary,'')<>'' "
+        "OR s.report_published=1 OR s.status='已批改' THEN 1 ELSE 0 END) AS graded, "
+        "(SELECT COUNT(*) FROM questions q JOIN submissions qs ON qs.id=q.submission_id "
+        " WHERE qs.lecture_id=?) AS questions, "
+        "(SELECT COUNT(*) FROM question_tags WHERE lecture_id=?) AS tags, "
+        "(SELECT COUNT(*) FROM tag_analyses WHERE lecture_id=?) AS analyses, "
+        "(SELECT COUNT(*) FROM student_weak_points w WHERE w.status_lecture_id=? "
+        " OR EXISTS(SELECT 1 FROM submissions ws WHERE ws.lecture_id=? "
+        " AND ws.id=w.source_submission_id)) AS weak_points, "
+        "(SELECT summary_md FROM lectures WHERE id=?) AS summary_md "
+        "FROM submissions s WHERE s.lecture_id=?",
+        (lecture_id, lecture_id, lecture_id, lecture_id, lecture_id, lecture_id,
+         lecture_id)).fetchone()
+    return {**dict(row), "has_derived": bool(
+        row["graded"] or row["tags"] or row["analyses"] or row["weak_points"]
+        or row["summary_md"])}
+
+
+def _lecture_scope_reset_busy(db, lecture_id, course_id):
+    """范围重置前阻止后台任务晚到写回旧题目结果或分析。"""
+    return db.execute(
+        "SELECT operation_type FROM ai_operations WHERE status IN ('queued','running') "
+        "AND ((lecture_id=? AND operation_type IN "
+        "('grade','report_generate','tag_horizontal','lecture_summary')) "
+        "OR (course_id=? AND operation_type='tag_vertical')) LIMIT 1",
+        (lecture_id, course_id)).fetchone()
+
+
+def _invalidate_lecture_scope_results(db, lecture_id, course_id):
+    """确认范围变更后清除该讲派生批阅，并按其他已发布讲次重算薄弱点。"""
+    submissions = db.execute(
+        "SELECT s.id,s.student_id,s.status,s.report_md,s.report_detail,s.report_published,s.ai_summary "
+        "FROM submissions s WHERE s.lecture_id=?", (lecture_id,)).fetchall()
+    submission_ids = [row["id"] for row in submissions]
+    graded_rows = [row for row in submissions if
+                   row["status"] == "已批改" or row["report_published"] or row["report_md"] or
+                   row["report_detail"] or row["ai_summary"] or db.execute(
+                       "SELECT 1 FROM questions WHERE submission_id=? LIMIT 1",
+                       (row["id"],)).fetchone()]
+    graded_ids = [row["id"] for row in graded_rows]
+    student_ids = sorted({row["student_id"] for row in graded_rows})
+    tags = {row["tag"] for row in db.execute(
+        "SELECT DISTINCT tag FROM question_tags WHERE lecture_id=? AND TRIM(tag)<>''",
+        (lecture_id,)).fetchall()}
+    tags.update(row["tag"] for row in db.execute(
+        "SELECT DISTINCT tag FROM student_weak_points w WHERE w.course_id=? "
+        "AND TRIM(w.tag)<>'' AND (w.status_lecture_id=? OR "
+        "EXISTS(SELECT 1 FROM submissions s WHERE s.lecture_id=? "
+        "AND s.id=w.source_submission_id))", (course_id, lecture_id, lecture_id)).fetchall())
+
+    if submission_ids:
+        marks = ",".join("?" for _ in submission_ids)
+        db.execute(
+            f"DELETE FROM student_question_reviews WHERE question_id IN "
+            f"(SELECT id FROM questions WHERE submission_id IN ({marks}))", submission_ids)
+        db.execute(f"DELETE FROM questions WHERE submission_id IN ({marks})", submission_ids)
+        if graded_ids:
+            graded_marks = ",".join("?" for _ in graded_ids)
+            db.execute(
+                f"UPDATE submissions SET status='已提交',score='',feedback='',grader='',ai_summary='',"
+                f"report_md='',report_detail='',report_published=0,updated_at=CURRENT_TIMESTAMP "
+                f"WHERE id IN ({graded_marks})", graded_ids)
+
+    # 问题编号/结构改变后，旧的 AI 和手动题目标签、讲次/全班分析都不再可靠。
+    db.execute("DELETE FROM question_tags WHERE lecture_id=?", (lecture_id,))
+    db.execute("DELETE FROM tag_analyses WHERE lecture_id=?", (lecture_id,))
+    if student_ids:
+        marks = ",".join("?" for _ in student_ids)
+        db.execute(
+            f"DELETE FROM tag_analyses WHERE kind='vertical' AND course_id=? "
+            f"AND student_id IN ({marks})", (course_id, *student_ids))
+    db.execute("UPDATE lectures SET summary_md='',summary_at='' WHERE id=?", (lecture_id,))
+
+    # 旧提交不再公开；对每位受影响学生，仅清掉这些标签在本课程已无公开来源的卡片，
+    # 其余标签依据其他已发布讲次重算，保留学生备注和复习状态。
+    for student_id in student_ids:
+        attempts = _weak_latest_attempts(db, student_id, course_id)
+        totals = _weak_tag_totals(attempts)
+        latest_source = {}
+        for attempt in attempts:
+            for tag in attempt["tags"]:
+                if attempt["submission_id"] > latest_source.get(tag, 0):
+                    latest_source[tag] = attempt["submission_id"]
+        for tag in tags:
+            existing = db.execute(
+                "SELECT * FROM student_weak_points WHERE student_id=? AND course_id=? AND tag=?",
+                (student_id, course_id, tag)).fetchone()
+            if not existing:
+                continue
+            right, partial, wrong, total = totals.get(tag, (0, 0, 0, 0))
+            if not total:
+                db.execute("DELETE FROM student_weak_points WHERE id=?", (existing["id"],))
+                continue
+            source = latest_source.get(tag, 0)
+            source_lecture = db.execute(
+                "SELECT lecture_id FROM submissions WHERE id=?", (source,)).fetchone()
+            status_lecture_id = existing["status_lecture_id"] or 0
+            if status_lecture_id == lecture_id:
+                status_lecture_id = source_lecture["lecture_id"] if source_lecture else 0
+            db.execute(
+                "UPDATE student_weak_points SET source_submission_id=?,wrong_count=?,"
+                "partial_count=?,right_count=?,total_count=?,right_streak=0,"
+                "status_lecture_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (source, wrong, partial, right, total, status_lecture_id, existing["id"]))
+    return len(submissions)
 
 
 # 同一讲的答案/页码每次变更都会推进代次。队列任务写回时同时校验代次和
@@ -1910,8 +2136,8 @@ def _generate_question_tags(hw, keys):
         cands = json.loads(hw["scope_candidates"] or "[]")
     except (TypeError, ValueError):
         cands = []
-    by_key = {str(c.get("key")): c for c in cands if isinstance(c, dict)}
-    picked = [by_key[str(k)] for k in keys if str(k) in by_key]
+    picked = [{**item, "stem": item.get("combined_stem") or item.get("stem") or ""}
+              for item in _scope_items(cands, keys)]
     if not picked:
         return 0, "没有找到勾选的题目，请重新生成题目清单"
     if not hw["answer_pdf"]:
@@ -1993,7 +2219,7 @@ def _generate_question_tags(hw, keys):
 @_routes.route("/lecture/<oid:hid>/answer/pages", methods=["POST"])
 @role_required("teacher")
 def lecture_answer_pages(hid):
-    """保存教师要发送给模型的页码，并异步用这些页生成题目清单。"""
+    """保存教师版页码并重提题目清单；确认后先作废该讲旧批阅。"""
     db = get_db()
     hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
     if not hw:
@@ -2008,23 +2234,29 @@ def lecture_answer_pages(hid):
     stored_pages = ",".join(str(p) for p in picked)
     with _scope_analysis_lock:
         current = db.execute(
-            "SELECT answer_pdf,answer_pages FROM lectures WHERE id=?", (hid,)).fetchone()
+            "SELECT answer_pdf,answer_pages,scope_candidates FROM lectures WHERE id=?",
+            (hid,)).fetchone()
         if not current or current["answer_pdf"] != hw["answer_pdf"]:
             flash("教师版答案已更新，请重新选择页码。")
             return redirect(url_for("lecture_detail", hid=hid))
-        changed = (current["answer_pages"] or "") != stored_pages
-        if changed:
-            generation = _advance_scope_analysis_generation(hid)
-            db.execute("UPDATE lectures SET answer_pages=?, scope_candidates='', "
-                       "scope_selected='' WHERE id=?", (stored_pages, hid))
-        else:
-            generation = _scope_analysis_generations.get(hid, 0)
-            db.execute("UPDATE lectures SET answer_pages=? WHERE id=?",
-                       (stored_pages, hid))
+        impact = _lecture_scope_reset_impact(db, hid)
+        if _lecture_scope_reset_busy(db, hid, hw["course_id"]):
+            flash("本讲仍有批阅、报告或知识点分析任务在后台运行；等待任务完成后再重设范围。")
+            return redirect(url_for("lecture_detail", hid=hid))
+        if impact["has_derived"] and request.form.get("confirm_scope_reset") != "1":
+            flash(f"重新提取题目清单将清除本讲 {impact['graded'] or 0} 份旧批阅（"
+                  f"{impact['questions']} 道逐题结果）、{impact['tags']} 个旧标签及相关分析，"
+                  "并重算相关错题/薄弱点。"
+                  "学生原始提交文件会保留；请回到本页再次操作并确认。")
+            return redirect(url_for("lecture_detail", hid=hid))
+        # 每次重提清单都推进代次，晚到的抽取/标签任务不得写回旧结构。
+        generation = _advance_scope_analysis_generation(hid)
+        _invalidate_lecture_scope_results(db, hid, hw["course_id"])
+        db.execute("UPDATE lectures SET answer_pages=?,scope_candidates='',scope_selected='' "
+                   "WHERE id=?", (stored_pages, hid))
         db.commit()
     note = _answer_pages_note(picked, total)
-    if changed:
-        note += " 已清除旧题目范围，待新清单生成后重新选择。"
+    note += " 旧题目范围和批阅结果已作废，待新清单生成后重新选择。"
     teacher_id = g.user["id"]
     if get_setting(teacher_id, "ai_demo") == "1":
         flash(f"{note} 演示模式不会调用 AI，无法生成题目清单。")
@@ -2133,14 +2365,12 @@ def lecture_scope_save(hid):
     if not hw:
         abort(404)
     own_course(hw["course_id"])
-    keys = [k.strip() for k in request.form.getlist("no") if k.strip()]
+    raw_keys = [k.strip() for k in request.form.getlist("no") if k.strip()]
     try:
         candidates = json.loads(hw["scope_candidates"] or "[]")
     except (TypeError, ValueError):
         candidates = []
-    valid_keys = {str(item.get("key") or item.get("no"))
-                  for item in candidates if isinstance(item, dict)}
-    keys = list(dict.fromkeys(key for key in keys if key in valid_keys))
+    keys = _normalize_scope_selection(candidates, raw_keys)
     if not keys:
         flash("请至少勾选一道题再保存；未划定作业范围时 AI 批阅不会执行。")
         return redirect(url_for("lecture_detail", hid=hid))
@@ -2151,13 +2381,26 @@ def lecture_scope_save(hid):
             old_keys = json.loads(current["scope_selected"] or "[]") if current else []
         except (TypeError, ValueError):
             old_keys = []
-        if set(map(str, old_keys)) != set(keys):
+        changed = set(map(str, old_keys)) != set(keys)
+        if changed and _lecture_scope_reset_busy(db, hid, hw["course_id"]):
+            flash("本讲仍有批阅、报告或知识点分析任务在后台运行；等待任务完成后再改作业范围。")
+            return redirect(url_for("lecture_detail", hid=hid))
+        impact = _lecture_scope_reset_impact(db, hid)
+        if changed and impact["has_derived"] and request.form.get("confirm_scope_reset") != "1":
+            flash(f"修改作业范围将清除本讲 {impact['graded'] or 0} 份旧批阅（"
+                  f"{impact['questions']} 道逐题结果）、{impact['tags']} 个旧标签及相关分析，"
+                  "并重算相关错题/薄弱点。"
+                  "学生原始提交文件会保留；请再次保存并确认。")
+            return redirect(url_for("lecture_detail", hid=hid))
+        if changed:
             _advance_scope_analysis_generation(hid)
+            _invalidate_lecture_scope_results(db, hid, hw["course_id"])
         db.execute("UPDATE lectures SET scope_selected=? WHERE id=?", (selected_json, hid))
         db.commit()
     # 范围补齐后，已提交但尚未批改的作业可以立即进入自动批改队列。
     queued = _grading_queue.auto_enqueue_lecture(hid)
-    flash(f"已保存作业范围：{len(keys)} 道题。" +
+    selected_count = len(_scope_items(candidates, keys))
+    flash(f"已保存作业范围：{selected_count} 个独立批改项。" +
           (f" 已自动加入批改队列 {queued} 份。" if queued else ""))
     return redirect(url_for("lecture_detail", hid=hid))
 
@@ -2175,12 +2418,8 @@ def lecture_tag_save(hid):
         candidates = json.loads(hw["scope_candidates"] or "[]")
     except (TypeError, ValueError):
         candidates = []
-    valid = {}
-    for item in candidates:
-        if isinstance(item, dict):
-            key = str(item.get("key") or item.get("no") or "").strip()
-            if key:
-                valid[key] = str(item.get("no") or "").strip()
+    valid = {str(item["key"]): str(item["no"])
+             for item in _scope_items(candidates)}
     key = (request.form.get("question_key") or "").strip()
     if key not in valid:
         flash("题目不在当前题目清单中，请刷新页面后重试。")
@@ -2695,6 +2934,9 @@ def _run_grading_job(teacher_id, sid, operation):
             gen = run_grading(
                 teacher_id, file_list(sub["file_path"]), hw["answer_pdf"],
                 scope=_scope_instruction(hw),
+                scope_items=_scope_items(
+                    json.loads(hw["scope_candidates"] or "[]"),
+                    json.loads(hw["scope_selected"] or "[]")),
                 answer_pages=_page_list(hw["answer_pages"]),
                 prompt=_prompt_content("grade", course["grade_prompt_id"]),
                 usage_hook=operation["usage_hook"])
@@ -2805,6 +3047,9 @@ def submission_grade(sid):
         try:
             gen = run_grading(g.user["id"], file_list(sub["file_path"]), hw["answer_pdf"],
                               scope=_scope_instruction(hw),
+                              scope_items=_scope_items(
+                                  json.loads(hw["scope_candidates"] or "[]"),
+                                  json.loads(hw["scope_selected"] or "[]")),
                               answer_pages=_page_list(hw["answer_pages"]),
                               prompt=_prompt_content("grade", course["grade_prompt_id"]))
         except Exception as e:
@@ -3036,6 +3281,12 @@ def submission_review(sid):
     course = own_course(hw["course_id"])
     questions = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
                            (sid,)).fetchall()
+    try:
+        scope_candidates = json.loads(hw["scope_candidates"] or "[]")
+        scope_selected = json.loads(hw["scope_selected"] or "[]")
+    except (TypeError, ValueError):
+        scope_candidates, scope_selected = [], []
+    question_groups = _group_submission_questions(questions, scope_candidates, scope_selected)
     report_operation = db.execute(
         "SELECT id,status,error FROM ai_operations WHERE submission_id=? "
         "AND operation_type='report_generate' ORDER BY id DESC LIMIT 1", (sid,)).fetchone()
@@ -3065,8 +3316,10 @@ def submission_review(sid):
             "answer_url": _url(answer_pdf, int(q["answer_page"] or 0), ""),
             "answer_full_url": _url(answer_pdf, int(q["answer_page"] or 0), "") if answer_pdf else "",
         })
+    q_media_by_id = {str(q["id"]): media for q, media in zip(questions, q_media)}
     return render_template("review.html", sub=sub, hw=hw, course=course, questions=questions,
-                           q_media=q_media,
+                           question_groups=question_groups, q_media=q_media,
+                           q_media_by_id=q_media_by_id,
                            tag_by_key=tag_utils.lecture_tags_by_key(db, hw["id"]),
                            grade_job=latest_operation(db, sid),
                            report_operation=report_operation,
@@ -3098,16 +3351,23 @@ def submission_review_save(sid):
     pending = db.execute("SELECT COUNT(*) FROM questions WHERE submission_id=? AND reviewed=0",
                          (sid,)).fetchone()[0]
     total = db.execute("SELECT COUNT(*) FROM questions WHERE submission_id=?", (sid,)).fetchone()[0]
+    old_summary = _json_or_none(sub["ai_summary"]) or {}
+    review_summary = _build_summary(
+        [dict(row) for row in db.execute(
+            "SELECT no,verdict FROM questions WHERE submission_id=? ORDER BY id", (sid,))],
+        old_summary.get("weak_points") or [], old_summary.get("evaluation", ""),
+        old_summary.get("errors") or [])
     job = latest_operation(db, sid)
     reviewed = bool(total) and not pending and not (job and job["status"] in ("queued", "running"))
     # 完成人工复核或提交报告生成时都只保存审核状态；对学生的公开仅由报告页的一键发布控制。
     draft = request.form.get("action") == "draft"
     reviewed = reviewed and not draft
-    db.execute("UPDATE submissions SET score='', status=?, "
+    db.execute("UPDATE submissions SET score='', ai_summary=?, status=?, "
                "report_published=CASE WHEN ? THEN report_published ELSE 0 END,grader=?, "
                "updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                ("已批改" if reviewed else "待批改", reviewed,
-                 f"{g.user['display_name']} 逐题批改", sid))
+                 (json.dumps(review_summary, ensure_ascii=False),
+                  "已批改" if reviewed else "待批改", reviewed,
+                  f"{g.user['display_name']} 逐题批改", sid))
     db.commit()
     public_now = bool(db.execute(
         "SELECT report_published FROM submissions WHERE id=?", (sid,)).fetchone()[0])
@@ -4978,6 +5238,17 @@ def student_lecture_page(hid):
     subs = [dict(row) for row in db.execute(
         "SELECT * FROM submissions WHERE lecture_id=? AND student_id=? "
         "ORDER BY id DESC", (hid, g.user["id"])).fetchall()]
+    for submission in subs:
+        verdicts = db.execute(
+            "SELECT COUNT(*) AS total, "
+            "SUM(CASE WHEN verdict='对' THEN 1 ELSE 0 END) AS n_right, "
+            "SUM(CASE WHEN verdict='半对' THEN 1 ELSE 0 END) AS n_partial, "
+            "SUM(CASE WHEN verdict='错' THEN 1 ELSE 0 END) AS n_wrong, "
+            "SUM(CASE WHEN verdict='无法判定' THEN 1 ELSE 0 END) AS n_unknown "
+            "FROM questions WHERE submission_id=?", (submission["id"],)).fetchone()
+        submission.update(dict(verdicts))
+        submission["accuracy_text"] = accuracy_text(
+            verdicts["n_right"], verdicts["n_partial"], verdicts["n_wrong"], verdicts["total"])
     # 只有一键发布后的最新提交才向学生公开逐题明细；不依赖 score（默认定性批改时 score 为空）。
     latest = subs[0] if subs else None
     # 人工复核完成只标记教师端状态；学生侧报告与逐题内容统一由 report_published 控制。
@@ -4992,21 +5263,20 @@ def student_lecture_page(hid):
             selected = set(json.loads(hw["scope_selected"] or "[]"))
         except (TypeError, ValueError):
             candidates, selected = [], set()
-        stems_by_no = {}
-        for candidate in candidates:
-            if not isinstance(candidate, dict) or str(candidate.get("key")) not in selected:
-                continue
-            no, stem = str(candidate.get("no") or ""), str(candidate.get("stem") or "").strip()
-            if no and stem:
-                stems_by_no.setdefault(no, stem)
+        stems_by_no = {str(item["no"]): str(item.get("combined_stem") or item.get("stem") or "")
+                       for item in _scope_items(candidates, selected)}
         for item in items:
             item["stem"] = stems_by_no.get(str(item.get("no") or ""), "")
+        question_groups = _group_submission_questions(items, candidates, selected)
+    else:
+        question_groups = []
     locked = bool(latest) and _submission_grade_active(db, latest["id"])
     for submission in subs:
         submission["student_status"] = (
             "待公布" if submission["status"] == "已批改" and not submission["report_published"]
             else submission["status"])
     return render_template("student_lecture.html", hw=hw, subs=subs, items=items,
+                           question_groups=question_groups,
                            revealed=revealed, locked=locked,
                            auto_grade_limit=_grading_queue.attempt_limit(hw["teacher_id"]))
 
@@ -5019,13 +5289,14 @@ def _latest_submission_id(db, lecture_id, student_id):
 
 # ---------- 工具 ----------
 
-def demo_questions(count=6):
+def demo_questions(count=6, scope_items=None):
     """演示模式：生成占位批阅结果，用于没有 AI 接口时体验流程。"""
-    return [{"no": str(i), "ocr": f"（演示模式）第 {i} 题 OCR 占位文本，请手动修改成学生实际作答。",
-             "standard_answer": f"（演示模式）请在此填写第 {i} 题的标准答案。",
-             "verdict": "半对",
-             "comment": "（演示模式）请手动核对并修改。"}
-            for i in range(1, count + 1)]
+    items = scope_items or [{"no": str(i)} for i in range(1, count + 1)]
+    return [{"no": str(item.get("no") or i),
+             "ocr": f"（演示模式）第 {item.get('no') or i} 项 OCR 占位文本，请手动修改成学生实际作答。",
+             "standard_answer": f"（演示模式）请在此填写第 {item.get('no') or i} 项的标准答案。",
+             "verdict": "半对", "comment": "（演示模式）请手动核对并修改。"}
+            for i, item in enumerate(items, 1)]
 
 
 def _build_summary(questions, weak_points, evaluation, errors):
@@ -5035,7 +5306,8 @@ def _build_summary(questions, weak_points, evaluation, errors):
     wrong = [q["no"] for q in questions if q.get("verdict") == "错"]
     unknown = [q["no"] for q in questions if q.get("verdict") == "无法判定"]
     return {
-        "accuracy": accuracy_text(len(right), len(partial), len(wrong)),
+        "accuracy": accuracy_text(len(right), len(partial), len(wrong), len(questions)),
+        "total": len(questions),
         "right": right,
         "partial": partial,
         "wrong": wrong,
@@ -5047,13 +5319,13 @@ def _build_summary(questions, weak_points, evaluation, errors):
 
 
 def run_grading(teacher_id, file_name, answer_pdf="", scope="", answer_pages=None,
-                prompt="", usage_hook=None):
+                prompt="", usage_hook=None, scope_items=None):
     """批阅入口：学生作业与标准答案整份交给支持 PDF 的模型，一次返回逐题结果。
 
     prompt 为本课程选定的批阅提示词正文；为空时用系统内置默认提示词。
     """
     if get_setting(teacher_id, "ai_demo") == "1":
-        questions = demo_questions()
+        questions = demo_questions(scope_items=scope_items)
         return {"questions": questions,
                 "summary": _build_summary(questions, [], "演示模式：未调用 AI。", []),
                 "errors": [], "error": "", "demo": True}
@@ -5080,14 +5352,13 @@ def run_grading(teacher_id, file_name, answer_pdf="", scope="", answer_pages=Non
 
 
 def _scope_instruction(hw):
-    """传入所选题号和标准题干，供模型用题干核对学生答案页。"""
+    """传入独立批改项编号及母题/小问题干，供模型核对学生答案页。"""
     try:
         keys = json.loads(hw["scope_selected"] or "[]")
         cands = json.loads(hw["scope_candidates"] or "[]")
     except (TypeError, ValueError):
         return ""
-    by_key = {str(c.get("key")): c for c in cands if isinstance(c, dict)}
-    picked = [by_key[str(k)] for k in keys if str(k) in by_key]
+    picked = _scope_items(cands, keys)
     if not picked:
         return ""
     counts = {}
@@ -5096,14 +5367,27 @@ def _scope_instruction(hw):
     labels = []
     for c in picked:
         no = str(c.get("no", "")).strip()
-        # 同一题号在答案里出现多次时，加简要说明以便模型区分
         label = f"{no}（{c.get('hint')}）" if counts[no] > 1 and c.get("hint") else no
-        stem = str(c.get("stem") or "").strip()
-        labels.append(f"{label}：参考题干「{stem[:2000]}" + ("…" if len(stem) > 2000 else "") + "」"
-                      if stem else f"{label}：参考题干缺失")
-    return ("本讲次作业范围与供题干比对的标准题干如下：\n- " + "\n- ".join(labels) + "\n"
-            "请只批阅这些题目（题目含小问时，该题的全部小问都要批阅），范围之外的题目不得输出。"
-            "对每题必须先将学生 PDF 页上的题号和题干/关键条件与对应参考题干比对；"
+        stem = str(c.get("combined_stem") or c.get("stem") or "").strip()
+        source_numbers = [str(value).strip() for value in
+                          (c.get("parent_source_no"), c.get("source_no"))
+                          if str(value or "").strip()]
+        source_numbers = list(dict.fromkeys(source_numbers))
+        source_note = f"（原卷题号/小问：{' / '.join(source_numbers)}）" if source_numbers else ""
+        if stem:
+            text = f"{label}{source_note}：参考母题及本批改项题干「{stem[:3000]}"
+            text += ("…" if len(stem) > 3000 else "") + "」"
+        else:
+            text = f"{label}{source_note}：参考题干缺失"
+        if c.get("parent_no"):
+            text += f"（归属母题 {c['parent_no']}）"
+        labels.append(text)
+    return ("本讲次作业范围中的独立批改项及题干如下：\n- " + "\n- ".join(labels) + "\n"
+            "请每个编号分别输出一条批改结果，只批阅清单中的编号，范围之外不得输出；"
+            "同一母题的多个小问必须逐问独立判断，不要合并，也不要为母题另输出一条结果。"
+            "题干匹配时结合母题公共条件和小问题干与学生作答一起核对。"
+            "对每个批改项必须先将学生 PDF 页上的原卷题号、小问题号及题干/关键条件"
+            "与参考题干比对；"
             "只有题干可确认对应时才填写学生页码。参考题干缺失或匹配不确定时 student_page=0，"
             "page_match 填 uncertain 或 not_found，并判为无法判定，提示人工核对原卷。"
             "不得仅按题号、答案结果或相邻题推断页面。范围内确实没有作答时，仍按未作答处理。")
@@ -5125,6 +5409,21 @@ def generate_report(db, sub_id, teacher_id, reuse=False, operation=None):
         return ""
     questions = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
                            (sub_id,)).fetchall()
+    candidate_row = db.execute("SELECT scope_candidates FROM lectures WHERE id=?",
+                               (sub["lecture_id"],)).fetchone()
+    try:
+        report_scope_items = _scope_items(json.loads(candidate_row["scope_candidates"] or "[]"))
+    except (TypeError, ValueError):
+        report_scope_items = []
+    report_scope_by_no = {str(item["no"]): item for item in report_scope_items}
+    report_questions = []
+    for question in questions:
+        item = report_scope_by_no.get(str(question["no"] or ""), {})
+        report_question = dict(question)
+        report_question["parent_no"] = item.get("parent_no", "")
+        report_question["parent_stem"] = item.get("parent_stem", "")
+        report_question["stem"] = item.get("stem", "")
+        report_questions.append(report_question)
     completion_error = None
     summary = _json_or_none(sub["ai_summary"]) or {}
     detail = _json_or_none(sub["report_detail"]) or {} if reuse else {}
@@ -5168,7 +5467,7 @@ def generate_report(db, sub_id, teacher_id, reuse=False, operation=None):
     except (TypeError, ValueError):
         date_label = ""
     md = build_report_md(sub["display_name"], sub["lecture_title"], date_label,
-                         questions, summary, detail,
+                         report_questions, summary, detail,
                          kg_diagnosis=_kg_diagnosis(db, sub))
     if completion_error:
         # AI 评价请求失败时保留旧报告；没有旧报告时保持空值，供界面显示“生成”。
@@ -5577,17 +5876,16 @@ def _kg_diagnosis(db, sub):
         candidates = json.loads(scope_candidates["scope_candidates"] or "[]") if scope_candidates else []
     except (TypeError, ValueError):
         candidates = []
-    candidate_by_key = {str(c.get("key")): c for c in candidates if isinstance(c, dict)}
-    candidates_by_no = {}
-    for candidate in candidates:
-        if isinstance(candidate, dict):
-            candidates_by_no.setdefault(str(candidate.get("no") or ""), candidate)
+    scope_items = _scope_items(candidates)
+    candidate_by_key = {str(c.get("key")): c for c in scope_items}
+    candidates_by_no = {str(c.get("no") or ""): c for c in scope_items}
 
     def brief_for(question):
         candidate = candidate_by_key.get(str(question["no"])) or \
             candidates_by_no.get(str(question["no"]))
         if candidate:
-            brief = str(candidate.get("hint") or candidate.get("stem") or "").strip()
+            brief = str(candidate.get("combined_stem") or candidate.get("stem") or
+                        candidate.get("hint") or "").strip()
             if brief:
                 return brief[:48] + ("…" if len(brief) > 48 else "")
         brief = str(question["note"] or question["ai_comment"] or

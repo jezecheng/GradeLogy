@@ -2,6 +2,7 @@
   'use strict';
   var cards = Array.from(document.querySelectorAll('.review-item[data-qid]'));
   if (!cards.length) return;
+  var parentGroups = Array.from(document.querySelectorAll('.review-parent'));
   var filter = 'pending';
   function show() {
     var count = 0;
@@ -11,6 +12,10 @@
       card.hidden = filter === 'pending' ? !pending : filter === 'unknown' ? !verdict || verdict.value !== '无法判定' : false;
       if (!card.hidden) count++;
     });
+    parentGroups.forEach(function (group) {
+      group.hidden = !Array.from(group.querySelectorAll('.review-item[data-qid]'))
+        .some(function (card) { return !card.hidden; });
+    });
     document.getElementById('review-filter-status').textContent = count ? count + ' 题' : '没有匹配题目，可切换到全部';
     document.querySelectorAll('[data-review-filter]').forEach(function (b) { b.setAttribute('aria-pressed', b.dataset.reviewFilter === filter); });
   }
@@ -19,6 +24,8 @@
   document.getElementById('review-jump').addEventListener('change', function (e) {
     filter = 'all'; show();
     var card = cards.find(function (c) { return c.dataset.qid === e.target.value; });
+    var parent = card.closest('.review-parent');
+    if (parent) parent.open = true;
     card.open = true; card.scrollIntoView({block: 'start', behavior: 'smooth'});
     card.querySelector('summary').focus();
   });
@@ -32,5 +39,10 @@
   if (width) width.addEventListener('input', function () { document.body.style.setProperty('--pdf-width', width.value + 'vw'); });
   if (!cards.some(function (c) { return c.querySelector('.reviewed-badge').dataset.reviewed !== '1'; })) filter = 'all';
   show();
-  var first = cards.find(function (c) { return !c.hidden; }); if (first) first.open = true;
+  var first = cards.find(function (c) { return !c.hidden; });
+  if (first) {
+    var parent = first.closest('.review-parent');
+    if (parent) parent.open = true;
+    first.open = true;
+  }
 })();

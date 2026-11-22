@@ -111,14 +111,15 @@ class TagRouteTest(unittest.TestCase):
 
     def test_scope_save_does_not_call_ai_or_replace_existing_tags(self):
         with mock.patch.object(app_module, "_generate_question_tags") as tagging:
-            resp = self._post("lecture_scope_save", {"no": ["q0", "q1"]}, hid=20)
+            # 保存相同范围应保持已有标签；改变范围则需确认并使旧标签失效。
+            resp = self._post("lecture_scope_save", {"no": ["q0"]}, hid=20)
         self.assertEqual(resp.status_code, 302)
         self.assertEqual(self._tags(), [("3", "氧化还原反应")])
         con = self._db()
         selected = json.loads(con.execute(
             "SELECT scope_selected FROM lectures WHERE id=20").fetchone()[0])
         con.close()
-        self.assertEqual(selected, ["q0", "q1"])
+        self.assertEqual(selected, ["q0"])
         tagging.assert_not_called()
 
     def test_scope_save_keeps_previous_tags_without_implicit_ai(self):
@@ -264,6 +265,22 @@ class TagRouteTest(unittest.TestCase):
             resp = self._post("lecture_tag_analysis", hid=20)
         self.assertEqual(resp.status_code, 302)
         ai.assert_not_called()
+
+    def test_lecture_class_tag_chips_explain_attention_ratio(self):
+        page = self.client.get(self.url("lecture_detail", hid=20))
+        self.assertEqual(page.status_code, 200)
+        html = page.get_data(as_text=True)
+        self.assertIn("需关注判定数 / 已判定记录数", html)
+        self.assertIn("分子是错 + 半对", html)
+        self.assertIn("0/1</b> 不代表一定全对", html)
+
+        con = self._db()
+        con.execute("DELETE FROM question_tags WHERE lecture_id=20")
+        con.commit()
+        con.close()
+        without_tags = self.client.get(self.url("lecture_detail", hid=20))
+        self.assertIn("单独点击「生成/重新生成知识点标签」",
+                      without_tags.get_data(as_text=True))
 
     def test_horizontal_analysis_keeps_previous_on_ai_failure(self):
         with mock.patch.object(app_module, "_ai_endpoint",

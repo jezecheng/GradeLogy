@@ -101,6 +101,20 @@ class LoginHelpTest(unittest.TestCase):
         for disclosure in ("用户不存在", "账号不存在", "未注册", "missing-user", "known-user"):
             self.assertNotIn(disclosure, unknown.get_data(as_text=True))
 
+    def test_assistant_has_explicit_font_choices_and_two_resize_anchors(self):
+        with self.client.session_transaction() as session:
+            session["uid"] = 2
+            session["auth_epoch"] = a.session_epoch(str(self.root))
+        response = self.client.get("/help/teacher")
+        self.assertEqual(response.status_code, 200)
+        page = response.get_data(as_text=True)
+        self.assertIn('id="assistant-font-small"', page)
+        self.assertIn('data-font-size="15"', page)
+        self.assertIn('id="assistant-font-large"', page)
+        self.assertIn('data-font-size="18"', page)
+        self.assertIn('id="assistant-resize-top-left"', page)
+        self.assertIn('id="assistant-resize-bottom-left"', page)
+
 
 if __name__ == "__main__":
     unittest.main()

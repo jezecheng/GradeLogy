@@ -28,9 +28,10 @@ DEFAULT_GRADE_PROMPT = (
     "1. 学生作业里的实际书写是唯一评分依据，严禁把标准答案当成学生的作答。\n"
     "2. 看不清就写〔不清〕；无法分辨时必须判「无法判定」，严禁猜测或编造学生写了什么。\n"
     "3. 化学方程式/离子方程式必须查配平、条件、状态符号、可逆号；数值题查有效数字与单位。\n"
-    "4. 题号用学生作业里标注的题号；一题有多个小问（如 9.1、9.2、9(1)、9(2)）时合并为一条，"
-    "comment 里写清哪一问失分（如「9.1 正确，9.2 漏写单位」）；"
-    "未作答判「错」并注明未作答。\n"
+    "4. 题目范围中的编号是系统标准编号，必须原样用于输出 no，不能改回原卷题号；"
+    "一个母题含多个小问时，每个小问都独立输出一条（如 1.1、1.2），不得合并，"
+    "也不得为母题额外输出一个批改结果；无小问的独立大题使用整数编号（如 2）。"
+    "未作答的小问判「错」并注明未作答。\n"
     "5. 作业没有标注分值就不要编造分数：score 与 max_score 都输出 0，只给定性判定。\n"
     "6. comment 不超过 60 个汉字，standard_answer 不超过 60 个汉字。\n"
     "7. 学生作业中缺失或与标准答案对不上的题，不要凭空补题。\n"
@@ -55,6 +56,9 @@ GRADE_OUTPUT_CONTRACT = (
     '"student_box":[0,0,1,1],"answer_box":[0,0,1,1]}],'
     '"weak_points":[{"no":"题号","type":"失分类型","detail":"具体说明"}],'
     '"evaluation":"整份作业总评（不超过 100 字）","total_score":"如 12/20，没有分值就留空"}\n'
+    "题目编号说明：范围若列出母题与多个独立小问，只输出所选的小问编号（如 1.1、1.2），"
+    "每个编号必须独立给出 OCR、标准答案、判定和评语；不得把整道母题合并成一行。"
+    "题干对照时把母题公共条件与该小问题干合起来理解，但 no 始终使用范围提供的标准编号。\n"
     "页码与裁剪框说明：\n"
     "1. student_page：确认后填学生答卷中的全局页码（1 起；多份文件按发送顺序连续编号）；未确认必须填 0。"
     "只有完成题干比对后 page_match 才能填 confirmed。\n"
@@ -81,18 +85,20 @@ _MIME = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
 SCOPE_PROMPT = (
     "你是阅卷助理。附件是教师版标准答案的整页扫描图。\n"
     "请只输出 JSON，不要输出解释或代码块标记：\n"
-    '{"questions":[{"no":"题号","max":5,"hint":"这题考查什么（不超过 20 字）",'
-    '"stem":"完整题干"}]}\n'
+    '{"questions":[{"no":"原卷大题号","hint":"这题考查什么（不超过 20 字）",'
+    '"stem":"母题题干（不含各小问正文）","subquestions":['
+    '{"no":"原卷小问题号","hint":"小问考查什么（不超过 20 字）",'
+    '"stem":"该小问题干"}]}]}\n'
     "规则：\n"
-    "1. 按标准答案上标注的题号顺序列出全部题目，题号保持原文写法。\n"
-    "2. max 填该题满分；没有标注就填 0，不要估算。\n"
-    "3. 带小问的大题按大题合并成一条，不要把 (1)(2) 拆成多题；小问原文留在 stem 里。\n"
-    "4. 看不清的题号不要编造。\n"
-    "5. stem 逐字保留题干原文，含已知条件、数据、选项与小问；不要改写、不要给解答、"
-    "不要写「略」或省略号。\n"
+    "1. 按标准答案的大题顺序列出题目；模型须区分母题公共题干和每个独立小问。\n"
+    "2. 没有小问的大题留空 subquestions，整道题作为一个独立批改项。\n"
+    "3. 有小问的大题把每问单独放在 subquestions 中，不能把多个小问合并；母题本身不作为额外批改项。\n"
+    "4. no 仅用于保留原卷题号作识别参考，系统会重新连续编号；看不清的原题号不要编造。\n"
+    "5. stem 逐字保留文字：母题 stem 含公共条件、数据、选项；小问 stem 只含本问内容。"
+    "不要改写、不要给解答、不要写「略」或省略号。\n"
     "6. 化学式、离子式、数学式用轻量 LaTeX，用一对 $ 包裹，"
     "例如 $\\mathrm{Fe^{3+}}$、$\\mathrm{H_2SO_4}$、$\\Delta H<0$；纯文字不要加 $。\n"
-    "7. 单题 stem 控制在 600 字以内；超长时压缩重复描述，但条件、数据与小问不得省略。")
+    "7. 每个 stem 控制在 600 字以内；超长时压缩重复描述，但条件、数据及各小问正文不得省略。")
 
 # 模型偶尔会整段照抄整页；截断防止 scope_candidates 无限膨胀
 MAX_STEM_CHARS = 2000
@@ -327,10 +333,10 @@ def _normalize(raw):
 
 def analyze_answer_pdf(answer_path, api_url, api_key, model, max_tokens=32768,
                        pages=None, usage_hook=None):
-    """从教师版标准答案里识别题目清单，返回 (questions, error)。
+    """从教师版标准答案里识别题目层级，返回 (questions, error)。
 
-    每项为 {no, max, hint, stem}，供老师在讲次页勾选本讲作业范围。
-    stem 是题干原文（可含轻量 LaTeX），供讲次页展示与后续知识点标注参考。
+    每个母题依次编号 1、2……；有小问时用 1.1、1.2…… 生成独立范围项，
+    母题本身只保留公共题干、不单独评分。source_no 保留原卷题号供模型定位。
     pages 为要发送的页码（1 起）；为空表示整份文件。
     """
     parts, err = _file_parts(answer_path, "标准答案", pages)
@@ -351,13 +357,30 @@ def analyze_answer_pdf(answer_path, api_url, api_key, model, max_tokens=32768,
     for q in raw or []:
         if not isinstance(q, dict):
             continue
-        no = str(q.get("no", "")).strip()
-        if not no:
-            continue
-        out.append({"key": f"q{len(out)}", "no": no,
-                    "max": _as_num(q.get("max"), 0.0),
-                    "hint": str(q.get("hint", "")).strip(),
-                    "stem": str(q.get("stem", "")).strip()[:MAX_STEM_CHARS]})
+        parent_index = len(out) + 1
+        parent_key = f"q{len(out)}"
+        source_no = str(q.get("no", "")).strip()
+        raw_parts = q.get("subquestions") or q.get("parts") or []
+        parts = []
+        if isinstance(raw_parts, list):
+            for part_index, part in enumerate(raw_parts, 1):
+                if not isinstance(part, dict):
+                    continue
+                part_no = f"{parent_index}.{len(parts) + 1}"
+                parts.append({
+                    "key": f"{parent_key}.{len(parts) + 1}", "no": part_no,
+                    "source_no": str(part.get("no", "")).strip(),
+                    "parent_key": parent_key, "parent_no": str(parent_index),
+                    "hint": str(part.get("hint", "")).strip(),
+                    "stem": str(part.get("stem", "")).strip()[:MAX_STEM_CHARS],
+                })
+        out.append({
+            "key": parent_key, "no": str(parent_index), "source_no": source_no,
+            "max": _as_num(q.get("max"), 0.0),
+            "hint": str(q.get("hint", "")).strip(),
+            "stem": str(q.get("stem", "")).strip()[:MAX_STEM_CHARS],
+            "subquestions": parts,
+        })
     if not out:
         if finish == "length":
             return None, "AI 输出被截断（题目数太多），请重试。"
@@ -366,8 +389,8 @@ def analyze_answer_pdf(answer_path, api_url, api_key, model, max_tokens=32768,
 
 
 TAG_PROMPT = (
-    "你是教研助理。附件是教师版标准答案的相关页；下面给出本次作业范围内的题目清单。\n"
-    "请给每道题标注知识点标签，用于后续按知识点分析学生的薄弱点。\n"
+    "你是教研助理。附件是教师版标准答案的相关页；下面给出本次作业范围内的独立批改项。\n"
+    "请分别给每个独立批改项标注知识点标签，用于按小问统计学生的薄弱点。\n"
     "题目清单：\n"
 )
 
@@ -378,7 +401,8 @@ TAG_RULES = (
     "1. tags 用教材/考纲里的通用知识点术语（如 氧化还原反应、离子方程式、化学平衡常数），"
     "每题 1~4 个，按主要程度排序。\n"
     "2. 不要输出题号、分数、难度（如「基础题」「综合题」）这类非知识点标签。\n"
-    "3. 只输出清单里的题号，不要补题；同一题有多个小问时合并成一组标签。\n"
+    "3. 只输出清单里的独立批改项编号，不要补题；子题 stem 已包含母题公共条件和本小问题干，"
+    "每个小问单独标注，不要把同一大题的各小问合并。\n"
     "4. 标准答案看不清时，可结合题目本身与清单里的说明推断；仍无法判断就把 tags 留空。"
 )
 
@@ -401,8 +425,12 @@ def _clean_tags(raw):
 
 
 def _no_token(value):
-    """题号归一化：取前导数字，便于把「3.」「第3题」「3(1)」归到同一题。"""
-    m = re.match(r"\s*(?:第\s*)?(\d+)", str(value or ""))
+    """保留系统层级编号；兼容旧式「第3题」「3(1)」的主问题号匹配。"""
+    text = str(value or "")
+    nested = re.match(r"\s*(?:第\s*)?(\d+(?:\.\d+)+)", text)
+    if nested:
+        return nested.group(1)
+    m = re.match(r"\s*(?:第\s*)?(\d+)", text)
     return m.group(1) if m else str(value or "").strip()
 
 
@@ -426,7 +454,8 @@ def analyze_question_tags(answer_path, questions, api_url, api_key, model,
         if not no:
             continue
         listing.append({"key": str(q.get("key") or f"q{i}"), "no": no,
-                        "hint": str(q.get("hint", "")).strip()})
+                        "hint": str(q.get("hint", "")).strip(),
+                        "stem": str(q.get("stem", "")).strip()})
     if not listing:
         return None, "没有可标注的题目"
     if not answer_path:

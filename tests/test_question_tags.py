@@ -266,9 +266,13 @@ class ScopeStemTest(unittest.TestCase):
 
     def test_analyze_answer_pdf_keeps_stem(self):
         payload = json.dumps({"questions": [
-            {"no": "3", "max": 5, "hint": "配平",
-             "stem": "写出 $\\mathrm{Fe^{3+}}$ 与 $\\mathrm{Cl^-}$ 反应的离子方程式。"},
-            {"no": "4", "max": 0, "hint": "", "stem": "长" * 3000},
+            {"no": "例3", "hint": "配平",
+             "stem": "写出铁离子与氯离子反应。",
+             "subquestions": [
+                 {"no": "(1)", "hint": "写方程式",
+                  "stem": "写出 $\\mathrm{Fe^{3+}}$ 与 $\\mathrm{Cl^-}$ 反应的离子方程式。"},
+                 {"no": "(2)", "hint": "配平", "stem": "配平反应方程式。"}]},
+            {"no": "例4", "hint": "", "stem": "长" * 3000},
             {"no": "5", "max": 0, "hint": ""},
         ]}, ensure_ascii=False)
         with mock.patch.object(pdfgrade, "_file_parts", return_value=(["p"], "")), \
@@ -276,13 +280,41 @@ class ScopeStemTest(unittest.TestCase):
                                   return_value=(payload, "stop", None)):
             rows, err = pdfgrade.analyze_answer_pdf("a.pdf", "u", "k", "m")
         self.assertEqual(err, "")
-        self.assertEqual(rows[0]["stem"],
+        self.assertEqual(rows[0]["no"], "1")
+        self.assertEqual(rows[0]["source_no"], "例3")
+        self.assertEqual(rows[0]["stem"], "写出铁离子与氯离子反应。")
+        self.assertEqual([part["no"] for part in rows[0]["subquestions"]], ["1.1", "1.2"])
+        self.assertEqual(rows[0]["subquestions"][0]["key"], "q0.1")
+        self.assertEqual(rows[0]["subquestions"][0]["stem"],
                          "写出 $\\mathrm{Fe^{3+}}$ 与 $\\mathrm{Cl^-}$ 反应的离子方程式。")
+        self.assertEqual(rows[1]["no"], "2")
         self.assertEqual(len(rows[1]["stem"]), pdfgrade.MAX_STEM_CHARS)
+        self.assertEqual(rows[2]["no"], "3")
         self.assertEqual(rows[2]["stem"], "")  # 模型漏给题干时留空，不影响范围选择
 
 
 class TagAITest(unittest.TestCase):
+    def test_analyze_question_tags_keeps_sibling_subquestions_independent(self):
+        captured = {}
+
+        def fake_chat(url, key, model, content, **kwargs):
+            captured["content"] = content
+            return ('{"questions":[{"no":"1.1","tags":["速率常数"]},'
+                    '{"no":"1.2","tags":["反应级数"]}]}', "stop", "")
+
+        with mock.patch.object(pdfgrade, "_file_parts", return_value=([], "")), \
+                mock.patch.object(pdfgrade.llm, "chat", side_effect=fake_chat):
+            rows, err = pdfgrade.analyze_question_tags(
+                "/tmp/answer.pdf",
+                [{"key": "q0.1", "no": "1.1", "stem": "共同条件：A 溶液。求速率。"},
+                 {"key": "q0.2", "no": "1.2", "stem": "共同条件：A 溶液。求反应级数。"}],
+                "u", "k", "m")
+        self.assertEqual(err, "")
+        self.assertEqual([row["key"] for row in rows], ["q0.1", "q0.2"])
+        self.assertEqual([row["tags"] for row in rows], [["速率常数"], ["反应级数"]])
+        self.assertIn("共同条件：A 溶液。求速率。", captured["content"][0]["text"])
+        self.assertIn("共同条件：A 溶液。求反应级数。", captured["content"][0]["text"])
+
     def test_analyze_question_tags_normalizes_and_matches_numbers(self):
         reply = json.dumps({"questions": [
             {"no": "3.", "category": "化学计算", "tags": ["氧化还原反应", "电子守恒"]},

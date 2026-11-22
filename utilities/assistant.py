@@ -838,20 +838,19 @@ def _latest_submission(db, lecture_id, student_id):
     return dict(row) if row else None
 
 
-def _accuracy_text(n_right, n_partial, n_wrong):
-    judged = (n_right or 0) + (n_partial or 0) + (n_wrong or 0)
-    return f"{round((n_right or 0) * 100 / judged)}%" if judged else ""
+def _accuracy_text(n_right, n_total):
+    """按独立批改项总数计算全对率，无法判定/未给判定也占分母。"""
+    return f"{round((n_right or 0) * 100 / n_total)}%" if n_total else ""
 
 
 def _accuracy(db, submission_id):
     row = db.execute("SELECT "
                      "SUM(CASE WHEN verdict='对' THEN 1 ELSE 0 END) AS n_right, "
-                     "SUM(CASE WHEN verdict='半对' THEN 1 ELSE 0 END) AS n_partial, "
-                     "SUM(CASE WHEN verdict='错' THEN 1 ELSE 0 END) AS n_wrong "
+                     "COUNT(*) AS n_total "
                      "FROM questions WHERE submission_id=?", (submission_id,)).fetchone()
     if not row:
         return ""
-    return _accuracy_text(row["n_right"], row["n_partial"], row["n_wrong"])
+    return _accuracy_text(row["n_right"], row["n_total"])
 
 
 def _revealed(sub):

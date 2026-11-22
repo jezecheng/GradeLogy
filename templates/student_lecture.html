@@ -49,7 +49,7 @@
   {% if subs %}
   {% for s in subs %}
   {% set sm = s.ai_summary|fromjson %}
-  {% set sm_acc = accuracy(sm.right|length, sm.partial|length, sm.wrong|length) if sm else '' %}
+  {% set sm_acc = s.accuracy_text or '' %}
   <div class="sub-card">
     {% set sfiles = s.file_path|file_list %}
     {% set sn = subs|length - loop.index0 %}
@@ -67,7 +67,7 @@
     </div>
     {% if sm and revealed %}
     <p class="small">AI 汇总：正确率 <span class="score">{{ sm_acc or '—' }}</span> ·
-      <span class="muted">对 {{ sm.right|length }} 题 · 半对 {{ sm.partial|length }} 题 · 错 {{ sm.wrong|length }} 题{% if sm.unknown %} · 无法判定 {{ sm.unknown|length }} 题{% endif %}</span>
+      <span class="muted">对 {{ s.n_right or 0 }} 个独立批改项 · 半对 {{ s.n_partial or 0 }} · 错 {{ s.n_wrong or 0 }} · 无法判定 {{ s.n_unknown or 0 }}</span>
     </p>
     {% endif %}
     {% if revealed and s.feedback %}<pre class="feedback">{{ s.feedback }}</pre>
@@ -77,24 +77,51 @@
     {% else %}<p class="muted small">老师批阅中，结果暂不公开。</p>{% endif %}
   </div>
   {% endfor %}
-  {% if items %}
-  <h2 style="margin-top:16px">逐题批改明细</h2>
-  {% for q in items %}
-  <div class="qa-item" id="question-{{ q.id }}" tabindex="-1">
-    <strong>第 {{ q.no }} 题</strong>
+   {% if question_groups %}
+   <h2 style="margin-top:16px">逐题批改明细</h2>
+   {% for group in question_groups %}
+   {% if group.grouped %}
+   <details class="student-question-group">
+     <summary>第 {{ group.parent_no }} 题（{{ group.questions|length }} 个小问）</summary>
+     {% if group.parent_stem %}<p class="qa-stem question-stem student-parent-stem">{{ group.parent_stem }}</p>{% endif %}
+     {% for q in group.questions %}
+     <div class="qa-item" id="question-{{ q.id }}" tabindex="-1">
+       <strong>第 {{ q.no }} 小问</strong>
+       {% if q.verdict %}<span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">{{ q.verdict }}</span>{% endif %}
+       {% if q.stem %}<p class="qa-stem question-stem"><span class="muted small">小问题干</span><br>{{ q.stem }}</p>{% endif %}
+       {% if q.ocr_text %}<p class="muted small question-comment">我的作答：{{ q.ocr_text }}</p>{% endif %}
+       {% if q.note %}<span class="question-comment"> — {{ q.note }}</span>{% endif %}
+     </div>
+     {% endfor %}
+   </details>
+   {% else %}
+   {% set q = group.questions[0] %}
+   <div class="qa-item" id="question-{{ q.id }}" tabindex="-1">
+     <strong>第 {{ q.no }} 题</strong>
     {% if q.verdict %}
     <span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">{{ q.verdict }}</span>
     {% endif %}
     {% if q.stem %}<p class="qa-stem question-stem"><span class="muted small">题干</span><br>{{ q.stem }}</p>{% endif %}
     {% if q.ocr_text %}<p class="muted small question-comment">我的作答：{{ q.ocr_text }}</p>{% endif %}
     {% if q.note %}<span class="question-comment"> — {{ q.note }}</span>{% endif %}
-  </div>
-  {% endfor %}
+   </div>
+   {% endif %}
+   {% endfor %}
   {% endif %}
   {% else %}
   <p class="muted">还没有提交记录。</p>
   {% endif %}
 </div>
+
+<script>
+(function () {
+  var target = location.hash ? document.getElementById(location.hash.slice(1)) : null;
+  if (!target) return;
+  var parent = target.closest('.student-question-group');
+  if (parent) parent.open = true;
+  target.scrollIntoView({ block: 'center' });
+})();
+</script>
 
 {% include "_pdf_panel.html" %}
 {% endblock %}

@@ -11,6 +11,87 @@
 {% set all_reviewed = n_total > 0 and n_reviewed == n_total %}
 {% set pdf_files = sub.file_path|file_list %}
 {% set pdf_url = url_for('uploaded_file', filename=pdf_files[0]) %}
+
+{% macro review_item(q, media, verdict_cls, tag_by_key) %}
+<details class="review-item" data-qid="{{ q.id }}">
+  <summary>
+    <span class="q-no">{{ ('第 ' ~ q.no ~ (' 小问' if q.parent_no else ' 题')) if q.no[:1].isdigit() else q.no }}</span>
+    {% for t in tag_by_key.get(q.no) or [] %}<span class="tag tag-knowledge">{{ t }}</span>{% endfor %}
+    {% if q.verdict %}<span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">判定：{{ q.verdict }}</span>{% endif %}
+    {% if q.page_match == 'confirmed' and q.page_no %}
+    <span class="page-chip page-chip-confirmed">原 OCR：PDF 第 {{ q.page_no }} 页</span>
+    {% elif q.page_match in ['uncertain', 'not_found'] %}
+    <span class="page-chip page-chip-uncertain">原 OCR 页码未确认</span>
+    {% elif q.page_no %}<span class="page-chip">历史 OCR 页码：PDF 第 {{ q.page_no }} 页</span>{% endif %}
+    <span class="reviewed-badge{% if not q.reviewed %} is-pending{% endif %}"
+          data-reviewed="{{ 1 if q.reviewed else 0 }}">{{ '✓ 已人工复核' if q.reviewed else '待人工复核' }}</span>
+    <span class="note-preview muted small" data-note-preview>{{ (q.note or '')[:60] }}</span>
+    <span class="save-hint small" data-save-hint style="display:none"></span>
+  </summary>
+  {% if q.stem %}<p class="qa-stem question-stem review-child-stem">{{ q.stem }}</p>{% endif %}
+  <div class="review-pane-tabs" aria-label="本题对照内容"><button type="button" class="ghost" data-review-pane="student" aria-pressed="true">学生作答</button><button type="button" class="ghost" data-review-pane="answer" aria-pressed="false">标准答案</button></div>
+  <div class="review-row" data-pane="student">
+    <div class="review-col" data-pane-col="student">
+      <div class="col-title">学生作答（OCR，可修正）</div>
+      <div class="latex-edit">
+        <textarea name="ocr_{{ q.id }}" rows="7" class="latex-source">{{ q.ocr_text }}</textarea>
+        <div class="latex-preview" tabindex="0" role="button" title="点击编辑" aria-label="学生作答，点击编辑"></div>
+      </div>
+      <div class="field-row">
+        <label>本题判定
+          <select name="verdict_{{ q.id }}" class="small">
+            <option value="" {% if not q.verdict %}selected{% endif %}>（未判定）</option>
+            {% for v in ['对', '半对', '错', '无法判定'] %}
+            <option value="{{ v }}" {% if q.verdict == v %}selected{% endif %}>{{ v }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
+      <label>本题评语 <textarea name="note_{{ q.id }}" rows="2">{{ q.note }}</textarea></label>
+    </div>
+    <div class="review-col" data-pane-col="answer">
+      <div class="col-title">标准答案（可修正）</div>
+      <div class="latex-edit">
+        <textarea name="standard_{{ q.id }}" rows="7" class="latex-source">{{ q.standard_answer }}</textarea>
+        <div class="latex-preview" tabindex="0" role="button" title="点击编辑" aria-label="标准答案，点击编辑"></div>
+      </div>
+      <p class="muted small">如需核对原卷，可展开下方页码对照或点上方「查看原始扫描件」。</p>
+    </div>
+  </div>
+  {% if media.student_url or media.answer_url or media.page_match in ['uncertain', 'not_found'] %}
+  <details class="q-media">
+    <summary>原卷页码对照 <span class="muted small">（学生 PDF / 标准答案 PDF）</span></summary>
+    <div class="q-media-grid">
+      {% if media.student_url %}
+      <div class="q-media-item">
+        <div class="col-title small">学生作答 · PDF 第 {{ media.student_pdf_page }} 页（OCR 全局页码 {{ media.student_page_no }}）</div>
+        <a href="{{ media.student_full_url }}" target="_blank" rel="noopener" class="q-img-link">
+          <img src="{{ media.student_url }}" alt="学生答案 {{ q.no }}" loading="lazy">
+        </a>
+      </div>
+      {% elif media.page_match in ['uncertain', 'not_found'] %}
+      <p class="page-match-warning">AI 未能通过题干比对确认学生作答页；请打开上方原始扫描件人工核对。</p>
+      {% endif %}
+      {% if media.answer_url %}
+      <div class="q-media-item">
+        <div class="col-title small">标准答案 · PDF 第 {{ q.answer_page }} 页</div>
+        <a href="{{ media.answer_full_url }}" target="_blank" rel="noopener" class="q-img-link">
+          <img src="{{ media.answer_url }}" alt="标准答案 {{ q.no }}" loading="lazy">
+        </a>
+      </div>
+      {% endif %}
+    </div>
+  </details>
+  {% endif %}
+  <div class="review-actions">
+    <button type="button" class="small reviewed-toggle{% if q.reviewed %} reviewed-on{% endif %}"
+            data-qid="{{ q.id }}" data-reviewed="{{ 1 if q.reviewed else 0 }}">
+      {% if q.reviewed %}已人工复核 ✓{% else %}标记完成人工复核{% endif %}
+    </button>
+  </div>
+</details>
+{% endmacro %}
+
 <p><a href="{{ url_for('lecture_detail', hid=hw.id) }}">← 返回 {{ hw.title }}</a></p>
 <h1>人工复核：{{ sub.display_name }}</h1>
 <p class="muted">
@@ -20,7 +101,7 @@
   · <a href="{{ url_for('uploaded_file', filename=f) }}" target="_blank">扫描件 {{ loop.index + 1 }}</a>
   {% endfor %}
   {% if n_total %}
-  · 已人工复核 <strong id="reviewed-count">{{ n_reviewed }}</strong>/{{ n_total }} 题
+   · 已人工复核 <strong id="reviewed-count">{{ n_reviewed }}</strong>/{{ n_total }} 个独立批改项
   {% endif %}
 </p>
 
@@ -61,96 +142,25 @@
     <button type="button" data-review-filter="pending" aria-pressed="true">待人工复核</button>
     <button type="button" data-review-filter="all" aria-pressed="false">全部</button>
     <button type="button" data-review-filter="unknown" aria-pressed="false">无法判定</button>
-    <select id="review-jump" class="review-jump" aria-label="跳转到题目">{% for q in questions %}<option value="{{ q.id }}">{{ q.no }} · {{ '已完成' if q.reviewed else '待处理' }}</option>{% endfor %}</select>
+    <select id="review-jump" class="review-jump" aria-label="跳转到题目">{% for q in questions %}<option value="{{ q.id }}">{{ q.no }}{{ ' 小问' if q.parent_no else '' }} · {{ '已完成' if q.reviewed else '待处理' }}</option>{% endfor %}</select>
     <span id="review-filter-status" class="muted small" role="status"></span>
   </div>
   <form method="post" action="{{ url_for('submission_review_save', sid=sub.id) }}"
         id="review-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    {% for q in questions %}
-    <details class="review-item" data-qid="{{ q.id }}">
-      <summary>
-        <span class="q-no">{{ ('第 ' ~ q.no ~ ' 题') if q.no[:1].isdigit() else q.no }}</span>
-        {% for t in tag_by_key.get(q.no) or [] %}<span class="tag tag-knowledge">{{ t }}</span>{% endfor %}
-        {% if q.verdict %}
-        <span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">判定：{{ q.verdict }}</span>
-        {% endif %}
-        {% if q.page_match == 'confirmed' and q.page_no %}
-        <span class="page-chip page-chip-confirmed">原 OCR：PDF 第 {{ q.page_no }} 页</span>
-        {% elif q.page_match in ['uncertain', 'not_found'] %}
-        <span class="page-chip page-chip-uncertain">原 OCR 页码未确认</span>
-        {% elif q.page_no %}
-        <span class="page-chip">历史 OCR 页码：PDF 第 {{ q.page_no }} 页</span>
-        {% endif %}
-        <span class="reviewed-badge{% if not q.reviewed %} is-pending{% endif %}"
-              data-reviewed="{{ 1 if q.reviewed else 0 }}">{{ '✓ 已人工复核' if q.reviewed else '待人工复核' }}</span>
-        <span class="note-preview muted small" data-note-preview>{{ (q.note or '')[:60] }}</span>
-        <span class="save-hint small" data-save-hint style="display:none"></span>
-      </summary>
-      <div class="review-pane-tabs" aria-label="本题对照内容"><button type="button" class="ghost" data-review-pane="student" aria-pressed="true">学生作答</button><button type="button" class="ghost" data-review-pane="answer" aria-pressed="false">标准答案</button></div>
-      <div class="review-row" data-pane="student">
-        <div class="review-col" data-pane-col="student">
-          <div class="col-title">学生作答（OCR，可修正）</div>
-          <div class="latex-edit">
-            <textarea name="ocr_{{ q.id }}" rows="7" class="latex-source">{{ q.ocr_text }}</textarea>
-            <div class="latex-preview" tabindex="0" role="button"
-                 title="点击编辑" aria-label="学生作答，点击编辑"></div>
-          </div>
-          <div class="field-row">
-            <label>本题判定
-              <select name="verdict_{{ q.id }}" class="small">
-                <option value="" {% if not q.verdict %}selected{% endif %}>（未判定）</option>
-                {% for v in ['对', '半对', '错', '无法判定'] %}
-                <option value="{{ v }}" {% if q.verdict == v %}selected{% endif %}>{{ v }}</option>
-                {% endfor %}
-              </select>
-            </label>
-          </div>
-          <label>本题评语 <textarea name="note_{{ q.id }}" rows="2">{{ q.note }}</textarea></label>
-        </div>
-        <div class="review-col" data-pane-col="answer">
-          <div class="col-title">标准答案（可修正）</div>
-          <div class="latex-edit">
-            <textarea name="standard_{{ q.id }}" rows="7" class="latex-source">{{ q.standard_answer }}</textarea>
-            <div class="latex-preview" tabindex="0" role="button"
-                 title="点击编辑" aria-label="标准答案，点击编辑"></div>
-          </div>
-          <p class="muted small">如需核对原卷，可展开下方页码对照或点上方「查看原始扫描件」。</p>
-        </div>
-      </div>
-      {% set media = q_media[loop.index0] if q_media|length > loop.index0 else {} %}
-      {% if media.student_url or media.answer_url or media.page_match in ['uncertain', 'not_found'] %}
-      <details class="q-media">
-        <summary>原卷页码对照 <span class="muted small">（学生 PDF / 标准答案 PDF）</span></summary>
-        <div class="q-media-grid">
-          {% if media.student_url %}
-          <div class="q-media-item">
-            <div class="col-title small">学生作答 · PDF 第 {{ media.student_pdf_page }} 页（OCR 全局页码 {{ media.student_page_no }}）</div>
-            <a href="{{ media.student_full_url }}" target="_blank" rel="noopener" class="q-img-link">
-              <img src="{{ media.student_url }}" alt="学生答案 {{ q.no }}" loading="lazy">
-            </a>
-          </div>
-          {% elif media.page_match in ['uncertain', 'not_found'] %}
-          <p class="page-match-warning">AI 未能通过题干比对确认学生作答页；请打开上方原始扫描件人工核对。</p>
-          {% endif %}
-          {% if media.answer_url %}
-          <div class="q-media-item">
-            <div class="col-title small">标准答案 · PDF 第 {{ q.answer_page }} 页</div>
-            <a href="{{ media.answer_full_url }}" target="_blank" rel="noopener" class="q-img-link">
-              <img src="{{ media.answer_url }}" alt="标准答案 {{ q.no }}" loading="lazy">
-            </a>
-          </div>
-          {% endif %}
-        </div>
-      </details>
-      {% endif %}
-      <div class="review-actions">
-        <button type="button" class="small reviewed-toggle{% if q.reviewed %} reviewed-on{% endif %}"
-                data-qid="{{ q.id }}" data-reviewed="{{ 1 if q.reviewed else 0 }}">
-          {% if q.reviewed %}已人工复核 ✓{% else %}标记完成人工复核{% endif %}
-        </button>
-      </div>
+    {% for group in question_groups %}
+    {% if group.grouped %}
+    <details class="review-parent" data-parent-no="{{ group.parent_no }}">
+      <summary>第 {{ group.parent_no }} 题（{{ group.questions|length }} 个独立小问）</summary>
+      {% if group.parent_stem %}<div class="question-stem review-parent-stem">{{ group.parent_stem }}</div>{% endif %}
+      {% for q in group.questions %}
+      {{ review_item(q, q_media_by_id.get(q.id|string) or {}, verdict_cls, tag_by_key) }}
+      {% endfor %}
     </details>
+    {% else %}
+    {% set q = group.questions[0] %}
+    {{ review_item(q, q_media_by_id.get(q.id|string) or {}, verdict_cls, tag_by_key) }}
+    {% endif %}
     {% endfor %}
 
     <div class="save-bar">
@@ -405,6 +415,8 @@
           var target = nextUnreviewed(card);
           if (target) {
             target.hidden = false;
+            var parent = target.closest('.review-parent');
+            if (parent) { parent.hidden = false; parent.open = true; }
             target.open = true;
             target.scrollIntoView({ behavior: 'smooth', block: 'start' });
           }

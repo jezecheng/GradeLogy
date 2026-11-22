@@ -8,7 +8,7 @@
 <h1>{{ hw.title }}</h1>
 <p class="muted">讲次{% if hw.deadline %} · 截止 {{ hw.deadline|legacytime }}{% endif %}{% if hw.description %} · {{ hw.description }}{% endif %}</p>
 
-<div class="ui-summary"><span>提交 {{ subs|length }} / {{ students|length }}</span><span>{{ "标准答案已上传" if hw.answer_pdf else "待上传标准答案" }}</span><span>{{ "已选 " ~ chosen|length ~ " 题" if chosen else "待划定范围" }}</span></div>
+<div class="ui-summary"><span>提交 {{ subs|length }} / {{ students|length }}</span><span>{{ "标准答案已上传" if hw.answer_pdf else "待上传标准答案" }}</span><span>{{ "已选 " ~ scope_item_count ~ " 个批改项" if chosen else "待划定范围" }}</span></div>
 <div class="card">
   <div class="card-head">
     <h2>提交与批阅（{{ subs|length }} 份）</h2>
@@ -196,10 +196,15 @@
     需要在「AI 设置」里选择支持图片输入的多模态模型。</p>
   <dialog id="answer-pdf-dialog" class="modal">
     <h2>{{ '更换标准答案' if hw.answer_pdf else '上传标准答案' }}</h2>
-    <p class="muted small">答案只用于 AI 批阅对照，学生端不可见。</p>
-    <form method="post" action="{{ url_for('lecture_answer', hid=hw.id) }}"
-          enctype="multipart/form-data" class="stack-form">
-      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <p class="muted small">答案只用于 AI 批阅对照，学生端不可见。</p>
+      <form method="post" action="{{ url_for('lecture_answer', hid=hw.id) }}"
+            enctype="multipart/form-data" class="stack-form answer-pdf-form"
+            data-graded-submissions="{{ scope_reset_impact.graded or 0 }}"
+            data-reset-required="{{ 1 if scope_reset_impact.has_derived else 0 }}"
+            data-reset-tags="{{ scope_reset_impact.tags or 0 }}"
+            data-reset-analyses="{{ scope_reset_impact.analyses or 0 }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <input type="hidden" name="confirm_scope_reset" value="">
       <label>选择 PDF 文件 <input type="file" name="answer_pdf" accept=".pdf" required></label>
       <div class="modal-actions">
         <button type="button" class="ghost" data-dialog-close>取消</button>
@@ -213,7 +218,7 @@
   <summary class="card-head">
     <h2>作业范围</h2>
     <span class="muted small scope-summary">
-      {% if chosen %}已选 {{ chosen|length }} 题
+      {% if chosen %}已选 {{ scope_item_count }} 个批改项
       {% elif cands %}未划定，AI 批阅不可用
       {% else %}未生成题目清单{% endif %}{% if answer_picked %} · 答案 {{ answer_picked|length }}/{{ answer_total }} 页{% endif %}
     </span>
@@ -240,8 +245,13 @@
     <p class="muted small">学生交的是哪几页，这里就只勾哪几页；未勾选任何页码时使用整份答案。
       保存后立即用这些页生成题目清单，同时也用于 AI 批阅；只发送相关页可以明显减少图片数量与 token 消耗。</p>
     <form method="post" action="{{ url_for('lecture_answer_pages', hid=hw.id) }}" id="page-form"
-          data-has-result="{{ '1' if cands else '0' }}">
+          data-has-result="{{ '1' if cands else '0' }}"
+          data-graded-submissions="{{ scope_reset_impact.graded or 0 }}"
+          data-reset-required="{{ 1 if scope_reset_impact.has_derived else 0 }}"
+          data-reset-tags="{{ scope_reset_impact.tags or 0 }}"
+          data-reset-analyses="{{ scope_reset_impact.analyses or 0 }}">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <input type="hidden" name="confirm_scope_reset" value="">
       <div class="page-tools">
         <input type="text" id="page-range" placeholder="例如 1-5, 8, 10-12" style="max-width:220px">
         <button type="button" class="small ghost" id="page-apply">按范围勾选</button>
@@ -269,25 +279,39 @@
 
   {% if cands %}
   <table>
-    <tr><th style="width:40px">#</th><th style="width:60px">选中</th><th>题号</th><th>题干</th><th>说明</th><th>知识点标签</th></tr>
+    <tr><th style="width:40px">#</th><th style="width:60px">选中</th><th>题号</th><th>题干/小问</th><th>说明</th><th>知识点标签</th></tr>
     {% for q in cands %}
     {% set qkey = q.key or q.no %}
+    {% set parts = q.subquestions or [] %}
     {% set qtags = tag_by_key.get(qkey) or [] %}
-    <tr>
+    {% set parent_selected = namespace(value=(not chosen or qkey in chosen)) %}
+    {% if chosen and parts %}
+      {% set selected_children = namespace(count=0) %}
+      {% for part in parts %}
+        {% set part_key = part.key or (qkey ~ '.' ~ loop.index) %}
+        {% if part_key in chosen %}{% set selected_children.count = selected_children.count + 1 %}{% endif %}
+      {% endfor %}
+      {% if selected_children.count == parts|length %}{% set parent_selected.value = true %}{% endif %}
+    {% endif %}
+    <tr class="scope-parent-row">
       <td class="muted">{{ loop.index }}</td>
-      <td><input type="checkbox" name="no" value="{{ qkey }}" form="scope-form" style="width:auto"
-                 {% if not chosen or qkey in chosen %}checked{% endif %}></td>
+      <td><input type="checkbox" name="no" value="{{ qkey }}" form="scope-form"
+                 data-scope-parent="1" data-parent-key="{{ qkey }}"
+                 data-scope-count-item="{{ '0' if parts else '1' }}" style="width:auto"
+                 {% if parent_selected.value %}checked{% endif %}></td>
       <td>{{ q.no }}</td>
       <td>
         {% if q.stem %}
         <details class="stem-details">
-          <summary class="small">查看题干</summary>
+          <summary class="small">{{ '母题题干' if parts else '查看题干' }}</summary>
           <div class="question-stem">{{ q.stem }}</div>
         </details>
         {% else %}<span class="muted">—</span>{% endif %}
       </td>
-      <td class="muted">{{ q.hint or '—' }}</td>
+      <td class="muted">{{ (parts|length ~ ' 个独立小问') if parts else (q.hint or '—') }}</td>
       <td>
+        {% if parts %}<span class="muted small">标签在各小问下单独维护</span>
+        {% else %}
         <div class="tag-list">
           {% for t in qtags %}<span class="tag tag-knowledge">{{ t }}</span>{% endfor %}
           {% if not qtags %}<span class="muted small">未标注</span>{% endif %}
@@ -304,17 +328,56 @@
           </form>
           <span class="muted small">改动会整体覆盖该题标签；清空后保存即删除全部标签。手动标签不会被 AI 重新标注覆盖。</span>
         </details>
+        {% endif %}
+      </td>
+    </tr>
+    {% for part in parts %}
+    {% set part_key = part.key or (qkey ~ '.' ~ loop.index) %}
+    {% set part_tags = tag_by_key.get(part_key) or [] %}
+    <tr class="scope-child-row" data-parent-row="{{ qkey }}">
+      <td></td>
+      <td><input type="checkbox" name="no" value="{{ part_key }}" form="scope-form"
+                 data-scope-child="1" data-parent-key="{{ qkey }}"
+                 data-scope-count-item="1" style="width:auto"
+                 {% if not chosen or qkey in chosen or part_key in chosen %}checked{% endif %}></td>
+      <td>{{ part.no }}</td>
+      <td><div class="scope-child-stem">{{ part.stem or '（未提取到小问题干）' }}</div></td>
+      <td class="muted">{{ part.hint or '—' }}</td>
+      <td>
+        <div class="tag-list">
+          {% for t in part_tags %}<span class="tag tag-knowledge">{{ t }}</span>{% endfor %}
+          {% if not part_tags %}<span class="muted small">未标注</span>{% endif %}
+        </div>
+        <details class="tag-editor">
+          <summary class="small">编辑标签</summary>
+          <form method="post" action="{{ url_for('lecture_tag_save', hid=hw.id) }}" class="tag-edit-form">
+            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+            <input type="hidden" name="question_key" value="{{ part_key }}">
+            <input type="hidden" name="question_no" value="{{ part.no }}">
+            <input type="text" name="tags" value="{{ part_tags|join('，') }}"
+                   placeholder="用逗号分隔知识点标签" aria-label="第 {{ part.no }} 小问的知识点标签">
+            <button type="submit" class="small">保存</button>
+          </form>
+          <span class="muted small">标签按小问独立保存；AI 标注会结合母题题干和本小问内容。</span>
+        </details>
       </td>
     </tr>
     {% endfor %}
+    {% endfor %}
   </table>
-  <form method="post" action="{{ url_for('lecture_scope_save', hid=hw.id) }}" id="scope-form">
+  <form method="post" action="{{ url_for('lecture_scope_save', hid=hw.id) }}" id="scope-form"
+        data-graded-submissions="{{ scope_reset_impact.graded or 0 }}"
+        data-reset-required="{{ 1 if scope_reset_impact.has_derived else 0 }}"
+        data-scope-selected="{{ chosen|tojson|forceescape }}"
+        data-reset-tags="{{ scope_reset_impact.tags or 0 }}"
+        data-reset-analyses="{{ scope_reset_impact.analyses or 0 }}">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <input type="hidden" name="confirm_scope_reset" value="">
     <div class="save-bar">
       <button type="submit">保存作业范围</button>
       <button type="button" class="small ghost" data-scope-all="1">全选</button>
       <button type="button" class="small ghost" data-scope-all="0">全不选</button>
-      <span class="muted small">至少勾选一道题；当前已选 <b id="scope-count">{{ cands|length if not chosen else chosen|length }}</b> 题 ·
+      <span class="muted small">至少勾选一道独立批改项；母题勾选可全选其小问。当前已选 <b id="scope-count">{{ scope_item_count }}</b> 项 ·
         保存范围只影响 AI 批阅题目，不会调用 AI 或生成标签</span>
     </div>
   </form>
@@ -386,8 +449,11 @@
       </button>
     </form>
   </div>
-  <p class="muted small">基于「作业范围」中每道题的知识点标签与全班逐题判定，横向找出同学们普遍薄弱的知识点，
-    并给出下次课的教学建议。需要先保存作业范围并完成 AI 批阅。</p>
+  <p class="muted small">基于作业范围题目的知识点标签与已有全班逐题判定，横向找出同学们普遍薄弱的知识点并给出教学建议。
+    需要先保存作业范围、生成标签，并至少有一道题已有判定。</p>
+  <p class="muted small">标签后的数字为「需关注判定数 / 已判定记录数」：分子是错 + 半对，分母是对、半对、错、无法判定之和；空白判定不计。
+    例如 <b>1/2</b> 表示两条关联判定中有一条为错或半对；<b>0/1</b> 不代表一定全对（也可能是无法判定）。悬停可查看关联题号和对/半对/错数量。</p>
+  <p class="muted small">标签统计直接由逐题数据汇总；点击「分析知识点」才会另行调用 AI 生成全班共性问题和教学建议。</p>
   {% if tag_stats %}
   <div class="chips">
     {% for t in tag_stats %}
@@ -397,7 +463,7 @@
     {% endfor %}
   </div>
   {% elif cands and chosen %}
-  <p class="muted small">本讲还没有知识点标签。保存一次作业范围即可自动生成。</p>
+  <p class="muted small">本讲还没有知识点标签。请在「作业范围」单独点击「生成/重新生成知识点标签」；保存作业范围不会自动生成标签。</p>
   {% endif %}
   {% if tag_analysis %}
   <div style="margin-top:12px; padding-top:12px; border-top:1px dashed #eef0f3">
@@ -470,8 +536,23 @@
     dlg.addEventListener('click', function (e) { if (e.target === dlg) dlg.close(); });
     var form = dlg.querySelector('form');
     if (form && form.enctype === 'multipart/form-data') {
-      form.addEventListener('submit', function () {
+      form.addEventListener('submit', function (e) {
         var btn = form.querySelector('button[type="submit"]');
+        var graded = Number(form.dataset.gradedSubmissions || 0);
+        var confirmation = form.querySelector('[name="confirm_scope_reset"]');
+        if (form.dataset.resetRequired === '1' && confirmation && confirmation.value !== '1') {
+          e.preventDefault();
+          confirmDialog('更换教师版答案将清除本讲 ' + graded +
+            ' 份旧批阅、报告和逐题复习记录、' + (form.dataset.resetTags || '0') +
+            ' 个旧标签及相关分析，并重算相关错题/薄弱点。学生原始提交文件会保留。确认更换吗？',
+            '确认更换并清理').then(function (ok) {
+            if (!ok) return;
+            confirmation.value = '1';
+            if (btn) busyOn(btn, '上传中…');
+            form.submit();
+          });
+          return;
+        }
         if (btn && !btn.disabled) { btn.disabled = true; btn.textContent = '上传中…'; }
       });
     }
@@ -516,7 +597,9 @@
     boxes.forEach(function (b) { if (b.checked) n += 1; });
     if (counter) counter.textContent = n;
   }
-  boxes.forEach(function (b) { b.addEventListener('change', refresh); });
+  boxes.forEach(function (b) {
+    if (!b.dataset.scopeParent) b.addEventListener('change', refresh);
+  });
 
   form.querySelectorAll('[data-page-all]').forEach(function (btn) {
     btn.addEventListener('click', function () {
@@ -553,13 +636,20 @@
     if (hint) hint.hidden = false;
   }
   form.addEventListener('submit', function (e) {
-    // 已有题目清单时，重新保存页码会覆盖清单并清空已选范围，先确认
-    if (form.dataset.hasResult === '1' && form.dataset.confirmed !== '1') {
+    var graded = Number(form.dataset.gradedSubmissions || 0);
+    var shouldConfirm = form.dataset.resetRequired === '1' || form.dataset.hasResult === '1';
+    if (shouldConfirm && form.dataset.confirmed !== '1') {
       e.preventDefault();
-      confirmDialog('保存后会立即重新生成题目清单，已勾选的作业范围需要重新确认，确定继续吗？',
-                    '保存并生成').then(function (ok) {
+      var message = form.dataset.resetRequired === '1'
+        ? '重新提取题目清单将清除本讲 ' + graded +
+          ' 份旧批阅、报告和逐题复习记录、' + (form.dataset.resetTags || '0') +
+          ' 个旧标签及相关分析，并重算相关错题/薄弱点。学生原始提交文件会保留；新题目清单生成后需重新选择范围。'
+        : '重新保存页码会生成新的题目清单，已选作业范围需要重新确认。确定继续吗？';
+      confirmDialog(message, form.dataset.resetRequired === '1' ? '确认重提并清理旧结果' : '保存并生成').then(function (ok) {
         if (!ok) return;
         form.dataset.confirmed = '1';
+        var confirmation = form.querySelector('[name="confirm_scope_reset"]');
+        if (confirmation) confirmation.value = '1';
         start();
         form.submit();
       });
@@ -574,13 +664,31 @@
   if (!form) return;
   // 勾选框用 form="scope-form" 关联到下方表单（表格内不能嵌套 form）
   var boxes = document.querySelectorAll('input[name="no"][form="scope-form"]');
+  var countBoxes = document.querySelectorAll(
+    'input[name="no"][form="scope-form"][data-scope-count-item="1"]');
   var counter = document.getElementById('scope-count');
   function refresh() {
     var n = 0;
-    boxes.forEach(function (b) { if (b.checked) n += 1; });
+    countBoxes.forEach(function (b) { if (b.checked) n += 1; });
+    document.querySelectorAll('[data-scope-parent="1"]').forEach(function (parent) {
+      var children = document.querySelectorAll(
+        '[data-scope-child="1"][data-parent-key="' + parent.dataset.parentKey + '"]');
+      if (!children.length) return;
+      var selected = Array.from(children).filter(function (child) { return child.checked; }).length;
+      parent.checked = selected === children.length;
+      parent.indeterminate = selected > 0 && selected < children.length;
+    });
     if (counter) counter.textContent = n;
   }
   boxes.forEach(function (b) { b.addEventListener('change', refresh); });
+  document.querySelectorAll('[data-scope-parent="1"]').forEach(function (parent) {
+    parent.addEventListener('change', function () {
+      var children = document.querySelectorAll(
+        '[data-scope-child="1"][data-parent-key="' + parent.dataset.parentKey + '"]');
+      children.forEach(function (child) { child.checked = parent.checked; });
+      refresh();
+    });
+  });
   form.querySelectorAll('[data-scope-all]').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var on = btn.dataset.scopeAll === '1';
@@ -588,9 +696,50 @@
       refresh();
     });
   });
-  form.addEventListener('submit', function () {
+  function selectedKeys() {
+    var selected = [];
+    document.querySelectorAll('[data-scope-parent="1"]').forEach(function (parent) {
+      var children = document.querySelectorAll(
+        '[data-scope-child="1"][data-parent-key="' + parent.dataset.parentKey + '"]');
+      if (!children.length) {
+        if (parent.checked) selected.push(parent.value);
+      } else if (parent.checked) {
+        selected.push(parent.value);
+      } else {
+        children.forEach(function (child) { if (child.checked) selected.push(child.value); });
+      }
+    });
+    return selected.sort();
+  }
+  function selectionChanged() {
+    var previous = [];
+    try { previous = JSON.parse(form.dataset.scopeSelected || '[]'); } catch (e) {}
+    previous = previous.map(String).sort();
+    var current = selectedKeys();
+    return previous.length !== current.length || previous.some(function (key, i) {
+      return key !== current[i];
+    });
+  }
+  form.addEventListener('submit', function (e) {
+    var graded = Number(form.dataset.gradedSubmissions || 0);
+    var confirmation = form.querySelector('[name="confirm_scope_reset"]');
+    if (selectionChanged() && form.dataset.resetRequired === '1' &&
+        confirmation && confirmation.value !== '1') {
+      e.preventDefault();
+      confirmDialog('修改作业范围将清除本讲 ' + graded +
+        ' 份旧批阅、报告和逐题复习记录、' + (form.dataset.resetTags || '0') +
+        ' 个旧标签及相关分析，并重算相关错题/薄弱点。学生原始提交文件会保留。确认修改吗？',
+        '确认修改并清理').then(function (ok) {
+        if (!ok) return;
+        confirmation.value = '1';
+        busyOn(form.querySelector('button[type="submit"]'), '保存中…');
+        form.submit();
+      });
+      return;
+    }
     busyOn(form.querySelector('button[type="submit"]'), '保存中…');
   });
+  refresh();
 })();
 // 知识点标签与分析：都会调用 AI，按钮进入处理中状态；已有结果时覆盖先确认
 (function () {
