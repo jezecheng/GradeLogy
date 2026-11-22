@@ -27,6 +27,8 @@
   </button>
 
   <section class="assistant-panel" id="assistant-panel" hidden aria-label="{{ _label }}">
+    <div class="assistant-resize" id="assistant-resize" role="separator"
+         aria-label="拖动调整对话框大小" title="拖动调整大小"></div>
     <header class="assistant-head">
       <div class="assistant-title">
         <strong>{{ _label }}</strong>
@@ -37,6 +39,8 @@
         </span>
       </div>
       <div class="assistant-head-actions">
+        <button type="button" class="btn-link" id="assistant-font"
+                aria-label="调整字号" title="点击切换字号">字号 14</button>
         <button type="button" class="btn-link" id="assistant-reset">新对话</button>
         <button type="button" class="btn-link" id="assistant-close">收起</button>
       </div>
