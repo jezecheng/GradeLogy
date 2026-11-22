@@ -1,6 +1,6 @@
 # UX 改进计划：代码核对与复现评估
 
-- **状态：** `in progress`（UX-07 已完成；其余 UX 条目仍待实施）
+- **状态：** `completed`（UX-01 至 UX-07 均有完成状态与验收记录）
 - **评估日期：** 2026-11-22
 - **代码基线：** `3d7de3f`（本地 `main` 与预生产登录页显示的 commit 一致）
 - **输入计划：** [`ux-improvement-plan.md`](ux-improvement-plan.md)，由用户上传文档原样复制；SHA-256 与上传文件一致。
@@ -61,7 +61,9 @@
 | UX-04 准备范围可靠性 | `2f02351` | `tests.test_lecture_preparation`、标签路由回归；旧的“范围保存自动标注”断言已改为不触发 AI |
 | UX-06 登录帮助 | `f2b4a64` | `tests.test_login_help`、会话与认证回归 |
 
-主工作区在此基础上实现 UX-05 (`332ccd9`) 与 UX-03，并补充异步标签任务过期保护及旧测试预期更新。最终集成提交为 `64b49f3`。全套测试 **294 项通过**；Python compile、JS syntax、`pip check`、`git diff --check` 均通过。所有测试仅使用临时/合成数据并 mock AI。
+主工作区在此基础上实现 UX-05 (`332ccd9`) 与 UX-03，并补充异步标签任务过期保护及旧测试预期更新。最终集成提交为 `64b49f3`，交付状态记录提交为 `9783654`。全套测试 **294 项通过**；Python compile、JS syntax、`pip check`、`git diff --check` 均通过。所有测试仅使用临时/合成数据并 mock AI。
+
+最终交付已推送至 `origin/main`；由于 main push workflow 可自动部署，部署由工作流触发，**本评估没有确认 GitHub Actions/生产健康检查结果**。
 
 ## 建议的代码修改计划
 

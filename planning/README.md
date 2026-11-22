@@ -17,5 +17,5 @@ Do not mark a plan completed merely because code changes are present. Update the
 | Document | Status | Source / notes |
 | --- | --- | --- |
 | [UX improvement plan](ux-improvement-plan.md) | analysis | Uploaded source copied verbatim; validate every claim against the current checkout before implementation. |
-| [Code and UX assessment](ux-improvement-assessment.md) | in progress | Current-code audit, local/preproduction reproduction notes, sub-agent review, and implementation status. |
-| [Implementation plan](implementation-plan-2026-11-22.md) | in progress | Workstreams, sub-agent boundaries, integration order, tests, and push/deployment gate. |
+| [Code and UX assessment](ux-improvement-assessment.md) | completed | Current-code audit, local/preproduction reproduction notes, sub-agent review, and implementation status. |
+| [Implementation plan](implementation-plan-2026-11-22.md) | completed | Workstreams, parallel sub-agent integration, test results, and delivery record. |

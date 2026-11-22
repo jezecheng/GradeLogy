@@ -1,6 +1,6 @@
 # UX 改进实施计划
 
-- **状态：** `in progress`
+- **状态：** `completed`
 - **基线：** `3d7de3f`
 - **主计划：** [`ux-improvement-plan.md`](ux-improvement-plan.md)
 - **代码核对：** [`ux-improvement-assessment.md`](ux-improvement-assessment.md)
@@ -20,7 +20,7 @@
 | 2 | UX-05 考试状态 | 主工作区串行实施 | `db.py` 幂等迁移、考试录入/学生显示、零分/仅评语/缺考测试、老师/学生手册 | `completed` |
 | 3 | UX-03 近期截止列表 | 主工作区串行实施 | 学生路由和首页、时区/提交状态/权限/窄屏相关测试、学生手册 | `completed` |
 | 4 | UX-02 发布状态核验 | 已审计 | 现有状态呈现及后端门槛符合计划；保留独立发布，相关回归测试通过 | `completed` |
-| 5 | 总体验收、提交、推送 | 主代理 | 全量回归/差异检查已通过，本地集成提交 `64b49f3` 已完成；推送等待自动部署授权 | `awaiting authorization` |
+| 5 | 总体验收、提交、推送 | 主代理 | 全量回归/差异检查已通过，完整交付已推送至 `origin/main`；main push 已触发自动部署 workflow，部署结果未核验 | `completed` |
 
 ## Worktree 协作规则
 
@@ -33,12 +33,12 @@
 
 1. 在主工作区从干净差异核对完整 UX 变更；运行 `.venv/bin/python -m unittest discover -s tests -v`、`.venv/bin/python -m pip check`、`node --check static/session_timeout.js` 及 `git diff --check`。
 2. 更新 [`ux-improvement-assessment.md`](ux-improvement-assessment.md) 的逐项状态、实现证据和测试结果；仅把验收完成的项目标为 `completed`。
-3. 检查 `.github/workflows/` 与仓库分支保护/发布路径。若推送 `main` 会自动部署生产，先向用户确认部署窗口/目标；未确认前不推送会触发部署的分支。
-4. 所有测试通过后在本地提交集成变更；仅推送到用户确认的远端与分支，不自动部署、不创建 PR，除非用户另行要求。
+3. 已核对 `.github/workflows/deploy.yml`；用户明确授权推送 `main` 并接受其自动部署副作用。
+4. 已把全量测试通过的集成提交推送至 `origin/main`；部署工作流结果未在本次核验，不将推送等同于部署成功。
 
 ## 当前集成结果
 
-- 主分支本地集成提交：`64b49f3` (`feat: complete remaining UX improvement workstreams`)
+- 主分支最终提交：`9783654` (`docs: record UX implementation and validation`)，包含集成提交 `64b49f3`。
 - 验证：全套 `unittest` 294 项通过；Python compile、`node --check static/session_timeout.js`、`pip check`、`git diff --check` 均通过。
-- 当前本地 `main` 比 `origin/main` 超前 6 个提交；尚未推送。
-- `main` 的 push workflow 会尝试自动部署；是否执行 push 需按发布门槛确认。
+- 本地 `main` 与 `origin/main` 已同步，工作区干净。
+- `main` push 已触发自动部署 workflow；部署结果需在 GitHub Actions / 服务器健康检查中另行确认。
