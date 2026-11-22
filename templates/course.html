@@ -8,6 +8,13 @@
   border: 1px solid #eef0f3; border-radius: 10px; padding: 8px 10px; }
 .kg-assign-item input { margin-top: 3px; }
 .kg-assign-item strong { font-weight: 600; }
+.enrollment-candidates { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 6px 12px; max-height: 340px; overflow: auto; margin: 10px 0; }
+.enrollment-candidate { display: flex; gap: 8px; align-items: flex-start;
+  border: 1px solid #eef0f3; border-radius: 8px; padding: 8px 10px; }
+.enrollment-candidate input { margin-top: 3px; }
+.enrollment-confirm { border: 1px solid #d8dee8; border-radius: 10px; padding: 12px; margin: 12px 0; }
+.enrollment-confirm-list { max-height: 180px; overflow: auto; }
 </style>
 <p><a href="{{ url_for('courses') }}">← 返回课程列表</a></p>
 <div class="card-head">
@@ -109,16 +116,35 @@
 <div class="card">
   <h2>学生名单（{{ students|length }}）</h2>
   <div class="ui-filter"><label>查找学生<input type="search" placeholder="姓名、账号或学籍号" data-filter="#course-students [data-student-row]" data-filter-status="student-filter-status"></label><span id="student-filter-status" role="status" class="muted small"></span></div>
-  <form method="post" action="{{ url_for('course_enroll', cid=course.id) }}" class="inline-form">
+  {% if candidates %}
+  <form id="bulk-enroll-form" method="post" action="{{ url_for('course_enroll', cid=course.id) }}">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <select name="student_id" required>
-      <option value="">从学生账号中选择…</option>
+    <div class="ui-filter"><label>搜索可加入学生<input id="enrollment-search" type="search" placeholder="姓名、用户名或学籍号" autocomplete="off"></label></div>
+    <p id="enrollment-selection-status" role="status" aria-live="polite" class="muted small">尚未选择学生；未默认勾选任何人。</p>
+    <div id="enrollment-candidates" class="enrollment-candidates" aria-label="可加入课程的学生">
       {% for s in candidates %}
-      <option value="{{ s.id }}">{{ s.display_name }}（{{ s.username }}{% if s.student_no %} · {{ s.student_no }}{% endif %}）</option>
+      <label class="enrollment-candidate" data-enrollment-candidate data-search="{{ s.display_name }} {{ s.username }} {{ s.student_no or '' }}">
+        <input type="checkbox" name="student_ids" value="{{ s.id }}">
+        <span>{{ s.display_name }}（{{ s.username }}{% if s.student_no %} · {{ s.student_no }}{% endif %}）</span>
+      </label>
       {% endfor %}
-    </select>
-    <button type="submit">加入课程</button>
+    </div>
+    <div class="inline-form">
+      <button id="review-enrollment-selection" type="button" disabled>检查所选名单</button>
+      <span class="muted small">搜索只筛选显示项，不会更改已勾选的学生。</span>
+    </div>
+    <section id="enrollment-confirmation" class="enrollment-confirm" hidden aria-labelledby="enrollment-confirmation-title">
+      <h3 id="enrollment-confirmation-title">确认加入以下学生</h3>
+      <p id="enrollment-confirmation-count" role="status"></p>
+      <ul id="enrollment-confirmation-list" class="enrollment-confirm-list"></ul>
+      <p class="muted small">仅新增本课程的选课关系；不会更改成绩、提交或其他课程数据。</p>
+      <div class="inline-form">
+        <button id="confirm-enrollment" type="submit">确认加入所选学生</button>
+        <button id="edit-enrollment-selection" type="button" class="ghost">返回修改</button>
+      </div>
+    </section>
   </form>
+  {% endif %}
   {% if not candidates %}<p class="muted">没有可添加的学生账号。学生账号由管理员在「用户管理」里创建并启用后，才会出现在这里。</p>{% endif %}
   {% if students %}
   <table>
@@ -378,6 +404,70 @@
 {% include "_pdf_panel.html" %}
 <script>
 (function () {
+  var form = document.getElementById('bulk-enroll-form');
+  if (form) {
+    var search = document.getElementById('enrollment-search');
+    var candidates = Array.prototype.slice.call(form.querySelectorAll('[data-enrollment-candidate]'));
+    var status = document.getElementById('enrollment-selection-status');
+    var review = document.getElementById('review-enrollment-selection');
+    var confirmation = document.getElementById('enrollment-confirmation');
+    var confirmationCount = document.getElementById('enrollment-confirmation-count');
+    var confirmationList = document.getElementById('enrollment-confirmation-list');
+    var confirmButton = document.getElementById('confirm-enrollment');
+    var editButton = document.getElementById('edit-enrollment-selection');
+    var confirmed = false;
+
+    function selectedCandidates() {
+      return candidates.filter(function (item) {
+        return item.querySelector('input[type="checkbox"]').checked;
+      });
+    }
+    function updateSelection() {
+      var selected = selectedCandidates();
+      status.textContent = selected.length ? '已选择 ' + selected.length + ' 名学生。'
+        : '尚未选择学生；未默认勾选任何人。';
+      review.disabled = selected.length === 0;
+      confirmationCount.textContent = '当前选中 ' + selected.length + ' 人：';
+      confirmationList.replaceChildren();
+      selected.forEach(function (item) {
+        var li = document.createElement('li');
+        li.textContent = item.querySelector('span').textContent;
+        confirmationList.appendChild(li);
+      });
+    }
+    search.addEventListener('input', function () {
+      var query = search.value.trim().toLocaleLowerCase();
+      candidates.forEach(function (item) {
+        item.hidden = query && !item.dataset.search.toLocaleLowerCase().includes(query);
+      });
+    });
+    form.addEventListener('change', function (event) {
+      if (event.target.matches('input[type="checkbox"]')) updateSelection();
+    });
+    review.addEventListener('click', function () {
+      updateSelection();
+      if (selectedCandidates().length) confirmation.hidden = false;
+    });
+    editButton.addEventListener('click', function () {
+      confirmation.hidden = true;
+      review.focus();
+    });
+    confirmButton.addEventListener('click', function (event) {
+      if (!selectedCandidates().length) {
+        event.preventDefault();
+        confirmation.hidden = true;
+        review.focus();
+        return;
+      }
+      confirmed = true;
+    });
+    form.addEventListener('submit', function (event) {
+      if (confirmed) return;
+      event.preventDefault();
+      updateSelection();
+      if (selectedCandidates().length) confirmation.hidden = false;
+    });
+  }
   document.querySelectorAll('[data-dialog-open]').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var dlg = document.getElementById(btn.dataset.dialogOpen);

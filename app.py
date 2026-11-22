@@ -1597,20 +1597,48 @@ def course_delete(cid):
 @_routes.route("/course/<oid:cid>/enroll", methods=["POST"])
 @role_required("teacher")
 def course_enroll(cid):
+    db = get_db()
+    student_ids = request.form.getlist("student_ids")
+    # 保留旧版单值表单，避免现存书签、集成或旧客户端失效。
+    if "student_ids" not in request.form:
+        student_ids = request.form.getlist("student_id")
+
+    added = already_enrolled = unavailable = 0
+    # 锁住选课关系和课程教师关系的写入窗口，避免权限撤销或重复 POST
+    # 在验证与插入之间造成越权/重复计数。
+    db.execute("BEGIN IMMEDIATE")
     own_course(cid)
-    sid = request.form.get("student_id")
-    if sid:
-        db = get_db()
+    for sid in student_ids:
+        try:
+            student_id = int(sid)
+        except (TypeError, ValueError):
+            unavailable += 1
+            continue
         target = db.execute(
-            "SELECT display_name FROM users WHERE id=? AND role='student' AND active=1",
-            (sid,)).fetchone()
-        if target:
-            db.execute("INSERT OR IGNORE INTO enrollments(course_id,student_id) VALUES(?,?)",
-                       (cid, sid))
-            db.commit()
-            flash(f"已把 {target['display_name']} 加入课程")
+            "SELECT 1 FROM users WHERE id=? AND role='student' AND active=1",
+            (student_id,)).fetchone()
+        if not target:
+            # 不区分不存在、停用或不是学生，避免泄漏账号状态。
+            unavailable += 1
+            continue
+        if db.execute("SELECT 1 FROM enrollments WHERE course_id=? AND student_id=?",
+                      (cid, student_id)).fetchone():
+            already_enrolled += 1
+            continue
+        inserted = db.execute(
+            "INSERT OR IGNORE INTO enrollments(course_id,student_id) VALUES(?,?)",
+            (cid, student_id)).rowcount
+        if inserted:
+            added += 1
         else:
-            flash("只能加入启用中的学生账号；找不到该学生或账号已停用")
+            # 主键约束让并发/重复提交仍然幂等；冲突只计为已存在。
+            already_enrolled += 1
+    db.commit()
+    summary = (f"批量加入结果：新增 {added} 人，已在课程中 {already_enrolled} 人，"
+               f"不可用 {unavailable} 项。")
+    if not student_ids:
+        summary += "请选择至少一名学生后重试。"
+    flash(summary)
     return redirect(url_for("course_detail", cid=cid))
 
 
