@@ -3036,6 +3036,9 @@ def submission_review(sid):
     course = own_course(hw["course_id"])
     questions = db.execute("SELECT * FROM questions WHERE submission_id=? ORDER BY id",
                            (sid,)).fetchall()
+    report_operation = db.execute(
+        "SELECT id,status,error FROM ai_operations WHERE submission_id=? "
+        "AND operation_type='report_generate' ORDER BY id DESC LIMIT 1", (sid,)).fetchone()
     # 为每题预生成学生答案/标准答案的图片 URL（含裁剪框），供复核页内嵌展示
     sfiles = file_list(sub["file_path"])
     answer_pdf = hw["answer_pdf"] or ""
@@ -3066,6 +3069,7 @@ def submission_review(sid):
                            q_media=q_media,
                            tag_by_key=tag_utils.lecture_tags_by_key(db, hw["id"]),
                            grade_job=latest_operation(db, sid),
+                           report_operation=report_operation,
                            ai_operations=_ai_operation_history(submission_id=sid, limit=5))
 
 
@@ -5683,11 +5687,15 @@ def submission_report(sid):
     sub, hw, course = own_submission(sid)
     db = get_db()
     md = sub["report_md"]
+    report_operation = db.execute(
+        "SELECT id,status,error FROM ai_operations WHERE submission_id=? "
+        "AND operation_type='report_generate' ORDER BY id DESC LIMIT 1", (sid,)).fetchone()
     stu = db.execute("SELECT display_name FROM users WHERE id=?", (sub["student_id"],)).fetchone()
     kg_diag = _kg_diagnosis(db, sub)
     return render_template("report.html", sub=sub, hw=hw, course=course, md=md,
                            body=render_markdown(md), student_name=stu["display_name"],
                            is_teacher=True, kg_diagnosis=kg_diag,
+                           report_operation=report_operation,
                            ai_operations=_ai_operation_history(submission_id=sid, limit=5))
 
 
@@ -5735,6 +5743,27 @@ def submission_report_build(sid):
     else:
         flash("批改报告生成已加入后台队列，可离开当前页面。")
     return redirect(url_for("submission_report", sid=sid))
+
+
+@_routes.route("/submission/<oid:sid>/report/build/status")
+@role_required("teacher")
+def submission_report_build_status(sid):
+    """查询报告生成任务状态及结果是否已写入，供报告页完成后自动刷新。"""
+    own_submission(sid)
+    operation_id = request.args.get("operation_id", type=int)
+    if not operation_id:
+        return {"ok": False, "error": "缺少 operation_id"}, 400
+    db = get_db()
+    operation = db.execute(
+        "SELECT status,error FROM ai_operations WHERE id=? AND submission_id=? "
+        "AND teacher_id=? AND operation_type='report_generate'",
+        (operation_id, sid, g.user["id"])).fetchone()
+    if not operation:
+        abort(404)
+    has_report = bool(db.execute(
+        "SELECT 1 FROM submissions WHERE id=? AND report_md<>''", (sid,)).fetchone())
+    return {"ok": True, "status": operation["status"],
+            "error": operation["error"] or "", "has_report": has_report}
 
 
 @_routes.route("/submission/<oid:sid>/report/publish", methods=["POST"])

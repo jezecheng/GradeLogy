@@ -4,6 +4,7 @@
 {% block content %}
 {% set summary = sub.ai_summary|fromjson %}
 {% set job_status = grade_job.status if grade_job else '' %}
+{% set report_build_active = report_operation and report_operation.status in ('queued', 'running') %}
 {% set verdict_cls = {'对': 'right', '半对': 'partial', '错': 'wrong', '无法判定': 'unknown'} %}
 {% set n_total = questions|length %}
 {% set n_reviewed = questions|selectattr('reviewed')|list|length %}
@@ -155,17 +156,26 @@
     <div class="save-bar">
       <span class="review-save-state" id="review-save-state" role="status">{{ '报告与逐题结果已发布' if sub.report_published else ('人工复核已完成 · 学生暂不可见' if sub.status == '已批改' else '草稿 · 学生暂不可见') }}；发布报告时会一并公开。</span>
       <button type="submit" name="action" value="draft" class="ghost">保存草稿</button>
+      {% if report_build_active %}
+      <span id="report-build-status" class="pending-badge" role="status"
+            data-operation-id="{{ report_operation.id }}"
+            data-status-url="{{ url_for('submission_report_build_status', sid=sub.id) }}">评阅报告正在后台生成，完成后本页会自动更新。</span>
+      {% elif not sub.report_md and report_operation and report_operation.status == 'failed' %}
+      <span class="danger-text small" role="alert">评阅报告生成失败：{{ report_operation.error or '请检查 AI 调试日志后重试。' }}</span>
+      {% endif %}
       {% if sub.report_md %}
       <a class="report-open-button" href="{{ url_for('submission_report', sid=sub.id) }}">打开评阅报告</a>
       <span class="muted small">单题修改自动保存；报告重生成前会先保存并完成复核。</span>
       <button type="submit" name="then" value="report" id="gen-report"
-              class="ghost{% if not all_reviewed or job_status in ('queued','running') %} is-disabled{% endif %}"
-              data-blocked="{{ 0 if all_reviewed and job_status not in ('queued','running') else 1 }}">重新生成评阅报告（保存并完成人工复核）</button>
+              class="ghost{% if not all_reviewed or job_status in ('queued','running') or report_build_active %} is-disabled{% endif %}"
+              data-blocked="{{ 0 if all_reviewed and job_status not in ('queued','running') and not report_build_active else 1 }}"
+              {% if report_build_active %}disabled{% endif %}>重新生成评阅报告（保存并完成人工复核）</button>
       {% else %}
       <span class="muted small">单题修改自动保存；发布入口仅在评阅报告页。</span>
       <button type="submit" name="then" value="report" id="gen-report"
-              class="ghost{% if not all_reviewed or job_status in ('queued','running') %} is-disabled{% endif %}"
-              data-blocked="{{ 0 if all_reviewed and job_status not in ('queued','running') else 1 }}">完成并生成评阅报告</button>
+              class="ghost{% if not all_reviewed or job_status in ('queued','running') or report_build_active %} is-disabled{% endif %}"
+              data-blocked="{{ 0 if all_reviewed and job_status not in ('queued','running') and not report_build_active else 1 }}"
+              {% if report_build_active %}disabled{% endif %}>{% if report_build_active %}评阅报告生成中…{% else %}完成并生成评阅报告{% endif %}</button>
       {% endif %}
     </div>
   </form>
@@ -404,6 +414,38 @@
   });
 
   syncProgress();
+})();
+
+// 从报告页返回复核页时，如果后台仍在生成则继续轮询；完成后刷新，使“打开评阅报告”入口出现。
+(function () {
+  var status = document.getElementById('report-build-status');
+  if (!status) return;
+  var statusUrl = status.dataset.statusUrl + '?operation_id=' +
+    encodeURIComponent(status.dataset.operationId);
+  var polling = false;
+  function poll() {
+    if (polling) return;
+    polling = true;
+    fetch(statusUrl, { headers: { 'Accept': 'application/json' } })
+      .then(function (response) {
+        if (!response.ok) throw new Error('状态查询失败');
+        return response.json();
+      })
+      .then(function (data) {
+        polling = false;
+        if (!data.ok) throw new Error(data.error || '状态查询失败');
+        if (data.status === 'queued' || data.status === 'running') {
+          setTimeout(poll, 1800);
+          return;
+        }
+        window.location.reload();
+      })
+      .catch(function () { polling = false; setTimeout(poll, 3000); });
+  }
+  setTimeout(poll, 1200);
+  window.addEventListener('pageshow', function (event) {
+    if (event.persisted) poll();
+  });
 })();
 
 // 学生作答/标准答案：未聚焦时渲染 LaTeX 预览，点击后切回源码编辑

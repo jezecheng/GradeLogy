@@ -9,7 +9,9 @@
       <form method="post" action="{{ url_for('submission_report_build', sid=sub.id) }}"
             class="report-build-form" data-has-result="{{ '1' if md else '0' }}">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-        <button class="small ghost">{{ '生成评阅报告' if not md else '重新生成报告' }}</button>
+        <button class="small ghost" {% if report_operation and report_operation.status in ('queued', 'running') %}disabled{% endif %}>
+          {% if report_operation and report_operation.status in ('queued', 'running') %}报告生成中…{% else %}{{ '生成评阅报告' if not md else '重新生成报告' }}{% endif %}
+        </button>
       </form>
       {% if md %}
       <form method="post" action="{{ url_for('submission_report_publish', sid=sub.id) }}">
@@ -32,6 +34,18 @@
       · <a href="{{ url_for('lecture_detail', hid=hw.id) }}">返回讲次</a>
     {% endif %}
   </p>
+
+  {% if is_teacher and report_operation and report_operation.status in ('queued', 'running') %}
+  <p id="report-build-status" class="pending-badge" role="status"
+     data-operation-id="{{ report_operation.id }}"
+     data-status-url="{{ url_for('submission_report_build_status', sid=sub.id) }}">
+    评阅报告正在后台生成，完成后本页会自动更新。{% if md %}当前显示的是上一次已保存的报告。{% endif %}
+  </p>
+  {% elif is_teacher and report_operation and report_operation.status == 'failed' %}
+  <p class="danger-text" role="alert">评阅报告生成失败：{{ report_operation.error or 'AI 未返回可用的报告评价，请重试。' }}{% if md %}当前保留的是上一次已保存的报告。{% endif %}</p>
+  {% elif is_teacher and not md and report_operation and report_operation.status == 'success' %}
+  <p class="danger-text" role="alert">生成任务已结束，但没有保存报告内容。请重新生成；如果问题仍然存在，请检查 AI 调试日志。</p>
+  {% endif %}
 
   {% if md %}
   <div class="report-body">{{ body|safe }}</div>
@@ -57,7 +71,11 @@
   {% endif %}
   {% else %}
   <p class="muted" style="margin-top:16px">
+    {% if report_operation and report_operation.status in ('queued', 'running') %}
+    报告生成完成前暂时没有可显示的内容。
+    {% else %}
     还没有评阅报告。完成人工复核后，点右上角「生成评阅报告」；已有报告可在此重新生成。
+    {% endif %}
   </p>
   {% endif %}
 </div>
@@ -67,27 +85,51 @@
 // 重新生成报告：已有内容时先确认覆盖，提交后按钮显示小圆环并禁用
 (function () {
   var form = document.querySelector('.report-build-form');
-  if (!form) return;
-  var btn = form.querySelector('button');
-  form.addEventListener('submit', function (e) {
-    if (form.dataset.hasResult === '1' && form.dataset.confirmed !== '1') {
-      e.preventDefault();
-      confirmDialog('重新生成会覆盖当前报告内容（含手工修改的部分），确定继续吗？', '重新生成')
-        .then(function (ok) {
-          if (!ok) return;
-          form.dataset.confirmed = '1';
-          busyOn(btn, '生成中…');
-          form.submit();
-        });
-      return;
+  if (form) {
+    var btn = form.querySelector('button');
+    form.addEventListener('submit', function (e) {
+      if (form.dataset.hasResult === '1' && form.dataset.confirmed !== '1') {
+        e.preventDefault();
+        confirmDialog('重新生成会覆盖当前报告内容（含手工修改的部分），确定继续吗？', '重新生成')
+          .then(function (ok) {
+            if (!ok) return;
+            form.dataset.confirmed = '1';
+            busyOn(btn, '生成中…');
+            form.submit();
+          });
+        return;
+      }
+      busyOn(btn, '生成中…');
+    });
+    if ({{ 'true' if request.args.get('generate') == '1' else 'false' }}) {
+      // 从人工复核页点“完成并生成/重新生成”时，保存后自动启动同一份异步生成任务。
+      form.dataset.confirmed = '1';
+      setTimeout(function () { btn.click(); }, 0);
     }
-    busyOn(btn, '生成中…');
-  });
-  if ({{ 'true' if request.args.get('generate') == '1' else 'false' }}) {
-    // 从人工复核页点“完成并生成/重新生成”时，保存后自动启动同一份异步生成任务。
-    form.dataset.confirmed = '1';
-    setTimeout(function () { btn.click(); }, 0);
   }
+
+  // 报告异步生成完成后刷新服务端渲染内容，失败时也刷新出具体错误与重试入口。
+  var status = document.getElementById('report-build-status');
+  if (!status) return;
+  var operationId = status.dataset.operationId;
+  var statusUrl = status.dataset.statusUrl + '?operation_id=' + encodeURIComponent(operationId);
+  function poll() {
+    fetch(statusUrl, { headers: { 'Accept': 'application/json' } })
+      .then(function (response) {
+        if (!response.ok) throw new Error('状态查询失败');
+        return response.json();
+      })
+      .then(function (data) {
+        if (!data.ok) throw new Error(data.error || '状态查询失败');
+        if (data.status === 'queued' || data.status === 'running') {
+          setTimeout(poll, 1800);
+          return;
+        }
+        window.location.reload();
+      })
+      .catch(function () { setTimeout(poll, 3000); });
+  }
+  setTimeout(poll, 1200);
 })();
 </script>
 {% endif %}

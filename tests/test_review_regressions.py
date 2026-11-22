@@ -282,7 +282,7 @@ class ReviewRegressionTest(unittest.TestCase):
         self.db.commit()
         html_without_report = self.client(2).get(
             self.url("submission_review", sid=30)).get_data(as_text=True)
-        self.assertNotIn("打开评阅报告", html_without_report)
+        self.assertNotIn('class="report-open-button"', html_without_report)
         self.assertIn("完成并生成评阅报告", html_without_report)
         self.assertNotIn("重新生成评阅报告", html_without_report)
 
@@ -315,6 +315,44 @@ class ReviewRegressionTest(unittest.TestCase):
         row = self.db.execute(
             "SELECT status,report_published FROM submissions WHERE id=30").fetchone()
         self.assertEqual(tuple(row), ("已批改", 0))
+
+    def test_report_page_tracks_async_generation_and_refreshes_saved_report(self):
+        self.db.execute("UPDATE submissions SET report_md='',report_published=0 WHERE id=30")
+        self.db.execute(
+            "INSERT INTO ai_operations(teacher_id,operation_type,submission_id,model,status,started_at) "
+            "VALUES(2,'report_generate',30,'fixture','running',CURRENT_TIMESTAMP)")
+        operation_id = self.db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        self.db.commit()
+
+        page = self.client(2).get(self.url("submission_report", sid=30)).get_data(as_text=True)
+        self.assertIn('id="report-build-status"', page)
+        self.assertIn("报告生成中…", page)
+        self.assertIn("disabled", page[page.index('class="report-build-form"'):])
+        self.assertIn("window.location.reload()", page)
+        review_page = self.client(2).get(self.url(
+            "submission_review", sid=30)).get_data(as_text=True)
+        self.assertIn('id="report-build-status"', review_page)
+        self.assertIn("评阅报告生成中…", review_page)
+
+        status = self.client(2).get(self.url(
+            "submission_report_build_status", sid=30, operation_id=operation_id))
+        self.assertEqual(status.json, {"ok": True, "status": "running", "error": "",
+                                       "has_report": False})
+
+        self.db.execute("UPDATE submissions SET report_md='Generated report' WHERE id=30")
+        self.db.execute("UPDATE ai_operations SET status='success' WHERE id=?", (operation_id,))
+        self.db.commit()
+        status = self.client(2).get(self.url(
+            "submission_report_build_status", sid=30, operation_id=operation_id))
+        self.assertTrue(status.json["has_report"])
+        self.assertEqual(status.json["status"], "success")
+        refreshed = self.client(2).get(self.url("submission_report", sid=30))
+        self.assertIn("Generated report", refreshed.get_data(as_text=True))
+        self.assertIn("重新生成报告", refreshed.get_data(as_text=True))
+        refreshed_review = self.client(2).get(self.url(
+            "submission_review", sid=30)).get_data(as_text=True)
+        self.assertIn("打开评阅报告", refreshed_review)
+        self.assertNotIn("评阅报告生成中…", refreshed_review)
 
     def test_explicit_publication_requires_all_questions_and_no_running_grade(self):
         def publish():
