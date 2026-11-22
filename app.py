@@ -2299,7 +2299,8 @@ def student_detail(cid, sid):
         ORDER BY h.title COLLATE NOCASE, h.id""",
         (sid, sid, sid, cid)).fetchall()
     exams = db.execute("""
-        SELECT x.id, x.title, x.exam_date, x.full_score, s.score, s.comment
+        SELECT x.id, x.title, x.exam_date, x.full_score, s.score, s.comment,
+               COALESCE(s.status,'pending') AS score_status
         FROM exams x LEFT JOIN exam_scores s ON s.exam_id=x.id AND s.student_id=?
         WHERE x.course_id=? ORDER BY x.id DESC""", (sid, cid)).fetchall()
     acc_by = _accuracy_by_submission(db, [h["last_sub_id"] for h in lectures])
@@ -2423,7 +2424,7 @@ def exam_detail(eid):
     course = own_course(exam["course_id"])
     rows = db.execute("""
         SELECT u.id, u.username, u.display_name, u.student_no,
-               s.score, s.comment
+           s.score, s.comment, COALESCE(s.status,'pending') AS score_status
         FROM enrollments e
         JOIN users u ON u.id=e.student_id
         LEFT JOIN exam_scores s ON s.exam_id=? AND s.student_id=u.id
@@ -2436,23 +2437,41 @@ def exam_detail(eid):
 def exam_scores_save(eid):
     db = get_db()
     exam = own_exam(eid)
+    roster_ids = {str(row[0]) for row in db.execute(
+        "SELECT u.id FROM enrollments e JOIN users u ON u.id=e.student_id "
+        "WHERE e.course_id=? AND u.role='student' AND u.active=1",
+        (exam["course_id"],)).fetchall()}
     for key in request.form:
         if not key.startswith("score_"):
             continue
         sid = key[len("score_"):]
+        if sid not in roster_ids:
+            continue
         score = request.form.get(key, "").strip()
         comment = request.form.get(f"comment_{sid}", "").strip()
-        if not score and not comment:
+        requested = request.form.get(f"status_{sid}", "")
+        if requested not in {"pending", "absent", "recorded"}:
+            # 兼容旧页面/客户端：有分数或评语视为即时录入；空值仍是待录入。
+            requested = "recorded" if score or comment else "pending"
+        elif requested == "pending" and (score or comment):
+            # 输入内容本身意味着已录入，避免因漏改状态而把成绩误存为待处理。
+            requested = "recorded"
+        if requested == "recorded" and not score and not comment:
+            requested = "pending"
+        if requested == "pending":
             db.execute("DELETE FROM exam_scores WHERE exam_id=? AND student_id=?", (eid, sid))
             continue
+        if requested == "absent":
+            # 缺考不是零分；不保留之前的分数，以免切回已录入时旧成绩意外重现。
+            score = ""
         db.execute(
-            "INSERT INTO exam_scores(exam_id,student_id,score,comment,updated_at) "
-            "VALUES(?,?,?,?,CURRENT_TIMESTAMP) "
+            "INSERT INTO exam_scores(exam_id,student_id,score,comment,status,updated_at) "
+            "VALUES(?,?,?,?,?,CURRENT_TIMESTAMP) "
             "ON CONFLICT(exam_id,student_id) DO UPDATE SET score=excluded.score, "
-            "comment=excluded.comment, updated_at=CURRENT_TIMESTAMP",
-            (eid, sid, score, comment))
+            "comment=excluded.comment,status=excluded.status,updated_at=CURRENT_TIMESTAMP",
+            (eid, sid, score, comment, requested))
     db.commit()
-    flash("成绩已保存，学生端立即可见")
+    flash("考试状态已保存；已录入成绩/评语立即对对应学生可见，缺考不会按零分计入。")
     return redirect(url_for("exam_detail", eid=eid))
 
 
@@ -4519,6 +4538,54 @@ def student_lecture(hid):
     return hw
 
 
+STUDENT_DEADLINE_WINDOW_DAYS = 7
+
+
+def _student_deadline_tasks(lectures, now=None):
+    """Build a cross-course due list using real instants and the user's display timezone."""
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now = now.astimezone(timezone.utc)
+    horizon = now + timedelta(days=STUDENT_DEADLINE_WINDOW_DAYS)
+    upcoming, overdue = [], []
+    for lecture in lectures:
+        raw_deadline = lecture["deadline"]
+        parsed = _parse_display_time(raw_deadline, "legacy")
+        if parsed is None:
+            continue
+        due = parsed.astimezone(timezone.utc)
+        submitted = bool(lecture["my_subs"])
+        if due < now:
+            # 已经提交的迟交作业仍按最新提交状态展示在课程表中，不列作待交逾期任务。
+            if submitted:
+                continue
+            group = overdue
+            state = "overdue"
+        elif due <= horizon:
+            group = upcoming
+            state = "upcoming"
+        else:
+            continue
+
+        row = dict(lecture)
+        row["deadline_display"] = _format_display_time(raw_deadline, "legacy")
+        row["deadline_iso"] = due.isoformat()
+        row["deadline_state"] = state
+        row["task_status"] = (lecture["my_status"] or "已提交") if submitted else "未提交"
+        row["task_action"] = ("去提交" if not submitted else
+                              "查看批改" if lecture["my_status"] == "已批改" else "查看进度")
+        row["_deadline_sort"] = due.timestamp()
+        group.append(row)
+
+    # 逾期区先显示最近到期的未交任务；近期区按下一截止时间升序。
+    overdue.sort(key=lambda item: item["_deadline_sort"], reverse=True)
+    upcoming.sort(key=lambda item: item["_deadline_sort"])
+    for item in upcoming + overdue:
+        item.pop("_deadline_sort", None)
+    return upcoming, overdue
+
+
 @_routes.route("/student")
 @role_required("student")
 def student_home():
@@ -4553,15 +4620,19 @@ def student_home():
         "lectures": by_course.get(c["id"], []),
         "pending": sum(1 for h in by_course.get(c["id"], []) if not h["my_subs"]),
     } for c in courses]
+    due_soon_tasks, overdue_tasks = _student_deadline_tasks(lectures)
     exams = db.execute("""
-        SELECT x.*, c.name AS course_name, s.score, s.comment
+        SELECT x.*, c.name AS course_name, s.score, s.comment,
+               COALESCE(s.status,'pending') AS score_status
         FROM exams x
         JOIN courses c ON c.id=x.course_id
         JOIN enrollments e ON e.course_id=c.id AND e.student_id=?
         LEFT JOIN exam_scores s ON s.exam_id=x.id AND s.student_id=?
         ORDER BY x.id DESC""", (g.user["id"], g.user["id"])).fetchall()
     return render_template("student_home.html", course_groups=course_groups,
-                           exams=exams, acc_by=acc_by)
+                           exams=exams, acc_by=acc_by,
+                           due_soon_tasks=due_soon_tasks, overdue_tasks=overdue_tasks,
+                           deadline_window_days=STUDENT_DEADLINE_WINDOW_DAYS)
 
 
 @_routes.route("/student/lecture/<oid:hid>", methods=["GET", "POST"])

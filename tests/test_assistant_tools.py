@@ -52,8 +52,9 @@ class AssistantToolsTest(unittest.TestCase):
                     "{\"key\":\"k2\",\"no\":\"2\",\"hint\":\"证明可逆\"}]' WHERE id=20")
         con.execute("INSERT INTO exams(id,course_id,title,exam_date,full_score)"
                     " VALUES(40,10,'期中考试','2026-11-05',100)")
-        con.executemany("INSERT INTO exam_scores(exam_id,student_id,score) VALUES(?,?,?)",
-                        [(40, 2, "85"), (40, 3, "")])
+        con.executemany(
+            "INSERT INTO exam_scores(exam_id,student_id,score,status) VALUES(?,?,?,?)",
+            [(40, 2, "85", "recorded"), (40, 3, "", "pending")])
         con.executemany(
             "INSERT INTO prompts(id,teacher_id,kind,name,content,is_default) VALUES(?,?,?,?,?,?)",
             [(50, 1, "grade", "我的批改提示词", "请严格按步骤评分", 0),
@@ -211,7 +212,19 @@ class AssistantToolsTest(unittest.TestCase):
     def test_student_exam_scores(self):
         rows = {x["title"]: x for x in assistant.my_exam_scores(2)["exams"]}
         self.assertEqual(rows["期中考试"]["score"], "85")
-        self.assertEqual(assistant.my_exam_scores(3)["exams"][0]["score"], "未公布")
+        self.assertEqual(assistant.my_exam_scores(3)["exams"][0]["score"], "待录入")
+
+    def test_exam_absence_is_separate_from_pending_and_zero_score(self):
+        with sqlite3.connect(assistant.DB_PATH) as con:
+            con.execute("UPDATE exam_scores SET status='absent' WHERE exam_id=40 AND student_id=3")
+            con.execute("UPDATE exam_scores SET score='0' WHERE exam_id=40 AND student_id=2")
+        overview = assistant.list_exams(1, "线性代数")["exams"][0]
+        self.assertEqual(overview["scored"], 1)
+        self.assertEqual(overview["absent"], 1)
+        self.assertEqual(overview["pending"], 0)
+        mine = assistant.my_exam_scores(3)["exams"][0]
+        self.assertEqual(mine["status"], "缺考")
+        self.assertEqual(mine["score"], "—")
 
     def test_student_cannot_read_other_course(self):
         self.assertIn("error", assistant.my_lectures(2, "别的课"))

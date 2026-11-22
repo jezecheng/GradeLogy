@@ -6,6 +6,50 @@
 
 <p><a href="{{ url_for('student_weak_points') }}">🔗 我的薄弱点图谱</a> <span class="muted small">（按知识点管理复习进度）</span></p>
 
+<section class="student-deadlines" aria-labelledby="student-deadlines-title">
+  <h2 id="student-deadlines-title">近期截止与逾期</h2>
+  <p class="muted small">近期截止显示未来 {{ deadline_window_days }} 天；逾期区仅列出还没有提交的作业。截止时间按你的显示时区显示。</p>
+  {% if overdue_tasks %}
+  <h3 class="student-deadline-group-title">逾期未交</h3>
+  <ul class="student-deadline-list">
+    {% for task in overdue_tasks %}
+    <li class="student-deadline-item">
+      <div class="student-deadline-main">
+        <a href="{{ url_for('student_lecture_page', hid=task.id) }}">{{ task.title }}</a>
+        <span class="muted small">{{ task.course_name }}</span>
+      </div>
+      <div class="student-deadline-meta">
+        <span class="tag tag-task-overdue">已逾期</span>
+        <time datetime="{{ task.deadline_iso }}">截止 {{ task.deadline_display }}</time>
+      </div>
+      <a class="btn-link student-deadline-action" href="{{ url_for('student_lecture_page', hid=task.id) }}">去提交</a>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if due_soon_tasks %}
+  <h3 class="student-deadline-group-title">未来 {{ deadline_window_days }} 天</h3>
+  <ul class="student-deadline-list">
+    {% for task in due_soon_tasks %}
+    <li class="student-deadline-item">
+      <div class="student-deadline-main">
+        <a href="{{ url_for('student_lecture_page', hid=task.id) }}">{{ task.title }}</a>
+        <span class="muted small">{{ task.course_name }}</span>
+      </div>
+      <div class="student-deadline-meta">
+        <span class="tag tag-task-upcoming">{{ task.task_status }}</span>
+        <time datetime="{{ task.deadline_iso }}">截止 {{ task.deadline_display }}</time>
+      </div>
+      <a class="btn-link student-deadline-action" href="{{ url_for('student_lecture_page', hid=task.id) }}">{{ task.task_action }}</a>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if not overdue_tasks and not due_soon_tasks %}
+  <p class="muted">未来 {{ deadline_window_days }} 天没有截止任务。无截止时间的讲次仍在下方课程列表中。</p>
+  {% endif %}
+</section>
+
 <h2>讲次批阅</h2>
 {% if course_groups %}
 {% for group in course_groups %}
@@ -57,14 +101,19 @@
 <h2>考试成绩</h2>
 {% if exams %}
 <table class="card-table">
-  <tr><th>考试</th><th>课程</th><th>日期</th><th>满分</th><th>我的得分</th><th>评语</th></tr>
+  <tr><th>考试</th><th>课程</th><th>日期</th><th>满分</th><th>状态</th><th>我的得分</th><th>评语</th></tr>
   {% for e in exams %}
   <tr>
     <td>{{ e.title }}</td>
     <td class="muted">{{ e.course_name }}</td>
     <td class="muted">{{ e.exam_date or '—' }}</td>
     <td>{{ '%g'|format(e.full_score|float) }}</td>
-    <td>{% if e.score %}<span class="score">{{ e.score }}</span>{% else %}<span class="muted">未公布</span>{% endif %}</td>
+    <td>
+      {% if e.score_status == 'absent' %}<span class="tag tag-exam-absent">缺考</span>
+      {% elif e.score_status == 'recorded' %}<span class="tag tag-exam-recorded">{{ '已录入' if e.score else '已录入评语' }}</span>
+      {% else %}<span class="tag tag-exam-pending">待录入</span>{% endif %}
+    </td>
+    <td>{% if e.score_status == 'recorded' and e.score %}<span class="score">{{ e.score }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
     <td class="muted">{{ e.comment or '—' }}</td>
   </tr>
   {% endfor %}

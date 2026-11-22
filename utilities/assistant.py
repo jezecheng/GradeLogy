@@ -338,12 +338,15 @@ def list_exams(teacher_id, course):
         rows = _rows(db.execute("""
             SELECT x.id, x.title, x.description, x.exam_date, x.full_score,
               (SELECT COUNT(*) FROM exam_scores s
-                 WHERE s.exam_id=x.id AND TRIM(s.score)<>'') AS scored
+                 WHERE s.exam_id=x.id AND s.status='recorded' AND TRIM(s.score)<>'') AS scored,
+              (SELECT COUNT(*) FROM exam_scores s
+                 WHERE s.exam_id=x.id AND s.status='absent') AS absent
             FROM exams x WHERE x.course_id=?
             ORDER BY x.exam_date, x.id""", (c["id"],)))
         for r in rows:
             r["enrolled"] = enrolled
-            r["missing"] = max(0, enrolled - r["scored"])
+            r["pending"] = max(0, enrolled - r["scored"] - r["absent"])
+            r["missing"] = r["pending"]  # 兼容旧工具字段；明确缺考不再混入待录入。
         return {"course": c["name"], "enrolled": enrolled, "exams": rows}
     finally:
         db.close()
@@ -361,15 +364,19 @@ def exam_scores(teacher_id, course, exam):
         rows = _rows(db.execute("""
             SELECT u.id, u.username, u.display_name AS student,
                    COALESCE(s.score,'') AS score,
-                   COALESCE(s.comment,'') AS comment, s.updated_at
+                   COALESCE(s.comment,'') AS comment,
+                   COALESCE(s.status,'pending') AS score_status, s.updated_at
             FROM enrollments e JOIN users u ON u.id=e.student_id
             LEFT JOIN exam_scores s ON s.exam_id=? AND s.student_id=u.id
             WHERE e.course_id=? ORDER BY u.display_name""", (x["id"], c["id"])))
         nums = [n for n in (_score_number(r["score"]) for r in rows) if n is not None]
+        absent = sum(1 for r in rows if r["score_status"] == "absent")
+        pending = max(0, len(rows) - len(nums) - absent)
         return {
             "course": c["name"], "exam": x["title"], "exam_date": x["exam_date"],
             "full_score": x["full_score"], "enrolled": len(rows),
             "scored": len(nums),
+            "absent": absent, "pending": pending,
             "average": round(sum(nums) / len(nums), 1) if nums else None,
             "highest": max(nums) if nums else None,
             "lowest": min(nums) if nums else None,
@@ -964,14 +971,22 @@ def my_exam_scores(student_id, course=None):
             params.append(c["id"])
         rows = _rows(db.execute(f"""
             SELECT c.name AS course_name, x.title, x.exam_date, x.full_score,
-                   s.score, s.comment
+                   s.score, s.comment, COALESCE(s.status,'pending') AS score_status
             FROM exams x JOIN courses c ON c.id=x.course_id
             JOIN enrollments e ON e.course_id=c.id AND e.student_id=?
             LEFT JOIN exam_scores s ON s.exam_id=x.id AND s.student_id=?
             WHERE 1=1{where}
             ORDER BY x.id DESC""", params))
         for r in rows:
-            r["score"] = r["score"] or "未公布"
+            if r["score_status"] == "absent":
+                r["status"] = "缺考"
+                r["score"] = "—"
+            elif r["score_status"] == "recorded":
+                r["status"] = "已录入"
+                r["score"] = r["score"] or "已录入评语（暂无分数）"
+            else:
+                r["status"] = "待录入"
+                r["score"] = "待录入"
         return {"exams": rows}
     finally:
         db.close()
@@ -1121,10 +1136,10 @@ TOOLS = [
            "student": {"type": "string", "description": "学生姓名或用户名"},
            "lecture": {"type": "string", "description": "讲次标题或 ID，可省略"}},
           ["course", "student"]),
-    _spec("list_exams", "列出某门课程的考试，含日期、满分、已录分人数与缺录人数。",
+    _spec("list_exams", "列出某门课程的考试，含日期、满分、已录分、缺考与待录入人数。",
           {"course": {"type": "string", "description": "课程名称或 ID"}},
           ["course"]),
-    _spec("exam_scores", "查看某次考试的全班成绩：每人分数与评语，以及均分/最高/最低。",
+    _spec("exam_scores", "查看某次考试的全班状态、分数与评语，以及均分/最高/最低；缺考不按零分统计。",
           {"course": {"type": "string", "description": "课程名称或 ID"},
            "exam": {"type": "string", "description": "考试名称（可只给片段）或 ID"}},
           ["course", "exam"]),
@@ -1185,7 +1200,7 @@ STUDENT_TOOLS = [
           {"course": {"type": "string", "description": "课程名称或 ID"},
            "lecture": {"type": "string", "description": "讲次标题或 ID，可省略"}},
           ["course"]),
-    _spec("my_exam_scores", "查看自己的考试成绩、满分与老师评语；未录分显示未公布。",
+     _spec("my_exam_scores", "查看自己的考试状态、成绩、满分与老师评语；区分待录入、缺考和已录入。",
           {"course": {"type": "string", "description": "课程名称或 ID，可省略"}}, []),
 ]
 

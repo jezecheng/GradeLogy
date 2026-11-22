@@ -75,13 +75,18 @@
   <h2>考试成绩（{{ exams|length }}）</h2>
   {% if exams %}
   <table>
-    <tr><th>考试</th><th>日期</th><th>满分</th><th>得分</th><th>评语</th></tr>
+    <tr><th>考试</th><th>日期</th><th>满分</th><th>状态</th><th>得分</th><th>评语</th></tr>
     {% for e in exams %}
     <tr>
       <td><a href="{{ url_for('exam_detail', eid=e.id) }}">{{ e.title }}</a></td>
       <td class="muted">{{ e.exam_date or '—' }}</td>
       <td>{{ '%g'|format(e.full_score|float) }}</td>
-      <td>{% if e.score %}<span class="score">{{ e.score }}</span>{% else %}<span class="muted">未录入</span>{% endif %}</td>
+      <td>
+        {% if e.score_status == 'absent' %}<span class="tag tag-exam-absent">缺考</span>
+        {% elif e.score_status == 'recorded' %}<span class="tag tag-exam-recorded">{{ '已录入' if e.score else '已录入评语' }}</span>
+        {% else %}<span class="tag tag-exam-pending">待录入</span>{% endif %}
+      </td>
+      <td>{% if e.score_status == 'recorded' and e.score %}<span class="score">{{ e.score }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
       <td class="muted">{{ e.comment or '—' }}</td>
     </tr>
     {% endfor %}

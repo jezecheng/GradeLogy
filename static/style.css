@@ -118,6 +118,21 @@ details.scope-card[open] > summary.card-head { margin-bottom: 12px; }
 .course-frame-title { font-size: 16px; font-weight: 600; color: #1f2530; }
 .course-frame-head .tag { margin-left: auto; }
 .course-frame table { margin-bottom: 12px; }
+.student-deadlines { margin: 16px 0 24px; }
+.student-deadline-group-title { margin: 12px 0 6px; font-size: 14px; }
+.student-deadline-list { list-style: none; margin: 0; padding: 0; }
+.student-deadline-item { display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center; gap: 8px 16px; padding: 12px 14px; background: #fff;
+  border-bottom: 1px solid #eef0f3; }
+.student-deadline-item:first-child { border-radius: 9px 9px 0 0; }
+.student-deadline-item:last-child { border-bottom: 0; border-radius: 0 0 9px 9px; }
+.student-deadline-main { min-width: 0; display: flex; flex-direction: column; }
+.student-deadline-main a { font-weight: 600; overflow-wrap: anywhere; }
+.student-deadline-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.student-deadline-meta time { color: #5b6472; font-size: 13px; }
+.tag-task-overdue { background: #fdecec; color: #b42318; }
+.tag-task-upcoming { background: #fff4e0; color: #8c5a00; }
+.student-deadline-action { white-space: nowrap; }
 
 /* 教师版页码选择：缩略图网格 + 范围输入，作用类似打印时的选页 */
 .page-picker { border-top: 1px dashed #eef0f3; margin-top: 14px; padding-top: 12px; }
@@ -245,6 +260,10 @@ details summary { cursor: pointer; color: #1456f0; }
 
 .tag { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; }
 .tag-已提交, .tag-未提交 { background: #eef1f5; color: #5b6472; }
+.tag-exam-pending { background: #fff4e0; color: #8c5a00; }
+.tag-exam-absent { background: #eef1f5; color: #5b6472; }
+.tag-exam-recorded { background: #e6f6ec; color: #18794e; }
+.exam-status-label { display: block; margin-bottom: 2px; color: #667085; font-size: 11px; }
 .tag-批改中 { background: #fff4e0; color: #b25e09; }
 .tag-已批改 { background: #e6f6ec; color: #18794e; }
 /* 题目的知识点标签与按标签聚合的统计 */
@@ -777,6 +796,10 @@ button.btn-link:hover { text-decoration: underline; }
   .course-frame { padding: 0 12px; }
   .course-frame > summary.course-frame-head { flex-wrap: wrap; }
   .course-frame-title { font-size: 15px; }
+  .student-deadline-item { grid-template-columns: minmax(0, 1fr) auto; gap: 6px 10px; padding: 10px; }
+  .student-deadline-main { grid-column: 1; }
+  .student-deadline-meta { grid-column: 1; }
+  .student-deadline-action { grid-column: 2; grid-row: 1 / span 2; }
   .draft-grid { grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); gap: 8px; }
   .draft-item img, .draft-file { height: 78px; }
   .submit-actions button { flex: 1 1 46%; }

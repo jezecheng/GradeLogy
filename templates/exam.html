@@ -16,24 +16,58 @@
   <form method="post" action="{{ url_for('exam_scores_save', eid=exam.id) }}">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <table>
-      <tr><th>姓名</th><th>学籍号</th><th>得分</th><th>评语</th></tr>
+      <tr><th>姓名</th><th>学籍号</th><th>状态</th><th>得分</th><th>评语</th></tr>
       {% for r in rows %}
       <tr>
         <td>{{ r.display_name }}</td>
         <td class="muted">{{ r.student_no or '—' }}</td>
-        <td><input name="score_{{ r.id }}" value="{{ r.score or '' }}" class="score-input"
+        <td>
+          <label class="exam-status-label" for="status-{{ r.id }}">成绩状态</label>
+          <select name="status_{{ r.id }}" id="status-{{ r.id }}" data-exam-status
+                  data-score-input="score-{{ r.id }}" data-comment-input="comment-{{ r.id }}">
+            <option value="pending" {% if r.score_status == 'pending' %}selected{% endif %}>待录入</option>
+            <option value="absent" {% if r.score_status == 'absent' %}selected{% endif %}>缺考</option>
+            <option value="recorded" {% if r.score_status == 'recorded' %}selected{% endif %}>已录入</option>
+          </select>
+        </td>
+        <td><input id="score-{{ r.id }}" name="score_{{ r.id }}" value="{{ r.score or '' }}" class="score-input"
                    placeholder="0 - {{ '%g'|format(exam.full_score|float) }}"></td>
-        <td><input name="comment_{{ r.id }}" value="{{ r.comment or '' }}" placeholder="可选"></td>
+        <td><input id="comment-{{ r.id }}" name="comment_{{ r.id }}" value="{{ r.comment or '' }}" placeholder="可选"></td>
       </tr>
       {% endfor %}
     </table>
     <div class="save-bar">
-      <button type="submit">保存成绩</button>
-      <span class="muted small">留空表示未参加或未录入；保存后学生端立即可见。</span>
+      <button type="submit">保存状态与成绩</button>
+      <span class="muted small">待录入与缺考不同；输入分数或评语后保存即为已录入，学生立即可见。缺考不按 0 分统计。</span>
     </div>
   </form>
   {% else %}
   <p class="muted">课程里还没有学生，先到课程页添加学生。</p>
   {% endif %}
 </div>
+<script>
+// 将已有分数切换为缺考/待录入会清除分数，先明确提示，避免无意覆盖成绩。
+(function () {
+  document.querySelectorAll('[data-exam-status]').forEach(function (select) {
+    var previous = select.value;
+    select.addEventListener('change', function () {
+      var score = document.getElementById(select.dataset.scoreInput);
+      var comment = document.getElementById(select.dataset.commentInput);
+      var clearsValues = (select.value === 'absent' || select.value === 'pending') &&
+        ((score && score.value.trim()) || (comment && comment.value.trim()));
+      if (clearsValues && !confirm(select.value === 'absent'
+          ? '标记缺考会清除已录入分数，但保留评语。确定继续吗？'
+          : '改为待录入会清除当前分数和评语。确定继续吗？')) {
+        select.value = previous;
+        return;
+      }
+      if (clearsValues) {
+        if (score) score.value = '';
+        if (select.value === 'pending' && comment) comment.value = '';
+      }
+      previous = select.value;
+    });
+  });
+})();
+</script>
 {% endblock %}

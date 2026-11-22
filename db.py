@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS exam_scores(
   student_id INTEGER NOT NULL REFERENCES users(id),
   score TEXT DEFAULT '',
   comment TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY(exam_id, student_id));
 CREATE TABLE IF NOT EXISTS submissions(
@@ -432,6 +433,15 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=(), reco
         if "homework_id" in scols_now and "lecture_id" not in scols_now:
             con.execute("ALTER TABLE submissions RENAME COLUMN homework_id TO lecture_id")
     con.executescript(SCHEMA)
+    # 轻量迁移：考试分数明确区分待录入、缺考与已录入。
+    # 历史分数/评语保留原有即时可见性；空行与无记录均为待录入，不推断缺考。
+    exam_score_cols = {r[1] for r in con.execute("PRAGMA table_info(exam_scores)")}
+    if "status" not in exam_score_cols:
+        con.execute("ALTER TABLE exam_scores ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'")
+        con.execute(
+            "UPDATE exam_scores SET status=CASE "
+            "WHEN TRIM(COALESCE(score,''))<>'' OR TRIM(COALESCE(comment,''))<>'' "
+            "THEN 'recorded' ELSE 'pending' END")
     # 轻量迁移：早期版本没有 page_no 列
     qcols = {r[1] for r in con.execute("PRAGMA table_info(questions)")}
     if "page_no" not in qcols:
