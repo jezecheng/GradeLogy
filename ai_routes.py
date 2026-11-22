@@ -10,13 +10,16 @@ patch app.get_setting / app._probe_ai_config 依旧会作用到这些路由。
 """
 
 import base64
+import json
 import re
+import tempfile
 
-from flask import flash, g, redirect, render_template, request, url_for
+from flask import (Response, abort, flash, g, redirect, render_template, request,
+                   send_file, stream_with_context, url_for)
 from werkzeug.utils import secure_filename
 
 from ai_config import MAX_TOKENS_SETTINGS
-from utilities import llm
+from utilities import ai_debug, llm
 
 _REQUIRED = (
     "role_required", "get_db", "get_setting", "save_setting", "now_text",
@@ -155,6 +158,21 @@ def register(registry, deps):
         pages = max(1, (summary["request_count"] + page_size - 1) // page_size)
         page = request.args.get("page", 1, type=int) or 1
         page = max(1, min(page, pages))
+        operation_rows = db.execute("""
+            SELECT o.*,COUNT(e.id) AS request_count,
+              SUM(CASE WHEN e.request_path<>'' OR e.response_path<>'' THEN 1 ELSE 0 END)
+                AS payload_event_count,
+              SUM(CASE WHEN e.debug_error<>'' THEN 1 ELSE 0 END) AS debug_error_count,
+              c.name AS course_name,l.title AS lecture_title,u.display_name AS student_name
+            FROM ai_operations o
+            LEFT JOIN ai_usage_events e ON e.operation_id=o.id
+            LEFT JOIN courses c ON c.id=o.course_id
+            LEFT JOIN submissions s ON s.id=o.submission_id
+            LEFT JOIN lectures l ON l.id=COALESCE(o.lecture_id,s.lecture_id)
+            LEFT JOIN users u ON u.id=s.student_id
+            WHERE o.teacher_id=?
+            GROUP BY o.id ORDER BY o.id DESC LIMIT 100
+        """, (teacher_id,)).fetchall()
         requests = db.execute("""
             SELECT e.id,e.operation_id,e.chunk_id,e.attempt,e.provider_request_id,
               COALESCE(NULLIF(e.model,''),NULLIF(o.model,''),'未指定模型') AS model,
@@ -174,10 +192,142 @@ def register(registry, deps):
             ORDER BY e.id DESC LIMIT ? OFFSET ?
         """, (teacher_id, page_size, (page - 1) * page_size)).fetchall()
         return render_template("teacher_ai_usage.html", summary=summary,
-                               operations=operations, requests=requests,
+                               operations=operations, operation_rows=operation_rows,
+                               requests=requests,
                                page=page, pages=pages, page_size=page_size,
                                ai_operation_label=ai_operation_label,
                                ai_status_label=ai_status_label)
+
+    # ---------- 老师：AI 操作调试日志 ----------
+    def owned_debug_operation(operation_id):
+        row = get_db().execute("""
+            SELECT o.*,c.name AS course_name,l.title AS lecture_title,
+              u.display_name AS student_name
+            FROM ai_operations o
+            LEFT JOIN courses c ON c.id=o.course_id
+            LEFT JOIN submissions s ON s.id=o.submission_id
+            LEFT JOIN lectures l ON l.id=COALESCE(o.lecture_id,s.lecture_id)
+            LEFT JOIN users u ON u.id=s.student_id
+            WHERE o.id=? AND o.teacher_id=?
+        """, (operation_id, g.user["id"])).fetchone()
+        if row is None:
+            abort(404)
+        return row
+
+    def debug_events(operation_id):
+        return get_db().execute(
+            "SELECT * FROM ai_usage_events WHERE operation_id=? "
+            "ORDER BY COALESCE(call_index,id),attempt,id", (operation_id,)).fetchall()
+
+    @registry.route("/ai-usage/operations/<oid:operation_id>/debug")
+    @role_required("teacher")
+    def teacher_ai_operation_debug(operation_id):
+        """新窗口查看一次操作的全部已保存请求、响应和最终业务结果。"""
+        operation = owned_debug_operation(operation_id)
+        events = debug_events(operation_id)
+        result_pretty = ""
+        if operation["result_json"]:
+            try:
+                result_pretty = json.dumps(json.loads(operation["result_json"]),
+                                           ensure_ascii=False, indent=2)
+            except (TypeError, ValueError):
+                result_pretty = operation["result_json"]
+        return render_template(
+            "teacher_ai_debug.html", operation=operation, events=events,
+            result_pretty=result_pretty,
+            ai_operation_label=ai_operation_label, ai_status_label=ai_status_label)
+
+    @registry.route("/ai-usage/events/<oid:event_id>/raw/<kind>")
+    @role_required("teacher")
+    def teacher_ai_event_raw(event_id, kind):
+        """原文预览限 256 KiB；download=1 时流式下载完整安全副本。"""
+        if kind not in ("request", "response"):
+            abort(404)
+        event = get_db().execute("""
+            SELECT e.* FROM ai_usage_events e
+            JOIN ai_operations o ON o.id=e.operation_id
+            WHERE e.id=? AND o.teacher_id=?
+        """, (event_id, g.user["id"])).fetchone()
+        if event is None or not event[f"{kind}_path"]:
+            abort(404)
+        operation_id = event["operation_id"]
+        relative_path = event[f"{kind}_path"]
+        headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+        try:
+            if request.args.get("download") == "1":
+                ai_debug.resolve_payload(operation_id, relative_path)
+                extension = ".json" if relative_path.endswith(".json.gz") else ".bin"
+                filename = f"ai_event_{event_id}_{kind}{extension}"
+                headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+                return Response(
+                    stream_with_context(ai_debug.iter_payload(operation_id, relative_path)),
+                    content_type="application/octet-stream", headers=headers,
+                    direct_passthrough=True)
+            data, truncated = ai_debug.read_preview(operation_id, relative_path)
+        except (OSError, FileNotFoundError):
+            abort(404)
+        text = data.decode("utf-8", "replace")
+        if truncated:
+            text += "\n\n[预览已截断；请下载此原文或完整 ZIP 查看剩余内容。]"
+        return Response(text, content_type="text/plain; charset=utf-8", headers=headers)
+
+    @registry.route("/ai-usage/operations/<oid:operation_id>/debug.zip")
+    @role_required("teacher")
+    def teacher_ai_operation_debug_zip(operation_id):
+        """流式生成完整 ZIP，不把 base64 等大载荷塞入数据库或详情 HTML。"""
+        operation = owned_debug_operation(operation_id)
+        events = debug_events(operation_id)
+        operation_data = dict(operation)
+        if operation_data.get("result_json"):
+            try:
+                operation_data["result"] = json.loads(operation_data["result_json"])
+            except (TypeError, ValueError):
+                pass
+        event_data = []
+        for row in events:
+            item = dict(row)
+            for source, target in (("usage_json", "usage"),
+                                   ("pricing_json", "pricing"),
+                                   ("debug_json", "debug")):
+                if not item.get(source):
+                    continue
+                try:
+                    item[target] = json.loads(item[source])
+                except (TypeError, ValueError):
+                    pass
+            event_data.append(item)
+        debug_failed = bool(operation["debug_error"] or any(
+            row["debug_error"] for row in events))
+        manifest = {
+            "format": "gradelogy-ai-debug-v1",
+            "generated_at": now_text(),
+            "operation_id": operation_id,
+            "event_count": len(events),
+            "complete": not debug_failed,
+            "missing_files": [],
+            "notes": [
+                "请求和响应为安全副本：仅将配置 API Key 的精确出现替换为 [REDACTED]。",
+                "非流式请求不存在可伪造的逐 token 中间状态；每轮完整响应均保存在对应事件中。",
+                "历史操作可能没有原始载荷；网络失败时没有服务商响应正文属于正常情况。",
+                "日志包含真实提示词、学生作答与图片 base64，仅应发给可信开发人员。",
+            ],
+        }
+        if debug_failed:
+            manifest["notes"].append("部分调试载荷写入失败，详见 operation/event 的 debug_error。")
+        bundle = tempfile.TemporaryFile()
+        try:
+            ai_debug.export_package(bundle, manifest, operation_data, event_data)
+            bundle.seek(0)
+        except Exception:
+            bundle.close()
+            raise
+        response = send_file(
+            bundle, mimetype="application/zip", as_attachment=True,
+            download_name=f"ai_operation_{operation_id}_debug.zip", max_age=0)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.call_on_close(bundle.close)
+        return response
 
     # ---------- 老师：AI 设置 ----------
     def settings_context(extra=None):

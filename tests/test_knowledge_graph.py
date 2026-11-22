@@ -227,6 +227,7 @@ class KGLogicTest(unittest.TestCase):
             return len(events)
 
         class Response:
+            status = 200
             headers = {"x-request-id": "request-2"}
 
             def __enter__(self):

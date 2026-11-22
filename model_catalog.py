@@ -194,13 +194,11 @@ def _now_text():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def fetch_available_models(base_url, api_key, timeout=20):
+def fetch_available_models(base_url, api_key, timeout=20, usage_hook=None):
     """调用 OpenAI 兼容的 GET /v1/models，返回 [{model_id, display_name, status}]。"""
-    req = urllib.request.Request(
-        (base_url or "").rstrip("/") + "/models",
-        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        payload = json.loads(resp.read().decode("utf-8"))
+    payload = llm.get_json(
+        (base_url or "").rstrip("/") + "/models", api_key, timeout=timeout,
+        usage_hook=usage_hook, stage="model_sync.models")
     rows = []
     for item in payload.get("data") or []:
         mid = str(item.get("id") or "").strip()
@@ -405,7 +403,8 @@ def tokenhub_suitable_model_ids(price_data=None):
     return ids
 
 
-def sync_models_for_teacher(teacher_id, force=False, fetch_models=None, fetch_prices=None):
+def sync_models_for_teacher(teacher_id, force=False, fetch_models=None, fetch_prices=None,
+                            usage_hook=None):
     """把某老师配置入口的可用模型同步进缓存。
 
     返回 (模型数, 错误文本)：未到期时模型数为 -1 且无错误。
@@ -435,7 +434,10 @@ def sync_models_for_teacher(teacher_id, force=False, fetch_models=None, fetch_pr
                 except ValueError:
                     pass
         try:
-            models = fetch_models(base_url, api_key)
+            if usage_hook is None:
+                models = fetch_models(base_url, api_key)
+            else:
+                models = fetch_models(base_url, api_key, usage_hook=usage_hook)
         except Exception as exc:  # 网络/鉴权失败只记录，保留上次结果，下一轮继续重试
             msg = _sync_error_text(exc)[:300]
             log.warning("模型清单同步失败 teacher=%s: %s", teacher_id, msg)

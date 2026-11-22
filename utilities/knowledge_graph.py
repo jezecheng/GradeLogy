@@ -132,7 +132,8 @@ def analyze_batch(texts, api_url, api_key, model, max_tokens=KG_MAX_TOKENS,
     try:
         reply, finish, err = llm.chat(
             api_url, api_key, model, [{"type": "text", "text": prompt}],
-            max_tokens=max_tokens, usage_hook=usage_hook, report_running=True)
+            max_tokens=max_tokens, usage_hook=usage_hook, report_running=True,
+            stage="kg_build.extract")
     except Exception as e:  # noqa: BLE001 构建失败记录到资料状态即可
         return [], [], str(e)
     if err:
@@ -481,6 +482,7 @@ def build_material(db, material_id, api_url, api_key, model, usage_hook=None,
 
         def chunk_usage(event):
             event["chunk_id"] = row["id"]
+            event["stage"] = f"kg_build.chunk.{row['chunk_no']}"
             return usage_hook(event) if usage_hook else None
 
         def analyze_texts(texts):
@@ -864,7 +866,8 @@ def analyze_graph(db, graph_id, api_url, api_key, model, usage_hook=None,
         reply, finish, err = llm.chat(
             api_url, api_key, model,
             [{"type": "text", "text": AUDIT_PROMPT + "\n\n" + catalog + hint}],
-            max_tokens=max_tokens, usage_hook=usage_hook, report_running=True)
+            max_tokens=max_tokens, usage_hook=usage_hook, report_running=True,
+            stage="kg_audit")
     except Exception as e:  # noqa: BLE001 体检失败不影响图谱本身
         return [], [], str(e)
     if err:
@@ -1384,7 +1387,8 @@ def analyze_categories(db, graph_id, api_url, api_key, model, usage_hook=None,
     try:
         reply, finish, err = llm.chat(
             api_url, api_key, model, [{"type": "text", "text": prompt}],
-            max_tokens=max_tokens, usage_hook=usage_hook, report_running=True)
+            max_tokens=max_tokens, usage_hook=usage_hook, report_running=True,
+            stage="kg_category")
     except Exception as e:  # noqa: BLE001 分类重构失败不影响图谱本身
         return [], [], str(e)
     if err:

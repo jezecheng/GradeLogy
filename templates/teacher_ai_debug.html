@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}AI 调试日志 #{{ operation.id }}{% endblock %}
+{% block content %}
+<header class="page-heading">
+  <div>
+    <h1>AI 调试日志 <span class="muted">#{{ operation.id }}</span></h1>
+    <p class="muted">{{ ai_operation_label.get(operation.operation_type, operation.operation_type) }} · 包含每次模型请求、重试、工具调用上下文及最终业务结果。</p>
+  </div>
+  <div class="actions">
+    <a class="btn-link" href="{{ url_for('teacher_ai_operation_debug_zip', operation_id=operation.id) }}">下载完整 ZIP</a>
+    <a class="btn-link" href="{{ url_for('teacher_ai_usage') }}">返回 AI 用量</a>
+  </div>
+</header>
+
+<section class="card">
+  <p class="danger-text"><strong>敏感数据提醒：</strong>日志包含真实提示词、学生作答、模型输出和图片 base64。仅 API Key 等传输秘密会被移除，请只发给可信开发人员。</p>
+  <table>
+    <tbody>
+      <tr><th>操作</th><td>{{ ai_operation_label.get(operation.operation_type, operation.operation_type) }}（{{ operation.operation_type }}）#{{ operation.id }}</td></tr>
+      <tr><th>状态</th><td>{{ ai_status_label.get(operation.status, operation.status) }}</td></tr>
+      <tr><th>模型</th><td>{{ operation.model or '未指定模型' }}</td></tr>
+      <tr><th>关联内容</th><td>{{ operation.course_name or '未关联课程' }}{% if operation.lecture_title %} · {{ operation.lecture_title }}{% endif %}{% if operation.student_name %} · {{ operation.student_name }}{% endif %}</td></tr>
+      <tr><th>开始 / 结束</th><td>{{ operation.started_at|localtime }} / {{ operation.finished_at|localtime if operation.finished_at else '尚未结束' }}</td></tr>
+      {% if operation.error %}<tr><th>操作错误</th><td class="danger-text">{{ operation.error }}</td></tr>{% endif %}
+      {% if operation.debug_error %}<tr><th>日志写入错误</th><td class="danger-text">{{ operation.debug_error }}</td></tr>{% endif %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <div class="card-head"><div><h2>模型请求与响应</h2><span class="muted small">按逻辑请求和尝试次数排序</span></div><span class="monitor-log-count">{{ events|length }} 条</span></div>
+  {% if events %}
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>请求</th><th>阶段</th><th>类型</th><th>状态</th><th>HTTP</th><th>模型</th><th>服务商请求 ID</th><th>原始载荷</th></tr></thead>
+      <tbody>
+      {% for row in events %}
+        <tr>
+          <td class="nowrap">第 {{ row.call_index or row.id }} 次调用<div class="muted small">第 {{ row.attempt }} 次尝试 · 事件 #{{ row.id }}</div></td>
+          <td>{{ row.stage or '未标注阶段' }}{% if row.chunk_id %}<div class="muted small">分块 {{ row.chunk_id }}</div>{% endif %}</td>
+          <td><code>{{ row.request_kind or '历史请求' }}</code></td>
+          <td>{% if row.status == 'success' %}<span class="request-status is-success">成功</span>{% elif row.status == 'error' %}<span class="request-status is-error">失败</span>{% else %}<span class="request-status">{{ row.status }}</span>{% endif %}</td>
+          <td>{{ row.http_status if row.http_status is not none else '—' }}</td>
+          <td class="request-model">{{ row.model or operation.model or '未指定模型' }}</td>
+          <td>{{ row.provider_request_id or '服务商未返回' }}</td>
+          <td>
+            {% if row.request_path %}<div><a href="{{ url_for('teacher_ai_event_raw', event_id=row.id, kind='request') }}" target="_blank" rel="noopener">请求原文</a> · <a href="{{ url_for('teacher_ai_event_raw', event_id=row.id, kind='request', download=1) }}">下载</a></div>{% else %}<div class="muted">无请求文件</div>{% endif %}
+            {% if row.response_path %}<div><a href="{{ url_for('teacher_ai_event_raw', event_id=row.id, kind='response') }}" target="_blank" rel="noopener">响应原文</a> · <a href="{{ url_for('teacher_ai_event_raw', event_id=row.id, kind='response', download=1) }}">下载</a></div>{% else %}<div class="muted">无响应文件</div>{% endif %}
+          </td>
+        </tr>
+        <tr>
+          <td colspan="8">
+            <details>
+              <summary>调试元数据、用量与校验值</summary>
+              <dl>
+                <dt>结束原因</dt><dd>{{ row.finish_reason or '—' }}</dd>
+                <dt>耗时</dt><dd>{% if row.latency_ms is not none %}{{ row.latency_ms }} ms{% else %}—{% endif %}</dd>
+                <dt>请求大小 / SHA-256</dt><dd>{{ row.request_size if row.request_size is not none else '—' }} 字节<br><code>{{ row.request_sha256 or '—' }}</code></dd>
+                <dt>响应大小 / SHA-256</dt><dd>{{ row.response_size if row.response_size is not none else '—' }} 字节<br><code>{{ row.response_sha256 or '—' }}</code></dd>
+                {% if row.error %}<dt>请求错误</dt><dd class="danger-text">{{ row.error }}</dd>{% endif %}
+                {% if row.debug_error %}<dt>日志写入错误</dt><dd class="danger-text">{{ row.debug_error }}</dd>{% endif %}
+              </dl>
+              {% if row.debug_json %}<h3>传输元数据</h3><pre class="feedback">{{ row.debug_json }}</pre>{% endif %}
+              {% if row.usage_json %}<h3>服务商原始用量</h3><pre class="feedback">{{ row.usage_json }}</pre>{% endif %}
+            </details>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="muted small request-log-note">“无响应文件”可能表示网络失败、历史记录未保存原文，或载荷写入失败。浏览器预览最多显示 256 KiB，ZIP 和单文件下载包含完整安全副本。</p>
+  {% else %}<p class="muted">此操作没有模型请求记录。可能是历史操作，或在校验配置、排队等阶段已经结束。</p>{% endif %}
+</section>
+
+{% if result_pretty %}
+<section class="card">
+  <h2>最终业务结果</h2>
+  <p class="muted small">这是系统保存的最终回复或工具调用结果；模型原始返回仍以各次响应文件为准。</p>
+  <pre class="feedback">{{ result_pretty }}</pre>
+</section>
+{% endif %}
+{% endblock %}

@@ -432,7 +432,8 @@ def analyze_question_tags(answer_path, questions, api_url, api_key, model,
         content += parts
         reply, finish, err = llm.chat(api_url, api_key, model, content,
                                       max_tokens=max_tokens, timeout=90, retries=1,
-                                      usage_hook=usage_hook)
+                                      usage_hook=usage_hook,
+                                      stage=f"question_tagging.batch.{idx}/{total_batches}")
         if err:
             return None, f"AI 标注失败（第 {idx} 批）：{err}"
 

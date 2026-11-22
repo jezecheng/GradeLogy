@@ -4773,7 +4773,20 @@ def assistant_chat():
     role = g.user["role"]
     cfg = llm.resolve_config(g.user["id"] if role == "teacher" else None)
     # 助手是交互式的，单次请求很小，不受「仅闲时批阅」限制
-    reply, trace, err = assistant.reply(msgs, cfg, g.user["id"], role=role)
+    operation = (_start_ai_operation(g.user["id"], "assistant", cfg["model"])
+                 if role == "teacher" else None)
+    try:
+        reply, trace, err = assistant.reply(
+            msgs, cfg, g.user["id"], role=role,
+            usage_hook=operation["usage_hook"] if operation else None)
+    except Exception as exc:
+        if operation:
+            _finish_ai_operation(operation, "failed", str(exc))
+        raise
+    if operation:
+        _finish_ai_operation(
+            operation, "failed" if err else "success", err,
+            result={"reply": reply, "trace": trace})
     if err:
         return jsonify({"error": err, "trace": trace}), 502
     return jsonify({"reply": reply, "trace": trace})
@@ -4784,25 +4797,34 @@ def _probe_ai_config(api_url, api_key, model):
     api_url = (api_url or "").rstrip("/")
     if not api_url or not api_key or not model:
         return "请先填写接口地址、API Key 和模型"
-    body = json.dumps({"model": model, "max_tokens": 128,
-                       "messages": [{"role": "user", "content": "只回复两个字：正常"}]}).encode()
-    req = urllib.request.Request(
-        f"{api_url}/chat/completions", data=body,
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"})
+    operation = None
+    if (has_request_context() and g.get("user") and
+            g.user["role"] == "teacher"):
+        operation = _start_ai_operation(g.user["id"], "connection_test", model)
     try:
-        with urllib.request.urlopen(req, timeout=40) as resp:
-            data = json.loads(resp.read())
-        msg = data["choices"][0]["message"]
-        reply = (msg.get("content") or "").strip()
-        if reply:
-            return f"连接成功，模型 {model} 回复：{reply[:40]}"
-        return f"连接成功，模型 {model} 已响应（该模型为思考模型，本次未输出正文，属正常现象）"
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode()[:200]
-        hint = "（免费模型有并发/频率限制，等几秒再试）" if e.code == 429 else ""
-        return f"连接失败：HTTP {e.code}{hint} {detail}"
-    except Exception as e:
-        return f"连接失败：{e}"
+        msg, finish, err = llm.chat_completion(
+            api_url, api_key,
+            {"model": model, "max_tokens": 128,
+             "messages": [{"role": "user", "content": "只回复两个字：正常"}]},
+            timeout=40, retries=1,
+            usage_hook=operation["usage_hook"] if operation else None,
+            stage="connection_test")
+    except Exception as exc:
+        if operation:
+            _finish_ai_operation(operation, "failed", str(exc))
+        return f"连接失败：{exc}"
+    if err:
+        if operation:
+            _finish_ai_operation(operation, "failed", err)
+        hint = "（免费模型有并发/频率限制，等几秒再试）" if err.startswith("HTTP 429 ") else ""
+        return f"连接失败：{err}{hint}"
+    reply = (msg.get("content") or "").strip()
+    if operation:
+        _finish_ai_operation(operation, "success",
+                             result={"reply": reply, "finish_reason": finish})
+    if reply:
+        return f"连接成功，模型 {model} 回复：{reply[:40]}"
+    return f"连接成功，模型 {model} 已响应（该模型为思考模型，本次未输出正文，属正常现象）"
 
 
 # ---------- 学生端 ----------
@@ -6727,9 +6749,24 @@ def _lan_ip():
 
 def sync_models_for_teacher(teacher_id, force=False):
     """同步入口：把本模块的 fetch_* 注入给实现，保留测试对 app 层的 patch 点。"""
-    return _sync_models_for_teacher(teacher_id, force=force,
-                                    fetch_models=fetch_available_models,
-                                    fetch_prices=fetch_tokenhub_prices)
+    operation = None
+    if (force and has_request_context() and g.get("user") and
+            g.user["role"] == "teacher" and g.user["id"] == teacher_id):
+        conf = llm.resolve_config(teacher_id)
+        operation = _start_ai_operation(teacher_id, "model_sync", conf["model"])
+    try:
+        count, err = _sync_models_for_teacher(
+            teacher_id, force=force, fetch_models=fetch_available_models,
+            fetch_prices=fetch_tokenhub_prices,
+            usage_hook=operation["usage_hook"] if operation else None)
+    except Exception as exc:
+        if operation:
+            _finish_ai_operation(operation, "failed", str(exc))
+        raise
+    if operation:
+        _finish_ai_operation(operation, "failed" if err else "success", err,
+                             result={"model_count": count})
+    return count, err
 
 
 def _ai_route_deps():
@@ -6773,7 +6810,8 @@ def create_app(config_overrides=None):
         overrides["DATA_DIR"] = root
         for key, name in (("DB_PATH", "data.sqlite"), ("STORAGE_DIR", "uploads"),
                           ("BACKUP_DIR", "backups"), ("EXPORT_DIR", "exports"),
-                          ("LOG_DIR", "logs"), ("SECRET_KEY_FILE", ".secret_key")):
+                          ("LOG_DIR", "logs"), ("AI_DEBUG_DIR", "ai_debug"),
+                          ("SECRET_KEY_FILE", ".secret_key")):
             overrides.setdefault(key, os.path.join(root, name))
     app.config["GRADELOGY_SETTINGS"] = overrides
     app.config.update(overrides)

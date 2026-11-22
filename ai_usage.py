@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 
 from db import get_db
 from model_catalog import MODEL_PRESETS
+from utilities import ai_debug
 
 _log = logging.getLogger("gradelogy.ai")
 
@@ -38,6 +39,9 @@ AI_OPERATION_LABEL = {
     "report_generate": "批改报告评价",
     "report_comment": "重新生成总评",
     "price_import": "价目截图识别",
+    "assistant": "数字助手",
+    "connection_test": "接口连接测试",
+    "model_sync": "模型清单同步",
 }
 AI_STATUS_LABEL = {"queued": "排队中", "running": "进行中", "success": "成功", "failed": "失败"}
 
@@ -104,8 +108,37 @@ def _start_ai_operation(teacher_id, operation_type, model, course_id=None,
     return operation
 
 
+def _scrub_debug(value, secrets):
+    """只移除传输秘密，不改写学生作答、提示词或模型业务输出。"""
+    if isinstance(value, dict):
+        return {key: _scrub_debug(item, secrets) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_scrub_debug(item, secrets) for item in value]
+    if isinstance(value, tuple):
+        return [_scrub_debug(item, secrets) for item in value]
+    if isinstance(value, str):
+        for secret in secrets:
+            if secret:
+                value = value.replace(str(secret), "[REDACTED]")
+        return value
+    return value
+
+
+def _call_index(operation, event, existing):
+    call_key = event.get("call_key")
+    if call_key:
+        indexes = operation.setdefault("_call_indexes", {})
+        if call_key not in indexes:
+            indexes[call_key] = len(indexes) + 1
+        return indexes[call_key]
+    if existing is not None and existing["call_index"] is not None:
+        return existing["call_index"]
+    operation["_legacy_call_index"] = operation.get("_legacy_call_index", 0) + 1
+    return operation["_legacy_call_index"]
+
+
 def _record_ai_usage(operation, event):
-    """记录单次模型请求；知识图谱请求开始时插入，结束时更新同一行。"""
+    """记录一次模型请求及其原始载荷；调试写盘失败不影响业务调用。"""
     pricing = operation["pricing"]
     prompt = event.get("prompt_tokens")
     completion = event.get("completion_tokens")
@@ -114,31 +147,97 @@ def _record_ai_usage(operation, event):
             pricing["price_in"] is not None and pricing["price_out"] is not None):
         cost = ((prompt * pricing["price_in"] + completion * pricing["price_out"])
                 * pricing["peak_multiplier"] / 1000000)
-    usage = event.get("usage")
+    secrets = event.get("_debug_secrets") or ()
+    usage = _scrub_debug(event.get("usage"), secrets)
     db = get_db()
-    values = (event.get("chunk_id"), event.get("attempt"), event.get("provider_request_id"),
-              event.get("model") or "", prompt, completion, event.get("total_tokens"),
-              event.get("cached_tokens"), event.get("reasoning_tokens"),
-              event.get("latency_ms"), event.get("finish_reason") or "", cost,
-              json.dumps(pricing, ensure_ascii=False),
-              json.dumps(usage, ensure_ascii=False) if usage is not None else "",
-              event.get("status") or "error", str(event.get("error") or "")[:1000])
     event_id = event.get("usage_event_id")
+    existing = None
     if event_id is not None:
+        existing = db.execute(
+            "SELECT * FROM ai_usage_events WHERE id=? AND operation_id=?",
+            (event_id, operation["id"])).fetchone()
+        if existing is None:
+            event_id = None
+    call_index = _call_index(operation, event, existing)
+    values = (
+        event.get("chunk_id"), event.get("attempt"), event.get("request_kind") or "",
+        event.get("stage") or "", call_index, event.get("http_status"),
+        event.get("provider_request_id"), event.get("model") or "", prompt, completion,
+        event.get("total_tokens"), event.get("cached_tokens"), event.get("reasoning_tokens"),
+        event.get("latency_ms"), event.get("finish_reason") or "", cost,
+        json.dumps(pricing, ensure_ascii=False),
+        json.dumps(usage, ensure_ascii=False) if usage is not None else "",
+        event.get("status") or "error", str(event.get("error") or "")[:1000])
+    if existing is not None:
         db.execute(
-            "UPDATE ai_usage_events SET chunk_id=?,attempt=?,provider_request_id=?,model=?,"
-            "prompt_tokens=?,completion_tokens=?,total_tokens=?,cached_tokens=?,"
-            "reasoning_tokens=?,latency_ms=?,finish_reason=?,estimated_cost=?,"
-            "pricing_json=?,usage_json=?,status=?,error=? WHERE id=? AND operation_id=?",
+            "UPDATE ai_usage_events SET chunk_id=?,attempt=?,request_kind=?,stage=?,"
+            "call_index=?,http_status=?,provider_request_id=?,model=?,prompt_tokens=?,"
+            "completion_tokens=?,total_tokens=?,cached_tokens=?,reasoning_tokens=?,"
+            "latency_ms=?,finish_reason=?,estimated_cost=?,pricing_json=?,usage_json=?,"
+            "status=?,error=? WHERE id=? AND operation_id=?",
             values + (event_id, operation["id"]))
     else:
         cur = db.execute(
-            "INSERT INTO ai_usage_events(operation_id,chunk_id,attempt,provider_request_id,model,"
-            "prompt_tokens,completion_tokens,total_tokens,cached_tokens,reasoning_tokens,"
-            "latency_ms,finish_reason,estimated_cost,pricing_json,usage_json,status,error) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO ai_usage_events(operation_id,chunk_id,attempt,request_kind,stage,"
+            "call_index,http_status,provider_request_id,model,prompt_tokens,completion_tokens,"
+            "total_tokens,cached_tokens,reasoning_tokens,latency_ms,finish_reason,"
+            "estimated_cost,pricing_json,usage_json,status,error) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (operation["id"],) + values)
         event_id = cur.lastrowid
+
+    debug_data = {}
+    if existing is not None and existing["debug_json"]:
+        try:
+            debug_data = json.loads(existing["debug_json"])
+        except (TypeError, ValueError):
+            debug_data = {}
+    debug_data.update(_scrub_debug(event.get("debug") or {}, secrets))
+    metadata = {
+        key: (existing[key] if existing is not None else None)
+        for key in ("request_path", "response_path", "request_size", "response_size",
+                    "request_sha256", "response_sha256")
+    }
+    debug_errors = []
+    if existing is not None and existing["debug_error"]:
+        debug_errors.append(existing["debug_error"])
+    for kind in ("request", "response"):
+        body_key = f"{kind}_body"
+        if body_key not in event or (kind == "request" and metadata["request_path"]):
+            continue
+        try:
+            saved = ai_debug.save_payload(
+                operation["id"], event_id, kind, event[body_key], secrets=secrets)
+            metadata[f"{kind}_path"] = saved["path"]
+            metadata[f"{kind}_size"] = saved["size"]
+            metadata[f"{kind}_sha256"] = saved["sha256"]
+            if saved["redacted"]:
+                redactions = debug_data.setdefault("redactions", [])
+                redactions.append({
+                    "kind": kind, "original_sha256": saved["sha256"],
+                    "stored_sha256": saved["stored_sha256"],
+                    "stored_size": saved["stored_size"],
+                    "note": "安全副本已移除 API Key；原始业务数据未做其他修改",
+                })
+        except Exception as exc:  # 日志故障不能改变模型调用结果
+            _log.exception("AI 调试载荷写入失败 operation=%s event=%s kind=%s",
+                           operation["id"], event_id, kind)
+            debug_errors.append(f"{kind} 载荷写入失败：{type(exc).__name__}: {exc}")
+    debug_error = "\n".join(dict.fromkeys(debug_errors))[:2000]
+    db.execute(
+        "UPDATE ai_usage_events SET request_path=?,response_path=?,request_size=?,"
+        "response_size=?,request_sha256=?,response_sha256=?,debug_json=?,debug_error=? "
+        "WHERE id=? AND operation_id=?",
+        (metadata["request_path"] or "", metadata["response_path"] or "",
+         metadata["request_size"], metadata["response_size"],
+         metadata["request_sha256"] or "", metadata["response_sha256"] or "",
+         json.dumps(debug_data, ensure_ascii=False), debug_error,
+         event_id, operation["id"]))
+    if debug_error:
+        operation.setdefault("_debug_errors", []).append(debug_error)
+        operation_error = "\n".join(dict.fromkeys(operation["_debug_errors"]))[:2000]
+        db.execute("UPDATE ai_operations SET debug_error=? WHERE id=?",
+                   (operation_error, operation["id"]))
     db.commit()
     _log.info(
         "AI 请求 operation=%s event=%s teacher=%s scene=%s model=%s status=%s "
@@ -153,14 +252,21 @@ def _record_ai_usage(operation, event):
     return event_id
 
 
-def _finish_ai_operation(operation, status, error=""):
+def _finish_ai_operation(operation, status, error="", result=None):
     if not operation or operation["finished"]:
         return
-    get_db().execute(
-        "UPDATE ai_operations SET status=?,finished_at=?,error=? WHERE id=?",
-        (status, datetime.now().isoformat(sep=" ", timespec="milliseconds"),
-         str(error or "")[:1000], operation["id"]))
-    get_db().commit()
+    finished_at = datetime.now().isoformat(sep=" ", timespec="milliseconds")
+    db = get_db()
+    if result is None:
+        db.execute(
+            "UPDATE ai_operations SET status=?,finished_at=?,error=? WHERE id=?",
+            (status, finished_at, str(error or "")[:1000], operation["id"]))
+    else:
+        db.execute(
+            "UPDATE ai_operations SET status=?,finished_at=?,error=?,result_json=? WHERE id=?",
+            (status, finished_at, str(error or "")[:1000],
+             json.dumps(result, ensure_ascii=False, default=str), operation["id"]))
+    db.commit()
     _log.info("AI 操作结束 operation=%s teacher=%s scene=%s model=%s status=%s error=%s",
               operation["id"], operation.get("teacher", "-"),
               operation.get("operation_type", "-"), operation.get("model") or "-",

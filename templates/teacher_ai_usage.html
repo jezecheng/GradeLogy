@@ -39,6 +39,42 @@
 
 <section class="card request-log-card">
   <div class="card-head">
+    <div><h2>AI 操作与调试日志</h2><span class="muted small">一次操作包含多轮请求、工具调用和全部重试</span></div>
+    <span class="monitor-log-count">最近 {{ operation_rows|length }} 次 / 共 {{ operations }} 次</span>
+  </div>
+  {% if operation_rows %}
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>发起时间</th><th>操作</th><th>关联内容</th><th>模型</th><th>状态</th><th class="right">请求数</th><th>调试日志</th></tr></thead>
+      <tbody>
+      {% for row in operation_rows %}
+        <tr>
+          <td class="nowrap">{{ row.started_at|localtime }}</td>
+          <td>{{ ai_operation_label.get(row.operation_type, row.operation_type) }} <span class="muted">#{{ row.id }}</span></td>
+          <td>{{ row.course_name or '未关联课程' }}{% if row.lecture_title %} · {{ row.lecture_title }}{% endif %}{% if row.student_name %} · {{ row.student_name }}{% endif %}</td>
+          <td class="request-model">{{ row.model or '未指定模型' }}</td>
+          <td>
+            {% if row.status == 'success' %}<span class="request-status is-success">成功</span>
+            {% elif row.status == 'failed' %}<span class="request-status is-error">失败</span>
+            {% else %}<span class="request-status">{{ ai_status_label.get(row.status, row.status) }}</span>{% endif %}
+            {% if row.debug_error or row.debug_error_count %}<div class="danger-text small">部分日志写入失败</div>{% endif %}
+          </td>
+          <td class="right">{{ row.request_count }}{% if not row.payload_event_count %}<div class="muted small">无原始载荷</div>{% endif %}</td>
+          <td class="actions">
+            <a class="btn-link" href="{{ url_for('teacher_ai_operation_debug', operation_id=row.id) }}" target="_blank" rel="noopener">新窗口打开</a>
+            <a class="btn-link" href="{{ url_for('teacher_ai_operation_debug_zip', operation_id=row.id) }}">下载 ZIP</a>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}<p class="muted">暂时没有 AI 操作记录。</p>{% endif %}
+  <p class="muted small request-log-note">日志保留真实提示词、学生作答和图片 base64，仅移除 API Key 等传输秘密。下载后请只发给可信开发人员。</p>
+</section>
+
+<section class="card request-log-card">
+  <div class="card-head">
     <div><h2>模型请求</h2><span class="muted small">每次调用和重试分别记录</span></div>
     <span class="monitor-log-count">{% if summary.request_count > 0 %}显示第 {{ (page - 1) * page_size + 1 }}–{{ (page - 1) * page_size + requests|length }} 条 / 共 {{ summary.request_count }} 条{% else %}共 0 条{% endif %}</span>
   </div>
@@ -76,6 +112,7 @@
               </dl>
               <details><summary>服务商用量原始数据</summary><pre>{{ row.usage_json or '服务商没有返回用量数据' }}</pre></details>
               <details><summary>计价快照</summary><pre>{{ row.pricing_json or '没有计价快照' }}</pre></details>
+              <p><a href="{{ url_for('teacher_ai_operation_debug', operation_id=row.operation_id) }}" target="_blank" rel="noopener">打开操作完整日志</a></p>
             </details>
           </td>
         </tr>

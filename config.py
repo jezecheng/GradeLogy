@@ -38,6 +38,7 @@ DATA_DIR = os.path.abspath(_env("DATA_DIR", BASE_DIR))
 DB_PATH = os.path.abspath(_env("DB_PATH", os.path.join(DATA_DIR, "data.sqlite")))
 STORAGE_DIR = os.path.abspath(_env("STORAGE_DIR", os.path.join(DATA_DIR, "uploads")))
 LOG_DIR = os.path.abspath(_env("LOG_DIR", os.path.join(DATA_DIR, "logs")))
+AI_DEBUG_DIR = os.path.abspath(_env("AI_DEBUG_DIR", os.path.join(DATA_DIR, "ai_debug")))
 # 老师导出的课程备份包，保留 1 天后自动清理
 EXPORT_DIR = os.path.abspath(_env("EXPORT_DIR", os.path.join(DATA_DIR, "exports")))
 
@@ -91,8 +92,8 @@ def get(name, default=None):
 
 def ensure_dirs():
     """确保所有数据目录存在；容器首次启动、只读镜像下都靠它兜底。"""
-    for path in (get("DATA_DIR"), get("STORAGE_DIR"), get("LOG_DIR"), get("BACKUP_DIR"), get("EXPORT_DIR"),
-                 os.path.dirname(get("DB_PATH"))):
+    for path in (get("DATA_DIR"), get("STORAGE_DIR"), get("LOG_DIR"), get("BACKUP_DIR"),
+                 get("EXPORT_DIR"), get("AI_DEBUG_DIR"), os.path.dirname(get("DB_PATH"))):
         os.makedirs(path, exist_ok=True)
 
 

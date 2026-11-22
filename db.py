@@ -156,12 +156,26 @@ CREATE TABLE IF NOT EXISTS ai_operations(
   status TEXT NOT NULL DEFAULT 'running',
   started_at TEXT NOT NULL,
   finished_at TEXT,
-  error TEXT DEFAULT '');
+  error TEXT DEFAULT '',
+  result_json TEXT DEFAULT '',
+  debug_error TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS ai_usage_events(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   operation_id INTEGER NOT NULL REFERENCES ai_operations(id),
   chunk_id INTEGER,
   attempt INTEGER NOT NULL,
+  request_kind TEXT DEFAULT '',
+  stage TEXT DEFAULT '',
+  call_index INTEGER,
+  http_status INTEGER,
+  request_path TEXT DEFAULT '',
+  response_path TEXT DEFAULT '',
+  request_size INTEGER,
+  response_size INTEGER,
+  request_sha256 TEXT DEFAULT '',
+  response_sha256 TEXT DEFAULT '',
+  debug_json TEXT DEFAULT '',
+  debug_error TEXT DEFAULT '',
   provider_request_id TEXT,
   model TEXT DEFAULT '',
   prompt_tokens INTEGER,
@@ -444,6 +458,23 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=(), reco
         if "homework_id" in scols_now and "lecture_id" not in scols_now:
             con.execute("ALTER TABLE submissions RENAME COLUMN homework_id TO lecture_id")
     con.executescript(SCHEMA)
+    # 轻量迁移：AI 调试日志只保存原始载荷索引，历史记录不回填虚假载荷。
+    operation_cols = {r[1] for r in con.execute("PRAGMA table_info(ai_operations)")}
+    for col in ("result_json", "debug_error"):
+        if col not in operation_cols:
+            con.execute(f"ALTER TABLE ai_operations ADD COLUMN {col} TEXT DEFAULT ''")
+    usage_cols = {r[1] for r in con.execute("PRAGMA table_info(ai_usage_events)")}
+    for col, ddl in (
+            ("request_kind", "TEXT DEFAULT ''"), ("stage", "TEXT DEFAULT ''"),
+            ("call_index", "INTEGER"), ("http_status", "INTEGER"),
+            ("request_path", "TEXT DEFAULT ''"), ("response_path", "TEXT DEFAULT ''"),
+            ("request_size", "INTEGER"), ("response_size", "INTEGER"),
+            ("request_sha256", "TEXT DEFAULT ''"), ("response_sha256", "TEXT DEFAULT ''"),
+            ("debug_json", "TEXT DEFAULT ''"), ("debug_error", "TEXT DEFAULT ''")):
+        if col not in usage_cols:
+            con.execute(f"ALTER TABLE ai_usage_events ADD COLUMN {col} {ddl}")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_ai_usage_call "
+                "ON ai_usage_events(operation_id,call_index,attempt)")
     # 轻量迁移：考试分数明确区分待录入、缺考与已录入。
     # 历史分数/评语保留原有即时可见性；空行与无记录均为待录入，不推断缺考。
     exam_score_cols = {r[1] for r in con.execute("PRAGMA table_info(exam_scores)")}

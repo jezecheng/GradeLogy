@@ -14,6 +14,7 @@ import sqlite3
 from datetime import datetime, timedelta
 
 import config
+from utilities import llm
 
 DB_PATH = config.DB_PATH
 DOCS_DIR = os.path.join(config.BASE_DIR, "docs")
@@ -1375,23 +1376,6 @@ SYSTEM_PROMPTS = {"teacher": SYSTEM_PROMPT, "student": STUDENT_SYSTEM_PROMPT,
                   "admin": ADMIN_SYSTEM_PROMPT}
 
 
-def _post(url, api_key, payload, timeout):
-    import urllib.error
-    import urllib.request
-
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {api_key}"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"AI 接口返回 HTTP {e.code}：{e.read().decode()[:200]}")
-    except Exception as e:
-        raise RuntimeError(f"AI 接口请求失败：{str(e)[:200]}")
-
-
 def _openai_tools(role="teacher"):
     """把 MCP 风格的工具定义转成 OpenAI function calling 需要的结构。"""
     return [{"type": "function",
@@ -1400,23 +1384,26 @@ def _openai_tools(role="teacher"):
             for t in tools_for_role(role)]
 
 
-def reply(messages, cfg, user_id, role="teacher", max_rounds=4, timeout=90):
+def reply(messages, cfg, user_id, role="teacher", max_rounds=4, timeout=90,
+          usage_hook=None):
     """跑工具调用循环，返回 (回答文本, 调用轨迹, 错误)。cfg 来自 llm.resolve_config。"""
     if not cfg.get("api_url") or not cfg.get("api_key") or not cfg.get("model"):
         if role == "teacher":
             return "", [], "尚未配置 AI 接口，请先到「AI 设置」保存地址、Key 与模型"
         return "", [], "数字助手还没有配置 AI 接口，请联系老师或管理员在「AI 设置」中保存"
-    url = f"{cfg['api_url']}/chat/completions"
     msgs = [{"role": "system", "content": SYSTEM_PROMPTS.get(role, SYSTEM_PROMPT)}] + list(messages)
     trace = []
     try:
-        for _ in range(max_rounds):
-            data = _post(url, cfg["api_key"],
-                         {"model": cfg["model"], "messages": msgs,
-                          "max_tokens": 1200, "tools": _openai_tools(role),
-                          "tool_choice": "auto"},
-                         timeout)
-            msg = data["choices"][0]["message"]
+        for round_no in range(1, max_rounds + 1):
+            msg, _finish, err = llm.chat_completion(
+                cfg["api_url"], cfg["api_key"],
+                {"model": cfg["model"], "messages": msgs,
+                 "max_tokens": 1200, "tools": _openai_tools(role),
+                 "tool_choice": "auto"},
+                timeout=timeout, retries=1, usage_hook=usage_hook,
+                stage=f"assistant.round.{round_no}")
+            if err:
+                return "", trace, err
             calls = msg.get("tool_calls") or []
             if not calls:
                 return (msg.get("content") or "").strip(), trace, ""
@@ -1428,9 +1415,11 @@ def reply(messages, cfg, user_id, role="teacher", max_rounds=4, timeout=90):
                     args = json.loads(call["function"].get("arguments") or "{}")
                 except ValueError:
                     args = {}
-                trace.append({"tool": fn, "args": args})
+                result = call_tool(fn, args, user_id, role)
+                trace.append({"tool": fn, "args": args, "result": result,
+                              "call_id": call.get("id", ""), "round": round_no})
                 msgs.append({"role": "tool", "tool_call_id": call.get("id", ""),
-                             "content": call_tool(fn, args, user_id, role)})
+                             "content": result})
     except RuntimeError as e:
         return "", trace, str(e)
     return "这个问题需要查太多步，先给你到这里的结论；可以再问我更具体一点。", trace, ""
