@@ -430,7 +430,7 @@ class TagRouteTest(unittest.TestCase):
         con.close()
         self.assertEqual(rows, {31})
 
-    def test_other_teacher_cannot_assign_graphs(self):
+    def test_other_teacher_cannot_assign_graphs_to_course_they_do_not_own(self):
         self._seed_graphs()
         other = self.login(3)
         resp = self._assign_graphs([31], client=other)
@@ -440,6 +440,28 @@ class TagRouteTest(unittest.TestCase):
             "SELECT COUNT(*) FROM course_knowledge_graphs").fetchone()[0]
         con.close()
         self.assertEqual(count, 0)
+
+    def test_all_teachers_can_view_and_assign_system_graphs_to_their_courses(self):
+        self._seed_graphs()
+        other = self.login(3)
+
+        listing = other.get(self.url("knowledge_graphs"))
+        detail = other.get(self.url("knowledge_graph_detail", gid=31))
+        self.assertEqual(listing.status_code, 200)
+        self.assertIn("高中化学主图谱", listing.get_data(as_text=True))
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn("只读", detail.get_data(as_text=True))
+
+        resp = self._assign_graphs([31], client=other, cid=11)
+        self.assertEqual(resp.status_code, 302)
+        course_page = other.get(self.url("course_detail", cid=11))
+        self.assertEqual(course_page.status_code, 200)
+        self.assertIn("高中化学主图谱", course_page.get_data(as_text=True))
+        con = self._db()
+        assigned = con.execute(
+            "SELECT graph_id FROM course_knowledge_graphs WHERE course_id=11").fetchall()
+        con.close()
+        self.assertEqual({row[0] for row in assigned}, {31})
 
     def _seed_weak_points(self):
         """两条标签命中同一 KG 节点，需合并成一张卡；另一条未匹配节点单独成卡。"""

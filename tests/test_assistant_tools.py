@@ -80,6 +80,33 @@ class AssistantToolsTest(unittest.TestCase):
         self._patch.stop()
         self.tmp.cleanup()
 
+    def test_help_search_uses_current_role_guides_only(self):
+        teacher = assistant.ask_help("作业范围保存会自动生成标签吗", role="teacher")
+        self.assertTrue(teacher["found"])
+        teacher_excerpt = "\n".join(section["excerpt"] for section in teacher["sections"])
+        self.assertTrue("不会调用 AI" in teacher_excerpt or
+                        "不会自动生成标签" in teacher_excerpt)
+        self.assertTrue(all(section["source"] in {
+            "docs/teacher-workflows.md", "docs/teacher.md", "docs/knowledge_graph.md"
+        } for section in teacher["sections"]))
+
+        report_help = assistant.ask_help("人工复核之后怎么发布报告", role="teacher")
+        report_excerpt = "\n".join(section["excerpt"] for section in report_help["sections"])
+        self.assertIn("一键发布给学生", report_excerpt)
+        self.assertTrue("复核完成只代表内部结果已完成" in report_excerpt or
+                        "全部复核只完成内部审核" in report_excerpt)
+        self.assertNotIn("完成复核并公开逐题结果", report_excerpt)
+
+        student = assistant.ask_help("老师完成复核后为什么看不到批改", role="student")
+        self.assertTrue(student["found"])
+        self.assertTrue(all(section["source"] == "docs/student.md"
+                            for section in student["sections"]))
+
+        admin = assistant.ask_help("备份恢复", role="admin")
+        self.assertTrue(admin["found"])
+        self.assertTrue(all(section["source"] == "docs/admin.md"
+                            for section in admin["sections"]))
+
     def test_list_exams_counts_scored_and_missing(self):
         out = assistant.list_exams(1, "线性代数")
         self.assertEqual(out["course"], "线性代数")

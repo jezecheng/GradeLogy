@@ -1746,7 +1746,7 @@ class KGRouteTest(unittest.TestCase):
         con.close()
         self.assertEqual(count, 1)
 
-    def test_non_member_cannot_attach_graph_to_course(self):
+    def test_non_member_can_view_and_attach_graph_to_own_course(self):
         graph = self._create_graph()
         con = self._db()
         con.execute("INSERT INTO courses(id,name,teacher_id) VALUES(9,'我的课',3)")
@@ -1754,6 +1754,9 @@ class KGRouteTest(unittest.TestCase):
         con.commit()
         con.close()
         other = self.login(3)
+        detail = other.get(self.url("knowledge_graph_detail", gid=graph["id"]))
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn("只读", detail.get_data(as_text=True))
         self._post("course_knowledge_graphs_save", client=other, cid=9,
                    data={"graph_ids": [str(graph["id"])]})
         con = self._db()
@@ -1761,7 +1764,7 @@ class KGRouteTest(unittest.TestCase):
             "SELECT COUNT(*) FROM course_knowledge_graphs WHERE course_id=9"
         ).fetchone()[0]
         con.close()
-        self.assertEqual(count, 0)
+        self.assertEqual(count, 1)
 
     def test_member_management_requires_manage_role(self):
         graph = self._create_graph()

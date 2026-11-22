@@ -657,7 +657,7 @@ def _access_log(resp):
         kg_log.debug("KG 状态轮询 path=%s status=%s ip=%s",
                      request.path, resp.status_code, request.remote_addr or "-")
         return resp
-    if request.endpoint in ("static", "healthz", "admin_logs_tail",
+    if request.endpoint in ("static", "healthz", "admin_logs_tail", "assistant_chat",
                             "session_status", "session_activity"):
         return resp
     started = getattr(g, "request_started", None)
@@ -3502,13 +3502,8 @@ def _kg_role(graph):
 
 
 def _kg_accessible_ids(db, user):
-    """用户可引入到自己课程里的图谱集合：自己创建或被授予任意协作角色。"""
-    if user["role"] == "admin":
-        return {row["id"] for row in db.execute("SELECT id FROM knowledge_graphs")}
-    return {row["id"] for row in db.execute(
-        "SELECT id FROM knowledge_graphs WHERE created_by=? UNION "
-        "SELECT graph_id FROM kg_members WHERE user_id=?",
-        (user["id"], user["id"]))}
+    """系统内所有图谱都可被教师挂载到自己有权限的课程。"""
+    return {row["id"] for row in db.execute("SELECT id FROM knowledge_graphs")}
 
 
 def _kg_graph(gid, edit=False, manage=False, use=False):
@@ -4759,7 +4754,7 @@ def knowledge_graph_member_remove(gid, uid):
 @_routes.route("/assistant/chat", methods=["POST"])
 @role_required("admin", "teacher", "student")
 def assistant_chat():
-    """右下角数字助手：带工具调用的多轮对话，按角色只读查询本人可见的数据。"""
+    """右下角数字助手：只读查询；模型调用不写入 AI 用量或请求日志。"""
     data = request.get_json(silent=True) or {}
     msgs = []
     for m in (data.get("messages") or [])[-12:]:
@@ -4774,20 +4769,7 @@ def assistant_chat():
     role = g.user["role"]
     cfg = llm.resolve_config(g.user["id"] if role == "teacher" else None)
     # 助手是交互式的，单次请求很小，不受「仅闲时批阅」限制
-    operation = (_start_ai_operation(g.user["id"], "assistant", cfg["model"])
-                 if role == "teacher" else None)
-    try:
-        reply, trace, err = assistant.reply(
-            msgs, cfg, g.user["id"], role=role,
-            usage_hook=operation["usage_hook"] if operation else None)
-    except Exception as exc:
-        if operation:
-            _finish_ai_operation(operation, "failed", str(exc))
-        raise
-    if operation:
-        _finish_ai_operation(
-            operation, "failed" if err else "success", err,
-            result={"reply": reply, "trace": trace})
+    reply, trace, err = assistant.reply(msgs, cfg, g.user["id"], role=role)
     if err:
         return jsonify({"error": err, "trace": trace}), 502
     return jsonify({"reply": reply, "trace": trace})

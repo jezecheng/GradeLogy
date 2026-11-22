@@ -19,6 +19,13 @@ from utilities.time_utils import beijing_wall_now, format_beijing_time
 
 DB_PATH = config.DB_PATH
 DOCS_DIR = os.path.join(config.BASE_DIR, "docs")
+HELP_DOCS_BY_ROLE = {
+    # 操作问答只检索当前角色的正式手册，避免 README 摘要、旧维护记录或
+    # 其他角色说明中的历史文字覆盖当前可执行步骤。
+    "teacher": ("teacher-workflows.md", "teacher.md", "knowledge_graph.md"),
+    "student": ("student.md",),
+    "admin": ("admin.md",),
+}
 
 VERDICT_ORDER = ("对", "半对", "错", "无法判定")
 
@@ -74,11 +81,9 @@ def _enrolled(db, course_id):
 
 
 # ---------- 文档检索 ----------
-def _doc_sections():
-    files = [os.path.join(config.BASE_DIR, "README.md")]
-    if os.path.isdir(DOCS_DIR):
-        files += [os.path.join(DOCS_DIR, f) for f in sorted(os.listdir(DOCS_DIR))
-                  if f.endswith(".md")]
+def _doc_sections(role="teacher"):
+    files = [os.path.join(DOCS_DIR, name)
+             for name in HELP_DOCS_BY_ROLE.get(role, HELP_DOCS_BY_ROLE["teacher"])]
     sections = []
     for path in files:
         if not os.path.exists(path):
@@ -115,26 +120,29 @@ def _terms(question):
     return [t for t in terms if len(t) >= 2]
 
 
-def ask_help(question):
-    """在 README 与 docs/*.md 里按关键词找最相关的章节。"""
+def ask_help(question, role="teacher"):
+    """只在当前角色的正式操作手册中检索，避免历史文档给出过期流程。"""
     terms = _terms(question)
     scored = []
-    for sec in _doc_sections():
+    sections = _doc_sections(role)
+    source_rank = {name: i for i, name in enumerate(HELP_DOCS_BY_ROLE.get(
+        role, HELP_DOCS_BY_ROLE["teacher"]))}
+    for sec in sections:
         hay = (sec["title"] + "\n" + sec["text"]).lower()
         score = sum(min(hay.count(t), 6) for t in terms)
         if sec["title"].lower() and any(t in sec["title"].lower() for t in terms):
             score += 4
         if score:
-            scored.append((score, sec))
-    scored.sort(key=lambda x: (-x[0], x[1]["source"]))
+            scored.append((score, source_rank.get(os.path.basename(sec["source"]), 99), sec))
+    scored.sort(key=lambda x: (-x[0], x[1], x[2]["title"]))
     if not scored:
-        titles = sorted({f"{s['source']} · {s['title']}" for s in _doc_sections()})
+        titles = sorted({f"{s['source']} · {s['title']}" for s in sections})
         return {"found": False, "message": "没有匹配的章节，可参考以下目录：",
                 "sections": titles[:30]}
     return {"found": True,
             "sections": [{"source": s["source"], "title": s["title"],
                           "excerpt": _cut(s["text"], 1200)}
-                         for _, s in scored[:3]]}
+                         for _, _, s in scored[:3]]}
 
 
 # ---------- 工具实现 ----------
@@ -1271,7 +1279,7 @@ def _pack(out):
 def _call_student_tool(name, args, student_id):
     try:
         if name == "ask_help":
-            out = ask_help(args.get("question", ""))
+            out = ask_help(args.get("question", ""), role="student")
         elif name == "my_courses":
             out = my_courses(student_id)
         elif name == "my_lectures":
@@ -1292,7 +1300,7 @@ def _call_student_tool(name, args, student_id):
 def _call_admin_tool(name, args, admin_id):
     try:
         if name == "ask_help":
-            out = ask_help(args.get("question", ""))
+            out = ask_help(args.get("question", ""), role="admin")
         elif name == "admin_overview":
             out = admin_overview()
         elif name == "admin_list_users":
@@ -1313,7 +1321,7 @@ def _call_teacher_tool(name, args, teacher_id):
     """执行工具，返回可直接给模型/客户端读的 JSON 文本。"""
     try:
         if name == "ask_help":
-            out = ask_help(args.get("question", ""))
+            out = ask_help(args.get("question", ""), role="teacher")
         elif name == "list_courses":
             out = list_courses(teacher_id)
         elif name == "list_lectures":
@@ -1362,7 +1370,8 @@ SYSTEM_PROMPT = (
     "你是「教学管理平台」的教师助手。你可以调用工具查询这位老师自己的课程数据和使用文档。\n"
     "规则：\n"
     "1. 涉及具体数据（人数、分数、某题对错、某个学生）时，必须先调用工具，不要凭空猜测。\n"
-    "2. 用户问「怎么操作」时先调用 ask_help，再按文档步骤用简洁中文回答。\n"
+    "2. 用户问「怎么操作」时先调用 ask_help，再按当前老师手册回答；准确列出前置条件，"
+    "文档未说明的条件不要推测。\n"
     "3. 只回答当前老师有权限的课程；工具报错就如实说明，并给出下一步建议。\n"
     "4. 回答控制在 200 字以内，多使用短句和列表；不要输出 JSON、不要编造数据。"
 )
@@ -1373,7 +1382,8 @@ STUDENT_SYSTEM_PROMPT = (
     "规则：\n"
     "1. 问「我还有什么作业没交」「我的批改结果」「成绩」时先调用 my_pending / "
     "my_lectures / my_report / my_exam_scores，不要凭空猜测。\n"
-    "2. 问「怎么交作业」「怎么看批改」等操作问题时先调用 ask_help，再按文档步骤回答。\n"
+    "2. 问「怎么交作业」「怎么看批改」等操作问题时先调用 ask_help，再按学生手册回答；"
+    "不要把老师的内部复核状态说成学生已经可见。\n"
     "3. 老师未发布批改结果时，明确说「老师还没有发布」，不要编造分数或逐题结论。\n"
     "4. 回答控制在 200 字以内，用短句和列表；不要输出 JSON。"
 )
@@ -1383,7 +1393,8 @@ ADMIN_SYSTEM_PROMPT = (
     "规则：\n"
     "1. 涉及数量、用户、课程、用量时先调用 admin_overview / admin_list_users / "
     "admin_list_courses / admin_ai_usage，不要凭空猜测。\n"
-    "2. 问操作流程（重置密码、备份恢复、初始化导入）时先调用 ask_help，再按文档步骤回答。\n"
+    "2. 问操作流程（重置密码、备份恢复、初始化导入）时先调用 ask_help，再按管理员手册回答；"
+    "文档未说明的条件不要推测。\n"
     "3. 只做只读查询：不要声称已经替用户执行了删除、恢复等写操作，要引导到对应页面。\n"
     "4. 绝不输出密码、API Key 等敏感信息；回答控制在 200 字以内，不要输出 JSON。"
 )
@@ -1400,8 +1411,7 @@ def _openai_tools(role="teacher"):
             for t in tools_for_role(role)]
 
 
-def reply(messages, cfg, user_id, role="teacher", max_rounds=4, timeout=90,
-          usage_hook=None):
+def reply(messages, cfg, user_id, role="teacher", max_rounds=4, timeout=90):
     """跑工具调用循环，返回 (回答文本, 调用轨迹, 错误)。cfg 来自 llm.resolve_config。"""
     if not cfg.get("api_url") or not cfg.get("api_key") or not cfg.get("model"):
         if role == "teacher":
@@ -1416,8 +1426,8 @@ def reply(messages, cfg, user_id, role="teacher", max_rounds=4, timeout=90,
                 {"model": cfg["model"], "messages": msgs,
                  "max_tokens": 1200, "tools": _openai_tools(role),
                  "tool_choice": "auto"},
-                timeout=timeout, retries=1, usage_hook=usage_hook,
-                stage=f"assistant.round.{round_no}")
+                timeout=timeout, retries=1, stage=f"assistant.round.{round_no}",
+                log_events=False)
             if err:
                 return "", trace, err
             calls = msg.get("tool_calls") or []

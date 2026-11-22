@@ -301,48 +301,44 @@ class AIDebugLogTest(unittest.TestCase):
         self.assertEqual(download.data, response.body)
         self.assertIn("attachment", download.headers["Content-Disposition"])
 
-    def test_assistant_records_all_rounds_tool_results_and_final_result(self):
+    def test_assistant_conversation_creates_no_usage_records_or_request_logs(self):
         first = chat_body("", tool_calls=[{
             "id": "call-1", "type": "function",
             "function": {"name": "ask_help", "arguments": '{"question":"如何批阅"}'},
         }])
         second = chat_body("最终答复")
         with mock.patch.object(llm.urllib.request, "urlopen",
-                               side_effect=[FakeResponse(first), FakeResponse(second)]), \
+                               side_effect=[FakeResponse(first), FakeResponse(second),
+                                            FakeResponse(chat_body("学生答复"))]) as urlopen, \
                 mock.patch.object(assistant, "call_tool",
-                                  return_value='{"steps":["上传","批阅"],"count":2}') as tool:
+                                  return_value='{"steps":["上传","批阅"],"count":2}') as tool, \
+                mock.patch.object(llm._log, "info") as ai_info, \
+                mock.patch.object(llm._log, "warning") as ai_warning, \
+                mock.patch.object(a.log, "info") as access_info, \
+                mock.patch.object(a.user_log, "info") as user_action_info:
             response = self.teacher.post(
                 "/assistant/chat", json={"messages": [{"role": "user", "content": "怎么批阅"}]},
                 headers={"X-CSRF-Token": CSRF})
+            student_response = self.student.post(
+                "/assistant/chat", json={"messages": [{"role": "user", "content": "你好"}]},
+                headers={"X-CSRF-Token": CSRF})
+            ai_info.assert_not_called()
+            ai_warning.assert_not_called()
+            access_info.assert_not_called()
+            user_action_info.assert_not_called()
         self.assertEqual(response.status_code, 200)
         data = response.get_json()
         self.assertEqual(data["reply"], "最终答复")
         self.assertEqual(data["trace"][0]["result"],
                          '{"steps":["上传","批阅"],"count":2}')
         tool.assert_called_once()
-        operations = self.rows(
-            "SELECT * FROM ai_operations WHERE operation_type='assistant'")
-        self.assertEqual(len(operations), 1)
-        self.assertEqual(operations[0]["status"], "success")
-        final = json.loads(operations[0]["result_json"])
-        self.assertEqual(final["reply"], "最终答复")
-        self.assertEqual(final["trace"][0]["call_id"], "call-1")
-        events = self.rows("SELECT * FROM ai_usage_events WHERE operation_id=? ORDER BY id",
-                           (operations[0]["id"],))
-        self.assertEqual([row["stage"] for row in events],
-                         ["assistant.round.1", "assistant.round.2"])
-        second_request = json.loads(self.payload(events[1], "request"))
+        self.assertEqual(student_response.status_code, 200)
+        self.assertEqual(self.rows(
+            "SELECT * FROM ai_operations WHERE operation_type='assistant'"), [])
+        self.assertEqual(self.rows("SELECT * FROM ai_usage_events"), [])
+        second_request = json.loads(urlopen.call_args_list[1].args[0].data)
         tool_messages = [m for m in second_request["messages"] if m["role"] == "tool"]
         self.assertEqual(tool_messages[0]["content"], data["trace"][0]["result"])
-
-        with mock.patch.object(llm.urllib.request, "urlopen",
-                               side_effect=[FakeResponse(chat_body("学生答复"))]):
-            student_response = self.student.post(
-                "/assistant/chat", json={"messages": [{"role": "user", "content": "你好"}]},
-                headers={"X-CSRF-Token": CSRF})
-        self.assertEqual(student_response.status_code, 200)
-        self.assertEqual(len(self.rows(
-            "SELECT * FROM ai_operations WHERE operation_type='assistant'")), 1)
 
     def test_connection_test_records_transport(self):
         with mock.patch.object(llm.urllib.request, "urlopen",

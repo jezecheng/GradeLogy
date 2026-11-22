@@ -117,7 +117,7 @@ def _debug_fields(event, *, call_key, request_kind, stage, url, method,
 
 
 def chat_completion(api_url, api_key, payload, timeout=180, retries=3,
-                    usage_hook=None, report_running=False, stage=""):
+                    usage_hook=None, report_running=False, stage="", log_events=True):
     """发送完整 OpenAI payload，返回 (message, finish_reason, error) 并保留逐次原始现场。"""
     del report_running  # 兼容旧参数；所有带 hook 的请求都在发送前登记 running。
     model = payload.get("model") or ""
@@ -168,9 +168,10 @@ def chat_completion(api_url, api_key, payload, timeout=180, retries=3,
                 data.get("usage"), finish=finish,
                 provider_request_id=data.get("id") or header_request_id,
                 response_model=data.get("model") or ""))
-            _log.info("AI 调用 model=%s %.1fs finish=%s",
-                      model, time.perf_counter() - started, finish or "-")
-            if finish == "length":
+            if log_events:
+                _log.info("AI 调用 model=%s %.1fs finish=%s",
+                          model, time.perf_counter() - started, finish or "-")
+            if finish == "length" and log_events:
                 _log.warning("AI 输出被截断 model=%s max_tokens=%s，考虑调大上限",
                              model, payload.get("max_tokens"))
             return message, finish, ""
@@ -184,20 +185,25 @@ def chat_completion(api_url, api_key, payload, timeout=180, retries=3,
                 status="error", error=error, exception=e,
                 provider_request_id=e.headers.get("x-request-id") if e.headers else None))
             if e.code == 429 and attempt < retries - 1:
-                _log.warning("AI 限流 429 model=%s，第 %s 次重试", model, attempt + 1)
+                if log_events:
+                    _log.warning("AI 限流 429 model=%s，第 %s 次重试", model, attempt + 1)
                 time.sleep(5 * (attempt + 1))
                 continue
-            _log.warning("AI 请求失败 model=%s HTTP %s %s", model, e.code, detail[:120])
+            if log_events:
+                _log.warning("AI 请求失败 model=%s HTTP %s %s", model, e.code, detail[:120])
             return {}, "", error
         except Exception as e:
             record(event(status="error", error=str(e), exception=e))
             if attempt < retries - 1:
-                _log.warning("AI 请求异常 model=%s %s，重试", model, str(e)[:120])
+                if log_events:
+                    _log.warning("AI 请求异常 model=%s %s，重试", model, str(e)[:120])
                 time.sleep(2)
                 continue
-            _log.warning("AI 请求异常 model=%s %s", model, str(e)[:120])
+            if log_events:
+                _log.warning("AI 请求异常 model=%s %s", model, str(e)[:120])
             return {}, "", str(e)
-    _log.warning("AI 请求多次失败 model=%s", model)
+    if log_events:
+        _log.warning("AI 请求多次失败 model=%s", model)
     return {}, "", "请求多次失败"
 
 
