@@ -1,10 +1,10 @@
 {% extends "base.html" %}
 {% block title %}AI 用量{% endblock %}
 {% macro token_text(value) -%}
-  {%- if value is not none %}{{ '{:,}'.format(value) }}{% else %}—{% endif -%}
+  {%- if value is not none %}{{ compact_number(value) }}{% else %}—{% endif -%}
 {%- endmacro %}
 {% macro cost_text(value) -%}
-  {%- if value is not none %}¥{{ '%.4f'|format(value) }}{% else %}—{% endif -%}
+  {%- if value is not none %}¥{{ ('%.4f' if 0 <= value < 1 else '%.2f')|format(value) }}{% else %}—{% endif -%}
 {%- endmacro %}
 {% block content %}
 <header class="page-heading">

@@ -1176,5 +1176,25 @@ class AsyncGradingTest(unittest.TestCase):
         self.assertEqual(self._count_ops(), 1)
 
 
+class UsageFormatTest(unittest.TestCase):
+    """AI 用量展示：token 紧凑单位与人民币小数位。"""
+
+    def test_compact_token_units(self):
+        cases = [(999, "999"), (1500, "1.5K"), (999999, "1M"),
+                 (1200000, "1.2M"), (1500000000, "1.5G"),
+                 (2500000000000, "2.5T"), (None, "—")]
+        for value, expected in cases:
+            self.assertEqual(app_module._compact_number(value), expected)
+
+    def test_cost_text_digits(self):
+        base = {"request_count": 1, "total_tokens": 100, "prompt_tokens": 60,
+                "completion_tokens": 40, "unknown_usage_count": 0,
+                "unknown_cost_count": 0, "elapsed_s": 1.0}
+        small = app_module._ai_usage_text(dict(base, estimated_cost=0.003))
+        self.assertIn("预估费用 ¥0.0030", small)
+        large = app_module._ai_usage_text(dict(base, estimated_cost=12.345))
+        self.assertIn("预估费用 ¥12.35", large)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,11 +3,14 @@
 {% macro token_text(value) -%}
   {%- if value is not none %}{{ '{:,}'.format(value) }}{% else %}—{% endif -%}
 {%- endmacro %}
+{% macro token_cell(value) -%}
+  {%- if value is not none %}{{ compact_number(value) }}{% else %}—{% endif -%}
+{%- endmacro %}
 {% macro compact_token(value) -%}
   <span class="monitor-kpi-num" {% if value is not none %}title="{{ '{:,}'.format(value) }} Tokens"{% endif %}>{{ compact_number(value) }}</span>
 {%- endmacro %}
 {% macro cost_text(value) -%}
-  {%- if value is not none %}¥{{ '%.4f'|format(value) }}{% else %}—{% endif -%}
+  {%- if value is not none %}¥{{ ('%.4f' if 0 <= value < 1 else '%.2f')|format(value) }}{% else %}—{% endif -%}
 {%- endmacro %}
 {% macro distribution_table(rows, operation_labels=false) %}
   {% if rows %}
@@ -22,7 +25,7 @@
         </td>
         <td>{{ row.operation_count }}</td>
         <td>{{ row.request_count }}</td>
-        <td>{{ token_text(row.total_tokens) }}</td>
+        <td>{{ token_cell(row.total_tokens) }}</td>
         <td>{{ cost_text(row.estimated_cost) }}</td>
       </tr>
       {% endfor %}
@@ -135,7 +138,7 @@
     <div class="monitor-kpi-foot">命中服务商提示词缓存</div>
   </article>
 </section>
-<p class="muted small monitor-token-note">推理 token：{{ token_text(summary.reasoning_tokens) }}。仅合计服务商已返回的数据，未知值不记为 0。</p>
+<p class="muted small monitor-token-note">推理 token：{{ token_cell(summary.reasoning_tokens) }}。仅合计服务商已返回的数据，未知值不记为 0。</p>
 
 <section class="card monitor-health-strip" aria-label="运行健康度">
   <div class="monitor-health-item">
@@ -242,7 +245,7 @@
         <table class="bar-table">
           <tr><th>日期</th><th>操作</th><th>请求</th><th>总 token</th><th>预估费用</th></tr>
           {% for row in daily %}
-          <tr><td>{{ row.label }}</td><td>{{ row.operation_count }}</td><td>{{ row.request_count }}</td><td>{{ token_text(row.total_tokens) }}</td><td>{{ cost_text(row.estimated_cost) }}</td></tr>
+          <tr><td>{{ row.label }}</td><td>{{ row.operation_count }}</td><td>{{ row.request_count }}</td><td>{{ token_cell(row.total_tokens) }}</td><td>{{ cost_text(row.estimated_cost) }}</td></tr>
           {% endfor %}
         </table>
       </div>
@@ -275,10 +278,10 @@
           <td class="request-model">{{ row.model }}</td>
           <td>{{ ai_operation_label(row.operation_type) or row.operation_type }} <span class="muted">#{{ row.operation_id }}</span><div class="muted small">{{ row.teacher_name or row.teacher_username or '已删除教师' }}</div></td>
           <td>{% if row.operation_status == 'failed' %}<span class="request-status is-error" title="操作失败，展开查看原因">失败</span>{% elif row.event_status == 'success' %}<span class="request-status is-success">成功</span>{% elif row.event_status == 'error' %}<span class="request-status is-error">失败</span>{% else %}<span class="request-status">{{ row.event_status }}</span>{% endif %}</td>
-          <td class="right nowrap">{{ token_text(row.total_tokens) }}</td>
-          <td class="right nowrap">{{ token_text(row.prompt_tokens) }}</td>
-          <td class="right nowrap">{{ token_text(row.completion_tokens) }}</td>
-          <td class="right nowrap">{{ token_text(row.cached_tokens) }}</td>
+          <td class="right nowrap">{{ token_cell(row.total_tokens) }}</td>
+          <td class="right nowrap">{{ token_cell(row.prompt_tokens) }}</td>
+          <td class="right nowrap">{{ token_cell(row.completion_tokens) }}</td>
+          <td class="right nowrap">{{ token_cell(row.cached_tokens) }}</td>
           <td class="right nowrap">{% if row.latency_ms is not none %}{{ '%.1f'|format(row.latency_ms / 1000) }}s{% else %}—{% endif %}</td>
           <td class="right nowrap">{{ cost_text(row.estimated_cost) }}</td>
           <td>

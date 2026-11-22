@@ -226,7 +226,9 @@ def _ai_usage_text(operation):
     if operation["elapsed_s"] is not None:
         parts.append(f"耗时 {operation['elapsed_s']:.1f} 秒")
     if operation["estimated_cost"] is not None:
-        cost = f"预估费用 ¥{operation['estimated_cost']:.4f}"
+        cost_value = operation["estimated_cost"]
+        digits = 4 if 0 <= cost_value < 1 else 2
+        cost = f"预估费用 ¥{cost_value:.{digits}f}"
         if operation["unknown_cost_count"]:
             cost += f"，另有 {operation['unknown_cost_count']} 次请求费用未知"
         parts.append(cost)
@@ -240,9 +242,15 @@ def _compact_number(value):
     if value is None:
         return "—"
     number = float(value)
-    for threshold, suffix in ((1000000000, "B"), (1000000, "M"), (1000, "K")):
+    units = ((10 ** 12, "T"), (10 ** 9, "G"), (10 ** 6, "M"), (1000, "K"))
+    for index, (threshold, suffix) in enumerate(units):
         if abs(number) >= threshold:
-            text = f"{number / threshold:.2f}".rstrip("0").rstrip(".")
+            scaled = number / threshold
+            # 999999 显示成 1000K 不如直接进位成 1M
+            if index and abs(scaled) >= 999.995:
+                scaled = number / units[index - 1][0]
+                suffix = units[index - 1][1]
+            text = f"{scaled:.2f}".rstrip("0").rstrip(".")
             return text + suffix
     return f"{int(number):,}"
 
