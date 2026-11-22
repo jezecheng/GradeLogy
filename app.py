@@ -5188,13 +5188,15 @@ def generate_report(db, sub_id, teacher_id, reuse=False, operation=None):
     md = build_report_md(sub["display_name"], sub["lecture_title"], date_label,
                          questions, summary, detail,
                          kg_diagnosis=_kg_diagnosis(db, sub))
-    if completion_error is not None:
+    if completion_error:
         # AI 评价请求失败时保留旧报告；没有旧报告时保持空值，供界面显示“生成”。
-        _finish_ai_operation(operation, "failed" if completion_error else "success", completion_error)
+        _finish_ai_operation(operation, "failed", completion_error)
     else:
         db.execute("UPDATE submissions SET report_md=?, report_detail=? WHERE id=?",
                    (md, json.dumps(detail, ensure_ascii=False) if detail else "", sub_id))
         db.commit()
+        if operation:
+            _finish_ai_operation(operation, "success")
     return md
 
 
@@ -5727,7 +5729,7 @@ def submission_report_build(sid):
             except Exception:
                 pass
             return
-        # generate_report 只在真正调用 AI 时自行 finish；若被闲时/演示拦截，
+        # generate_report 通常自行结束操作；若被闲时/演示拦截，
         # 队列已把状态置为 running，这里兜底标记 success。
         cur = database.execute(
             "SELECT status FROM ai_operations WHERE id=?", (operation["id"],)).fetchone()

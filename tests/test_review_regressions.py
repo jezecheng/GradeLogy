@@ -505,6 +505,14 @@ class ReviewRegressionTest(unittest.TestCase):
               mock.patch.object(a, "ai_report_comment", return_value={"good": "OK"}) as call):
             a.generate_report(a.get_db(), 30, 2)
         self.assertEqual(call.call_args.kwargs["prompt"], "PROMPT_A")
+        saved = self.db.execute(
+            "SELECT report_md,report_detail FROM submissions WHERE id=30").fetchone()
+        self.assertIn("OK", saved["report_md"])
+        self.assertEqual(json.loads(saved["report_detail"]), {"good": "OK"})
+        operation = self.db.execute(
+            "SELECT status FROM ai_operations WHERE submission_id=30 "
+            "AND operation_type='report_generate' ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertEqual(operation["status"], "success")
 
     def test_env_key_takes_over_entire_ai_configuration(self):
         import ai_config
