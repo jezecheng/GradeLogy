@@ -39,8 +39,8 @@ MAX_TOKENS_SETTINGS = {
                             "hint": "审校图谱并给出治理建议"},
     "max_tokens_kg_category": {"label": "知识图谱分类重构", "default": 32768,
                                "hint": "把自由分类重映射为分层学科树"},
-    "max_tokens_report": {"label": "报告评语", "default": 32768,
-                          "hint": "生成学生作业的个性化评语"},
+    "max_tokens_report": {"label": "报告评语", "default": 8192,
+                          "hint": "生成总评和逐题图谱评语；输出被截断时可调大"},
 }
 MAX_TOKENS_KEYS = tuple(MAX_TOKENS_SETTINGS.keys())
 

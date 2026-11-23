@@ -348,6 +348,8 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertIn("标准答案内容", sent)
         self.assertIn("复核后确认遗漏", sent)
         self.assertIn("氧化还原反应", sent)
+        self.assertEqual(chat.call_args.kwargs["timeout"], 120)
+        self.assertEqual(chat.call_args.kwargs["retries"], 2)
         self.assertEqual(result["question_comments"], {
             "1.1": "该题条件遗漏，建议对照氧化还原反应规律。"})
 

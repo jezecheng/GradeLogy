@@ -289,10 +289,12 @@ class AdminInsightsTest(unittest.TestCase):
             self.assertIn("系统时间统一使用北京时间", html)
             self.assertIn('name="display-timezone" content="Asia/Shanghai"', html)
 
-    def test_all_ai_token_defaults_are_32768(self):
+    def test_report_comment_token_default_is_sized_for_multi_question_feedback(self):
         from ai_config import MAX_TOKENS_SETTINGS
         self.assertTrue(MAX_TOKENS_SETTINGS)
-        self.assertEqual({item["default"] for item in MAX_TOKENS_SETTINGS.values()}, {32768})
+        self.assertEqual(MAX_TOKENS_SETTINGS["max_tokens_report"]["default"], 8192)
+        self.assertTrue(all(item["default"] == 32768 for key, item in MAX_TOKENS_SETTINGS.items()
+                            if key != "max_tokens_report"))
 
     def test_ai_usage_times_distinguish_utc_events_from_legacy_operations(self):
         self.operation(1, 2, "grade", "model-a", "success", "2026-01-02 11:04:05")
