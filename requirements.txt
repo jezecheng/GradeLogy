@@ -1,7 +1,7 @@
 flask>=3.0
 certifi>=2024.0
 gunicorn>=21.0
-pypdfium2>=4.30
+pypdfium2>=5.15.2
 pillow>=10.0
 pypinyin>=0.53
 requests>=2.31

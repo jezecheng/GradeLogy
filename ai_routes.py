@@ -13,6 +13,7 @@ import base64
 import json
 import re
 import tempfile
+from datetime import date, datetime, timedelta
 
 from flask import (Response, abort, flash, g, redirect, render_template, request,
                    send_file, stream_with_context, url_for)
@@ -20,6 +21,7 @@ from werkzeug.utils import secure_filename
 
 from ai_config import MAX_TOKENS_SETTINGS
 from utilities import ai_debug, llm
+from utilities.time_utils import beijing_wall_now
 
 _REQUIRED = (
     "role_required", "get_db", "get_setting", "save_setting", "now_text", "beijing_iso",
@@ -141,6 +143,75 @@ def register(registry, deps):
         """教师查看自己的模型请求与逐请求用量明细。"""
         db = get_db()
         teacher_id = g.user["id"]
+        period_labels = {
+            "all": "全部时间", "3": "最近 3 天", "7": "最近 7 天",
+            "30": "最近 30 天", "custom": "指定时间段",
+        }
+        period = request.args.get("period", "all")
+        if period not in period_labels:
+            period = "all"
+
+        scenes = [{"value": row["operation_type"],
+                   "label": ai_operation_label.get(row["operation_type"], row["operation_type"])}
+                  for row in db.execute(
+                      "SELECT DISTINCT operation_type FROM ai_operations "
+                      "WHERE teacher_id=? ORDER BY operation_type", (teacher_id,))]
+        scene = request.args.get("scene", "")
+        if scene not in {item["value"] for item in scenes}:
+            scene = ""
+
+        courses = [dict(row) for row in db.execute(
+            "SELECT DISTINCT c.id,c.name FROM courses c JOIN course_teachers ct "
+            "ON ct.course_id=c.id WHERE ct.teacher_id=? ORDER BY c.name COLLATE NOCASE",
+            (teacher_id,))]
+        course_ids = {row["id"] for row in courses}
+        try:
+            course_id = int(request.args.get("course_id", ""))
+            if course_id not in course_ids:
+                course_id = ""
+        except (TypeError, ValueError):
+            course_id = ""
+
+        start_value = request.args.get("start_date", "").strip()[:10]
+        end_value = request.args.get("end_date", "").strip()[:10]
+        start_date = end_date = None
+        filter_error = ""
+        try:
+            start_date = date.fromisoformat(start_value) if start_value else None
+            end_date = date.fromisoformat(end_value) if end_value else None
+        except ValueError:
+            filter_error = "日期格式无效，请重新选择。"
+        if not filter_error and start_date and end_date and start_date > end_date:
+            filter_error = "开始日期不能晚于结束日期。"
+        if (not filter_error and period == "custom"
+                and not start_date and not end_date):
+            filter_error = "指定时间段请至少选择开始日期或结束日期。"
+
+        where = ["o.teacher_id=?"]
+        params = [teacher_id]
+        if scene:
+            where.append("o.operation_type=?")
+            params.append(scene)
+        if course_id:
+            where.append("o.course_id=?")
+            params.append(course_id)
+        if period in ("3", "7", "30"):
+            since = beijing_wall_now().date() - timedelta(days=int(period) - 1)
+            where.append("o.started_at>=?")
+            params.append(datetime.combine(since, datetime.min.time()).isoformat(
+                sep=" ", timespec="seconds"))
+        elif period == "custom" and not filter_error:
+            if start_date:
+                where.append("o.started_at>=?")
+                params.append(datetime.combine(start_date, datetime.min.time()).isoformat(
+                    sep=" ", timespec="seconds"))
+            if end_date:
+                after_end = end_date + timedelta(days=1)
+                where.append("o.started_at<?")
+                params.append(datetime.combine(after_end, datetime.min.time()).isoformat(
+                    sep=" ", timespec="seconds"))
+        where_sql = " AND ".join(where)
+
         summary = db.execute("""
             SELECT COUNT(e.id) AS request_count,
               SUM(e.prompt_tokens) AS prompt_tokens,
@@ -151,12 +222,12 @@ def register(registry, deps):
               SUM(e.estimated_cost) AS estimated_cost
             FROM ai_operations o
             LEFT JOIN ai_usage_events e ON e.operation_id=o.id
-            WHERE o.teacher_id=?
-        """, (teacher_id,)).fetchone()
-        operations = db.execute("SELECT COUNT(*) FROM ai_operations WHERE teacher_id=?",
-                                (teacher_id,)).fetchone()[0]
+            WHERE """ + where_sql, params).fetchone()
+        operations = db.execute(
+            "SELECT COUNT(*) FROM ai_operations o WHERE " + where_sql, params).fetchone()[0]
         page_size = 100
-        pages = max(1, (summary["request_count"] + page_size - 1) // page_size)
+        request_count = summary["request_count"] or 0
+        pages = max(1, (request_count + page_size - 1) // page_size)
         page = request.args.get("page", 1, type=int) or 1
         page = max(1, min(page, pages))
         requests = db.execute("""
@@ -175,13 +246,26 @@ def register(registry, deps):
             LEFT JOIN submissions s ON s.id=o.submission_id
             LEFT JOIN lectures l ON l.id=COALESCE(o.lecture_id,s.lecture_id)
             LEFT JOIN users u ON u.id=s.student_id
-            WHERE o.teacher_id=?
-            ORDER BY e.id DESC LIMIT ? OFFSET ?
-        """, (teacher_id, page_size, (page - 1) * page_size)).fetchall()
+            WHERE """ + where_sql + " ORDER BY e.id DESC LIMIT ? OFFSET ?",
+            (*params, page_size, (page - 1) * page_size)).fetchall()
+
+        filters = {
+            "period": period, "scene": scene, "course_id": course_id,
+            "start_date": start_value, "end_date": end_value,
+        }
+        page_links = {
+            "previous": (url_for("teacher_ai_usage", **filters, page=page - 1)
+                         if page > 1 else ""),
+            "next": (url_for("teacher_ai_usage", **filters, page=page + 1)
+                     if page < pages else ""),
+        }
         return render_template("teacher_ai_usage.html", summary=summary,
                                operations=operations,
                                requests=requests,
                                page=page, pages=pages, page_size=page_size,
+                               filters=filters, period_labels=period_labels,
+                               scenes=scenes, courses=courses,
+                               filter_error=filter_error, page_links=page_links,
                                ai_operation_label=ai_operation_label,
                                ai_status_label=ai_status_label)
 

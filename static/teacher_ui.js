@@ -5,6 +5,36 @@
     var user = document.body.dataset.uiUser || 'anonymous';
     function read(key) { try { return sessionStorage.getItem('gradelogy.ui.' + user + '.' + location.pathname + '.' + key); } catch (_) { return null; } }
     function write(key, value) { try { sessionStorage.setItem('gradelogy.ui.' + user + '.' + location.pathname + '.' + key, value); } catch (_) {} }
+    var clock = document.getElementById('teacher-current-time');
+    if (clock) {
+      var epoch = Number(clock.dataset.epochMs);
+      var browserStart = Date.now();
+      var formatter;
+      try {
+        formatter = new Intl.DateTimeFormat('zh-CN', {
+          timeZone: clock.dataset.timezone || undefined,
+          year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+        });
+      } catch (_) {}
+      function updateClock() {
+        var date = new Date(Number.isFinite(epoch) ? epoch + Date.now() - browserStart : Date.now());
+        if (!formatter) {
+          clock.textContent = date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0')
+            + '-' + String(date.getDate()).padStart(2, '0') + ' '
+            + String(date.getHours()).padStart(2, '0') + ':'
+            + String(date.getMinutes()).padStart(2, '0') + ':'
+            + String(date.getSeconds()).padStart(2, '0');
+          return;
+        }
+        var parts = {};
+        formatter.formatToParts(date).forEach(function (part) { parts[part.type] = part.value; });
+        clock.textContent = parts.year + '-' + parts.month + '-' + parts.day + ' '
+          + parts.hour + ':' + parts.minute + ':' + parts.second;
+      }
+      updateClock();
+      window.setInterval(updateClock, 1000);
+    }
     document.querySelectorAll('[data-tab-group]').forEach(function (group) {
       var tabs = Array.from(group.querySelectorAll('[data-tab]')).filter(function (tab) { return tab.closest('[data-tab-group]') === group; });
       var panels = Array.from(group.querySelectorAll('[data-tab-panel]')).filter(function (panel) { return panel.closest('[data-tab-group]') === group; });
@@ -41,6 +71,37 @@
     document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { var queue = document.getElementById('grading-queue'); if (queue) { queue.classList.remove('open'); queue.querySelector('button').setAttribute('aria-expanded','false'); } } });
     document.querySelectorAll('[data-open-assistant]').forEach(function (b) { b.addEventListener('click', function () { document.getElementById('assistant-fab').click(); }); });
     document.querySelectorAll('[data-open-tasks]').forEach(function (b) { b.addEventListener('click', function () { document.querySelector('.grading-queue-btn').click(); }); });
+    var tagForm = document.querySelector('.tag-form[data-tag-busy="1"]');
+    if (tagForm && tagForm.dataset.operationId && tagForm.dataset.statusUrl) {
+      var tagPollStopped = false;
+      var tagPollTimer = 0;
+      function scheduleTagPoll() {
+        if (!tagPollStopped) tagPollTimer = window.setTimeout(pollTagStatus, 2500);
+      }
+      function pollTagStatus() {
+        fetch(tagForm.dataset.statusUrl + '?operation_id='
+          + encodeURIComponent(tagForm.dataset.operationId), {
+          headers: { Accept: 'application/json' }, cache: 'no-store'
+        }).then(function (response) {
+          if (!response.ok) throw new Error('状态查询失败');
+          return response.json();
+        }).then(function (data) {
+          if (!data.ok) throw new Error(data.error || '状态查询失败');
+          if (data.status === 'queued' || data.status === 'running') {
+            scheduleTagPoll();
+          } else {
+            tagPollStopped = true;
+            window.location.reload();
+          }
+        }).catch(scheduleTagPoll);
+      }
+      document.addEventListener('visibilitychange', function () {
+        if (document.hidden || tagPollStopped) return;
+        window.clearTimeout(tagPollTimer);
+        pollTagStatus();
+      });
+      pollTagStatus();
+    }
     document.querySelectorAll('[data-fold]').forEach(function (details) {
       var saved = read('fold.' + details.dataset.fold);
       if (saved !== null && details.dataset.forceOpen !== '1') details.open = saved === '1';

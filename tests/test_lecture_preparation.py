@@ -119,6 +119,23 @@ class LecturePreparationTest(unittest.TestCase):
         self.assertIn("正在生成题目列表…", html)
         self.assertIn('class="is-busy" disabled aria-busy="true"', html)
 
+    def test_tag_button_stays_busy_for_queued_job_and_status_is_pollable(self):
+        with app_module.app.app_context():
+            operation = app_module._start_ai_operation(
+                2, "question_tagging", "model", course_id=10, lecture_id=20,
+                status="queued")
+        page = self.client.get(self._url("lecture_detail", hid=20))
+        self.assertEqual(page.status_code, 200)
+        html = page.get_data(as_text=True)
+        self.assertIn("生成中…", html)
+        self.assertIn('data-tag-busy="1"', html)
+        self.assertIn('disabled aria-busy="true"', html)
+
+        status = self.client.get(self._url(
+            "lecture_tags_status", hid=20) + "?operation_id=" + str(operation["id"]))
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(status.json["status"], "queued")
+
     def test_replacing_answer_clears_saved_pages_and_scope(self):
         with mock.patch.object(app_module, "save_upload", return_value="new-answer.pdf"), \
                 mock.patch.object(app_module, "analyze_answer_pdf") as analyze:

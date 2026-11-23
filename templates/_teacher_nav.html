@@ -7,8 +7,18 @@
     <a href="{{ url_for(endpoint) }}" {% if area == key %}aria-current="page"{% endif %}>{{ label }}</a>
     {% endfor %}
   </nav>
-  <button type="button" class="ghost" data-about-open>帮助与使用文档</button>
-  <p class="muted small">{{ g.user.display_name }} · 教师</p>
+  <div class="teacher-sidebar-footer">
+    <button type="button" class="ghost" data-about-open>帮助与使用文档</button>
+    <div class="teacher-system-status" aria-label="系统信息">
+      <p><span>当前时间</span>
+        <time id="teacher-current-time" data-epoch-ms="{{ current_time_epoch_ms }}"
+              data-timezone="{{ display_timezone }}">{{ display_current_time }}</time>
+      </p>
+      <p><span>系统启动时间</span><time>{{ app_started }}</time></p>
+      <p><span>系统版本</span><span>v{{ app_version }}</span></p>
+    </div>
+    <p class="muted small teacher-sidebar-user">{{ g.user.display_name }} · 教师</p>
+  </div>
 </aside>
 <header class="teacher-topbar">
   <a class="teacher-mobile-brand" href="{{ url_for('courses') }}">GradeLogy</a>

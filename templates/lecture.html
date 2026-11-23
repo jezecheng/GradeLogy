@@ -23,13 +23,14 @@
     <h2>代学生上传作业</h2>
     <p class="muted small">适用于学生把纸质作业交给老师的情况；上传后同样可以走 AI 批阅与报告。</p>
     <form method="post" action="{{ url_for('lecture_upload_for', hid=hw.id) }}"
-          enctype="multipart/form-data" class="stack-form" data-draft-upload>
+          enctype="multipart/form-data" class="stack-form upload-for-form" data-draft-upload>
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <input type="hidden" name="confirm_replace" value="">
       <label>选择学生
         <select name="student_id" required>
           <option value="">请选择</option>
           {% for st in students %}
-          <option value="{{ st.id }}">{{ st.display_name }}（{{ st.username }}）</option>
+          <option value="{{ st.id }}" data-submission-count="{{ st.submission_count }}">{{ st.display_name }}（{{ st.username }}）</option>
           {% endfor %}
         </select>
       </label>
@@ -273,9 +274,8 @@
     </div>
     {% if answer_total == 0 %}
     <p class="muted small" style="color:#c0392b; background:#fdf0ef; padding:10px 12px; border-radius:6px">
-      无法读取这份 PDF 的页数（pdfium 解析失败），因此无法生成缩略图和题目清单。
-      这通常是 PDF 文件本身的问题（如加密、损坏、特殊格式）。
-      建议：用其他工具重新导出/打印为 PDF 后再上传；或到「管理后台 → 日志」查看 app.log 中的
+      服务器端 PDFium 无法读取这份 PDF 的页数，因此无法生成缩略图和题目清单。浏览器预览使用不同的 PDF 阅读器，能预览不代表服务器可以解析。
+      请先确认服务环境已安装 requirements 中的 PDFium 版本；仍失败时再用其他工具重新导出/打印为 PDF，或到「管理后台 → 日志」查看
       <code>pdf_page_count</code> 错误详情。
     </p>
     {% endif %}
@@ -423,9 +423,20 @@
     </div>
   </form>
   <div class="save-bar" style="margin-top:6px">
-    <form method="post" action="{{ url_for('lecture_tags_generate', hid=hw.id) }}" class="tag-form">
+    {% set tag_busy = tag_operation and tag_operation.status in ('queued', 'running') %}
+    <form method="post" action="{{ url_for('lecture_tags_generate', hid=hw.id) }}" class="tag-form"
+          data-tag-busy="{{ '1' if tag_busy else '0' }}"
+          data-operation-id="{{ tag_operation.id if tag_operation else '' }}"
+          data-status-url="{{ url_for('lecture_tags_status', hid=hw.id) }}">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-      <button type="submit" class="small ghost">生成/重新生成知识点标签</button>
+      <button type="submit" class="small ghost{% if tag_busy %} is-busy{% endif %}"
+              {% if tag_busy %}disabled aria-busy="true"{% endif %}>
+        {% if tag_busy %}<span class="spinner" aria-hidden="true"></span>生成中…
+        {% else %}生成/重新生成知识点标签{% endif %}
+      </button>
+      {% if tag_operation and tag_operation.status == 'failed' %}
+      <span class="danger-text small" role="status">上次生成失败：{{ tag_operation.error or '请重试。' }}</span>
+      {% endif %}
       <span class="muted small">保存作业范围不会调用 AI；答案或范围变化后，旧 AI 标签不会自动更新。自动批阅会等待当前范围的标签生成成功，完成后等待中的提交自动入队；老师仍可不依赖标签手动批阅。</span>
     </form>
   </div>
@@ -593,6 +604,25 @@
             form.submit();
           });
           return;
+        }
+        if (form.classList.contains('upload-for-form')) {
+          var studentSelect = form.querySelector('[name="student_id"]');
+          var selected = studentSelect && studentSelect.options[studentSelect.selectedIndex];
+          var previousCount = Number(selected && selected.dataset.submissionCount || 0);
+          var replaceConfirmation = form.querySelector('[name="confirm_replace"]');
+          var draftBox = form.querySelector('[data-draft-box]');
+          if (previousCount && draftBox && !draftBox.hidden && replaceConfirmation &&
+              replaceConfirmation.value !== studentSelect.value) {
+            e.preventDefault();
+            confirmDialog('重新上传将覆盖该学生本讲全部 ' + previousCount +
+              ' 份历史提交，并清除关联的逐题批阅、报告和复习标记。历史附件和 AI 用量审计仍保留；此操作不可撤销。确定继续吗？',
+              '覆盖全部历史并上传').then(function (ok) {
+              if (!ok) return;
+              replaceConfirmation.value = studentSelect.value;
+              form.requestSubmit();
+            });
+            return;
+          }
         }
         if (btn && !btn.disabled) { btn.disabled = true; btn.textContent = '上传中…'; }
       });

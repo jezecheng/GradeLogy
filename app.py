@@ -285,6 +285,8 @@ HELP_DOCS = {
 def _inject_app_meta():
     user = getattr(g, "user", None)
     role = user["role"] if user else ""
+    current_time = now_beijing()
+    display_timezone = _display_timezone_name()
     return {
         "app_version": cfg.APP_VERSION,
         "app_commit": APP_GIT_COMMIT,
@@ -292,7 +294,10 @@ def _inject_app_meta():
         "app_version_updated": _legacytime(APP_GIT_DATE),
         "app_python": platform.python_version(),
         "app_started": _legacytime(APP_STARTED_AT),
-        "display_timezone": _display_timezone_name(),
+        "display_current_time": _format_display_time(
+            current_time, "UTC", "%Y-%m-%d %H:%M:%S"),
+        "current_time_epoch_ms": int(current_time.timestamp() * 1000),
+        "display_timezone": display_timezone,
         "display_timezone_options": DISPLAY_TIMEZONE_OPTIONS,
         "help_docs": [{"slug": slug, "title": title}
                       for slug, (title, roles) in HELP_DOCS.items() if role in roles],
@@ -1722,6 +1727,9 @@ def lecture_detail(hid):
     scope_operation = db.execute(
         "SELECT id,status,error FROM ai_operations WHERE lecture_id=? "
         "AND operation_type='scope_analyze' ORDER BY id DESC LIMIT 1", (hid,)).fetchone()
+    tag_operation = db.execute(
+        "SELECT id,status,error FROM ai_operations WHERE lecture_id=? "
+        "AND operation_type='question_tagging' ORDER BY id DESC LIMIT 1", (hid,)).fetchone()
     subs = db.execute("""
         SELECT s.*, u.display_name, u.username,
           (SELECT COUNT(*) FROM questions q WHERE q.submission_id=s.id) AS n_questions,
@@ -1734,9 +1742,12 @@ def lecture_detail(hid):
         JOIN users u ON u.id=s.student_id
         WHERE s.lecture_id=? ORDER BY s.created_at DESC""", (hid,)).fetchall()
     students = db.execute("""
-        SELECT u.id, u.display_name, u.username FROM enrollments e
-        JOIN users u ON u.id=e.student_id
-        WHERE e.course_id=? AND u.active=1 ORDER BY u.display_name""", (course["id"],)).fetchall()
+        SELECT u.id,u.display_name,u.username,
+          (SELECT COUNT(*) FROM submissions s WHERE s.lecture_id=? AND s.student_id=u.id)
+            AS submission_count
+        FROM enrollments e JOIN users u ON u.id=e.student_id
+        WHERE e.course_id=? AND u.active=1 ORDER BY u.display_name""",
+                          (hid, course["id"])).fetchall()
 
     # ---------- 每题统计：对/半对/错/未作答/总人数 ----------
     qstats = db.execute("""
@@ -1775,20 +1786,19 @@ def lecture_detail(hid):
     lecture_weak_tags = [s["tag"] for s in tag_stats
                          if s.get("n_wrong", 0) > 0 or s.get("n_partial", 0) > 0]
     lecture_kg_chains = _kg_weakness_chains(db, course["id"], lecture_weak_tags)
-    return render_template("lecture.html", hw=hw, course=course, subs=subs, students=students,
-                            qstats=qstats, n_subs=n_subs, n_graded=n_graded, n_reviewed=n_reviewed,
-                            answer_total=answer_total, answer_picked=answer_picked,
-                            scope_item_count=scope_item_count,
-                            scope_reset_impact=scope_reset_impact,
-                            scope_operation=scope_operation,
-                            grade_jobs=grade_jobs,
-                           grading_active=any(j["status"] in ("queued", "running")
-                                              for j in grade_jobs.values()),
-                           acc_by=acc_by, tag_by_key=tag_by_key, tag_stats=tag_stats,
-                           lecture_kg_chains=lecture_kg_chains,
-                           tag_analysis=tag_utils.latest_analysis(
-                               db, "horizontal", lecture_id=hid),
-                           ai_operations=_ai_operation_history(lecture_id=hid, limit=8))
+    return render_template(
+        "lecture.html", hw=hw, course=course, subs=subs, students=students,
+        qstats=qstats, n_subs=n_subs, n_graded=n_graded, n_reviewed=n_reviewed,
+        answer_total=answer_total, answer_picked=answer_picked,
+        scope_item_count=scope_item_count, scope_reset_impact=scope_reset_impact,
+        scope_operation=scope_operation, tag_operation=tag_operation,
+        grade_jobs=grade_jobs,
+        grading_active=any(j["status"] in ("queued", "running")
+                           for j in grade_jobs.values()),
+        acc_by=acc_by, tag_by_key=tag_by_key, tag_stats=tag_stats,
+        lecture_kg_chains=lecture_kg_chains,
+        tag_analysis=tag_utils.latest_analysis(db, "horizontal", lecture_id=hid),
+        ai_operations=_ai_operation_history(lecture_id=hid, limit=8))
 
 
 @_routes.route("/lecture/<oid:hid>/upload-for", methods=["POST"])
@@ -1806,6 +1816,16 @@ def lecture_upload_for(hid):
     if not student_id or not enrolled:
         flash("请选择本课程的学生")
         return redirect(url_for("lecture_detail", hid=hid))
+    existing_ids = [row[0] for row in db.execute(
+        "SELECT id FROM submissions WHERE lecture_id=? AND student_id=? ORDER BY id",
+        (hid, student_id))]
+    attempt_offset = _submission_attempt_offset(db, hid, student_id) if existing_ids else 0
+    if existing_ids and request.form.get("confirm_replace") != str(student_id):
+        flash(f"该学生在本讲已有 {len(existing_ids)} 份提交；请确认覆盖全部历史提交后重新上传。")
+        return redirect(url_for("lecture_detail", hid=hid))
+    if any(_submission_grade_active(db, sid) for sid in existing_ids):
+        flash("该学生的提交仍有批阅或报告任务在后台运行，暂时不能覆盖；请稍后重试。")
+        return redirect(url_for("lecture_detail", hid=hid))
     files = [f for f in (request.files.getlist("files") or request.files.getlist("file"))
              if f and f.filename]
     if not files:
@@ -1822,16 +1842,19 @@ def lecture_upload_for(hid):
     names = [save_upload(f, course["id"], hid, student_id, filename=fname)
              for f, fname in prepared]
     stored = names[0] if len(names) == 1 else json.dumps(names, ensure_ascii=False)
-    cur = db.execute("INSERT INTO submissions(lecture_id,student_id,file_path) VALUES(?,?,?)",
-                     (hid, student_id, stored))
+    if existing_ids:
+        deletion.delete_submissions(db, "lecture_id=? AND student_id=?", (hid, student_id))
+    cur = db.execute("INSERT INTO submissions(lecture_id,student_id,file_path,prior_attempts) "
+                     "VALUES(?,?,?,?)", (hid, student_id, stored, attempt_offset))
     db.commit()
     student = db.execute("SELECT display_name FROM users WHERE id=?", (student_id,)).fetchone()
     log.info("老师代传作业 lecture=%s student=%s files=%s operator=%s",
              hid, student_id, len(names), g.user["username"])
+    replaced = f"，已覆盖 {len(existing_ids)} 份历史提交" if existing_ids else ""
     if _auto_enqueue_submission(cur.lastrowid):
-        flash(f"已替 {student['display_name']} 上传 {len(names)} 个文件，已自动进入批改队列。")
+        flash(f"已替 {student['display_name']} 上传 {len(names)} 个文件{replaced}，已自动进入批改队列。")
     else:
-        flash(f"已替 {student['display_name']} 上传 {len(names)} 个文件，可点「AI 批阅」开始批改")
+        flash(f"已替 {student['display_name']} 上传 {len(names)} 个文件{replaced}，可点「AI 批阅」开始批改")
     return redirect(url_for("lecture_detail", hid=hid))
 
 
@@ -2503,6 +2526,29 @@ def lecture_tags_generate(hid):
     else:
         flash(f"已重新生成 {count} 个知识点标签")
     return redirect(url_for("lecture_detail", hid=hid))
+
+
+@_routes.route("/lecture/<oid:hid>/tags/status")
+@role_required("teacher")
+def lecture_tags_status(hid):
+    """查询指定讲次知识点标签生成任务状态，供讲次页完成后自动刷新。"""
+    db = get_db()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
+    if not hw:
+        abort(404)
+    own_course(hw["course_id"])
+    operation_id = request.args.get("operation_id", type=int)
+    if not operation_id:
+        return jsonify(ok=False, error="缺少 operation_id"), 400
+    operation = db.execute(
+        "SELECT id,status,error FROM ai_operations WHERE id=? AND lecture_id=? "
+        "AND operation_type='question_tagging'", (operation_id, hid)).fetchone()
+    if not operation:
+        abort(404)
+    response = jsonify(ok=True, status=operation["status"],
+                       error=operation["error"] or "")
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @_routes.route("/lecture/<oid:hid>/tag-analysis", methods=["POST"])
@@ -5255,12 +5301,19 @@ def student_lecture_page(hid):
     if request.method == "POST":
         files = [f for f in (request.files.getlist("files") or request.files.getlist("file"))
                  if f and f.filename]
+        existing_ids = [row[0] for row in db.execute(
+            "SELECT id FROM submissions WHERE lecture_id=? AND student_id=? ORDER BY id",
+            (hid, g.user["id"]))]
+        attempt_offset = (_submission_attempt_offset(db, hid, g.user["id"])
+                          if existing_ids else 0)
         if not files:
             flash("请选择要提交的作业图片或 PDF")
-        elif _submission_grade_active(db, _latest_submission_id(db, hid, g.user["id"])):
+        elif any(_submission_grade_active(db, sid) for sid in existing_ids):
             flash("这份作业正在批改中，已暂时锁定；请稍后回来再提交新的版本。")
         elif len(files) > 20:
             flash("一次最多提交 20 个文件，请合并或分次提交")
+        elif existing_ids and request.form.get("confirm_replace") != "1":
+            flash(f"本讲已有 {len(existing_ids)} 份历史提交；请确认覆盖全部历史版本后重新提交。")
         else:
             # 先统一校验，避免部分文件已落盘后才发现格式不对
             try:
@@ -5271,15 +5324,20 @@ def student_lecture_page(hid):
             names = [save_upload(f, hw["course_id"], hid, g.user["id"], filename=fname)
                      for f, fname in prepared]
             stored = names[0] if len(names) == 1 else json.dumps(names, ensure_ascii=False)
-            cur = db.execute("INSERT INTO submissions(lecture_id,student_id,file_path) "
-                             "VALUES(?,?,?)", (hid, g.user["id"], stored))
+            if existing_ids:
+                deletion.delete_submissions(
+                    db, "lecture_id=? AND student_id=?", (hid, g.user["id"]))
+            cur = db.execute("INSERT INTO submissions(lecture_id,student_id,file_path,prior_attempts) "
+                             "VALUES(?,?,?,?)",
+                             (hid, g.user["id"], stored, attempt_offset))
             db.commit()
             sid = cur.lastrowid
+            replaced = f"已覆盖本讲 {len(existing_ids)} 份历史提交；" if existing_ids else ""
             if _auto_enqueue_submission(sid):
-                flash(f"提交成功（{len(names)} 个文件），已自动进入批改队列；"
+                flash(f"{replaced}提交成功（{len(names)} 个文件），已自动进入批改队列；"
                       "批改期间作业暂时锁定，完成后可回来修改提交。")
             else:
-                flash(f"提交成功（{len(names)} 个文件），等待老师批改")
+                flash(f"{replaced}提交成功（{len(names)} 个文件），等待老师批改")
         return redirect(url_for("student_lecture_page", hid=hid))
     subs = [dict(row) for row in db.execute(
         "SELECT * FROM submissions WHERE lecture_id=? AND student_id=? "
@@ -5331,6 +5389,15 @@ def _latest_submission_id(db, lecture_id, student_id):
     row = db.execute("SELECT id FROM submissions WHERE lecture_id=? AND student_id=? "
                      "ORDER BY id DESC LIMIT 1", (lecture_id, student_id)).fetchone()
     return row["id"] if row else None
+
+
+def _submission_attempt_offset(db, lecture_id, student_id):
+    """覆盖历史记录时保留该学生已消耗的自动批阅次数，避免借覆盖重置额度。"""
+    row = db.execute(
+        "SELECT COUNT(*) AS n,COALESCE(MAX(prior_attempts),0) AS prior "
+        "FROM submissions WHERE lecture_id=? AND student_id=?",
+        (lecture_id, student_id)).fetchone()
+    return int(row["n"] or 0) + int(row["prior"] or 0)
 
 
 # ---------- 工具 ----------

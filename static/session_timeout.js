@@ -40,7 +40,7 @@
     } catch (e) {}
     return nativeFetch(input, options).then(function (response) {
       if (response.status === 401 && response.headers.get('X-Session-Expired') === '1') {
-        goToLogin(false);
+        goToLogin();
       }
       return response;
     });
@@ -72,11 +72,15 @@
     if (dialog && dialog.open && Date.now() - lastActivityAt < warningAfter) hideDialog();
   }
 
-  function goToLogin() {
+  function goToLogin(notifyOtherTabs) {
     if (redirecting) return;
     redirecting = true;
-    writeStorage(logoutKey, Date.now());
-    broadcast({type: 'logout', at: Date.now()});
+    // A tab reacting to another tab's logout must not echo the message back;
+    // the initiating tab still needs to complete GET /logout and revoke the server session.
+    if (notifyOtherTabs !== false) {
+      writeStorage(logoutKey, Date.now());
+      broadcast({type: 'logout', at: Date.now()});
+    }
     window.location.replace(loginUrl + '?next=' + encodeURIComponent(window.location.pathname));
   }
 
@@ -113,7 +117,7 @@
     window.fetch(statusUrl, {headers: {'Accept': 'application/json'}, credentials: 'same-origin'})
       .then(function (response) {
         if (!response.ok) {
-          if (response.status === 401) goToLogin(false);
+          if (response.status === 401) goToLogin();
           else if (message && dialog && dialog.open) message.textContent = '暂时无法验证登录状态，请检查网络后重试。';
           return null;
         }
@@ -142,7 +146,7 @@
       body: '{}'
     }).then(function (response) {
       if (!response.ok) {
-        if (response.status === 401) goToLogin(false);
+        if (response.status === 401) goToLogin();
         else {
           if (continueButton) continueButton.disabled = false;
           if (message && dialog && dialog.open) message.textContent = '无法续期登录状态，请检查网络后重试。';

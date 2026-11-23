@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import urllib.error
 import zipfile
+from urllib.parse import urlencode
 from unittest import mock
 
 try:
@@ -317,6 +318,33 @@ class AIDebugLogTest(unittest.TestCase):
         self.assertIn(self.zip_url(result["operation_id"]), page)
         self.assertIn("新窗口打开", page)
         self.assertIn("下载 ZIP", page)
+
+    def test_teacher_ai_usage_filters_summary_and_requests_by_scene_course_and_dates(self):
+        selected = self.run_chat(
+            [FakeResponse(chat_body("报告场景"))], operation_type="report_generate")
+        excluded = self.run_chat(
+            [FakeResponse(chat_body("批阅场景"))], operation_type="grade")
+        with self.app.app_context():
+            db = a.get_db()
+            db.execute("INSERT INTO courses(id,name,teacher_id) VALUES(10,'数学',2)")
+            db.execute("INSERT INTO course_teachers(course_id,teacher_id) VALUES(10,2)")
+            db.execute("UPDATE ai_operations SET course_id=10 WHERE id IN (?,?)",
+                       (selected["operation_id"], excluded["operation_id"]))
+            db.commit()
+
+        today = a.beijing_wall_now().date().isoformat()
+        query = urlencode({
+            "period": "custom", "start_date": today, "end_date": today,
+            "scene": "report_generate", "course_id": "10",
+        })
+        page = self.teacher.get(self.url("teacher_ai_usage") + "?" + query)
+        self.assertEqual(page.status_code, 200)
+        html = page.get_data(as_text=True)
+        self.assertIn("指定时间段", html)
+        self.assertIn("数学", html)
+        self.assertIn("覆盖 1 次 AI 操作", html)
+        self.assertIn(f"#{selected['operation_id']}", html)
+        self.assertNotIn(f"#{excluded['operation_id']}", html)
 
     def test_large_payload_preview_is_capped_but_download_is_complete(self):
         response = FakeResponse(chat_body("A" * 300000))

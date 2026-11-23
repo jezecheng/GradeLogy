@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS submissions(
   report_detail TEXT DEFAULT '',
   report_published INTEGER DEFAULT 0,
   review_skipped INTEGER DEFAULT 0,
+  prior_attempts INTEGER NOT NULL DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS questions(
@@ -518,6 +519,8 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=(), reco
         con.execute("ALTER TABLE submissions ADD COLUMN report_published INTEGER DEFAULT 0")
     if "review_skipped" not in scols:
         con.execute("ALTER TABLE submissions ADD COLUMN review_skipped INTEGER DEFAULT 0")
+    if "prior_attempts" not in scols:
+        con.execute("ALTER TABLE submissions ADD COLUMN prior_attempts INTEGER NOT NULL DEFAULT 0")
     # 轻量迁移：讲次新增「学生版」讲义 PDF，与「教师版」标准答案并存
     lcols = {r[1] for r in con.execute("PRAGMA table_info(lectures)")}
     if "student_pdf" not in lcols:

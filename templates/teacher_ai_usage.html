@@ -14,6 +14,46 @@
   </div>
 </header>
 
+<section class="card ai-usage-filter-card" aria-label="AI 用量聚合筛选">
+  <form method="get" action="{{ url_for('teacher_ai_usage') }}" class="filter-form ai-usage-filter-form">
+    <label>使用场景
+      <select name="scene">
+        <option value="">全部场景</option>
+        {% for item in scenes %}
+        <option value="{{ item.value }}" {% if filters.scene == item.value %}selected{% endif %}>{{ item.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>时间范围
+      <select name="period">
+        {% for value, label in period_labels.items() %}
+        <option value="{{ value }}" {% if filters.period == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>开始日期
+      <input type="date" name="start_date" value="{{ filters.start_date }}">
+    </label>
+    <label>结束日期
+      <input type="date" name="end_date" value="{{ filters.end_date }}">
+    </label>
+    <label>课程
+      <select name="course_id">
+        <option value="">全部课程</option>
+        {% for course in courses %}
+        <option value="{{ course.id }}" {% if filters.course_id == course.id %}selected{% endif %}>{{ course.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="filter-actions">
+      <button type="submit">应用筛选</button>
+      <a class="small" href="{{ url_for('teacher_ai_usage') }}">重置</a>
+    </div>
+  </form>
+  <p class="muted small ai-usage-filter-note">开始/结束日期仅在选择“指定时间段”时生效；日期包含首尾，按北京时间的操作开始时间筛选。汇总卡片和请求明细使用相同条件。</p>
+  {% if filter_error %}<p class="danger-text small" role="alert">{{ filter_error }}</p>{% endif %}
+</section>
+
 <section class="monitor-kpis" aria-label="个人 AI 用量概览">
   <article class="monitor-kpi is-primary">
     <div class="monitor-kpi-label">模型请求</div>
@@ -92,9 +132,9 @@
   </div>
   {% if pages > 1 %}
   <nav class="ai-usage-pagination" aria-label="模型请求分页">
-    {% if page > 1 %}<a class="btn-link" href="{{ url_for('teacher_ai_usage', page=page - 1) }}">上一页</a>{% endif %}
+    {% if page > 1 %}<a class="btn-link" href="{{ page_links.previous }}">上一页</a>{% endif %}
     <span class="muted small">第 {{ page }} / {{ pages }} 页</span>
-    {% if page < pages %}<a class="btn-link" href="{{ url_for('teacher_ai_usage', page=page + 1) }}">下一页</a>{% endif %}
+    {% if page < pages %}<a class="btn-link" href="{{ page_links.next }}">下一页</a>{% endif %}
   </nav>
   {% endif %}
   {% else %}<p class="muted">暂时没有与你的账号关联的模型请求。</p>{% endif %}

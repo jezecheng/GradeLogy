@@ -135,8 +135,9 @@ class GradingQueue:
         row = db.execute(
             "SELECT s.id,s.lecture_id,s.student_id,l.course_id,c.teacher_id,"
             "l.answer_pdf,l.scope_candidates,l.scope_selected,l.tags_generated_scope,"
-            "(SELECT COUNT(*) FROM submissions x WHERE x.lecture_id=s.lecture_id "
-            " AND x.student_id=s.student_id AND x.id<=s.id) AS attempt_no "
+            "(COALESCE(s.prior_attempts,0)+(SELECT COUNT(*) FROM submissions x "
+            " WHERE x.lecture_id=s.lecture_id AND x.student_id=s.student_id "
+            " AND x.id<=s.id)) AS attempt_no "
             "FROM submissions s JOIN lectures l ON l.id=s.lecture_id "
             "JOIN courses c ON c.id=l.course_id JOIN users t ON t.id=c.teacher_id "
             "WHERE s.id=? AND s.status='已提交' AND t.role='teacher' AND t.active=1",

@@ -16,10 +16,12 @@
   <h2>提交作业</h2>
   {% if locked %}
   <p><span class="tag tag-批改中">锁定中</span> 这份作业正在批改，暂时不能修改或重复提交。</p>
-  <p class="muted small">批改结束后可以回来修改并重新提交；同一份作业前 {{ auto_grade_limit }} 次提交会自动批改，之后需要老师手动发起。</p>
+  <p class="muted small">批改结束后可以重新提交；再次提交前会确认覆盖本讲全部历史版本及旧批改结果。同一份作业前 {{ auto_grade_limit }} 次提交会自动批改，之后需要老师手动发起。</p>
   {% else %}
-  <form method="post" enctype="multipart/form-data" class="stack-form" data-draft-upload>
+  <form method="post" enctype="multipart/form-data" class="stack-form student-submission-form"
+        data-draft-upload data-existing-submission-count="{{ subs|length }}">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <input type="hidden" name="confirm_replace" value="">
     <input type="file" data-draft-picker accept=".png,.jpg,.jpeg,.webp,.pdf" multiple hidden>
     <input type="file" data-draft-camera accept="image/*" capture="environment" hidden>
     <div class="submit-actions">
@@ -40,7 +42,7 @@
     </div>
     <input type="file" name="files" data-draft-final multiple hidden>
   </form>
-  <p class="muted small">提交前可先在草稿箱里预览、删除不满意的图片，确认后再最终上传。老师上传答案、划定作业范围并完成知识点标签生成后，提交会自动进入批改；条件尚未齐备时作业会等待老师处理。批改期间不可重复提交，完成后可回来修改。同一份作业前 {{ auto_grade_limit }} 次提交会自动批改。</p>
+  <p class="muted small">提交前可先在草稿箱里预览、删除不满意的图片，确认后再最终上传。重复提交会覆盖本讲全部旧提交并清除关联的批改、报告和复习标记；旧附件文件仍保留在后台存储。老师上传答案、划定作业范围并完成知识点标签生成后，提交会自动进入批改；条件尚未齐备时作业会等待老师处理。批改期间不可重复提交。同一份作业前 {{ auto_grade_limit }} 次提交会自动批改。</p>
   {% endif %}
 </div>
 
@@ -124,6 +126,28 @@
 </div>
 
 <script>
+(function () {
+  var form = document.querySelector('.student-submission-form');
+  if (!form) return;
+  form.addEventListener('submit', function (e) {
+    var previousCount = Number(form.dataset.existingSubmissionCount || 0);
+    var confirmation = form.querySelector('[name="confirm_replace"]');
+    var draftBox = form.querySelector('[data-draft-box]');
+    if (previousCount && draftBox && !draftBox.hidden && confirmation && confirmation.value !== '1') {
+      e.preventDefault();
+      confirmDialog('重新提交将覆盖本讲全部 ' + previousCount +
+        ' 份历史提交，并清除关联的逐题批阅、报告和复习标记。历史附件和 AI 用量审计仍保留；此操作不可撤销。确定继续吗？',
+        '覆盖全部历史并重新提交').then(function (ok) {
+        if (!ok) return;
+        confirmation.value = '1';
+        form.requestSubmit();
+      });
+      return;
+    }
+    var button = e.submitter || form.querySelector('button[type="submit"]');
+    if (button) busyOn(button, '上传中…');
+  });
+})();
 (function () {
   var target = location.hash ? document.getElementById(location.hash.slice(1)) : null;
   if (!target) return;

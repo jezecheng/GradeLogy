@@ -14,7 +14,12 @@
 .teacher-sidebar nav { display: grid; gap: 8px; }
 .teacher-sidebar nav a { display: block; padding: 12px; border-radius: 8px; color: #45546b; }
 .teacher-sidebar nav a[aria-current] { color: #1456f0; background: #edf3ff; font-weight: 600; }
-.teacher-sidebar > button { margin-top: auto; }
+.teacher-sidebar-footer { margin-top: auto; display: grid; gap: 14px; }
+.teacher-system-status { display: grid; gap: 7px; color: #526078; font-size: 11px; line-height: 1.4; }
+.teacher-system-status p { margin: 0; overflow-wrap: anywhere; }
+.teacher-system-status p > span:first-child { display: block; color: #8a94a6; }
+.teacher-system-status time, .teacher-system-status p > span:last-child { font-variant-numeric: tabular-nums; }
+.teacher-sidebar-user { margin: 0; }
 .teacher-topbar { position: sticky; top: 0; z-index: 60; display: flex; justify-content: space-between; align-items: center; gap: 16px; min-height: 72px; padding: 12px 28px; border-bottom: 1px solid var(--ui-border); background: #fff; }
 .teacher-location { color: #526078; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .teacher-tools { display: flex; align-items: center; gap: 8px; flex: none; }

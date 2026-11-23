@@ -1,4 +1,5 @@
 """审阅缺陷的隔离回归测试；不调用真实 AI 或使用本地教学数据。"""
+import io
 import json
 import sqlite3
 import tempfile
@@ -92,6 +93,84 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("不支持闲聊", response.json["error"])
         reply.assert_not_called()
+
+    def test_student_reupload_requires_confirmation_then_replaces_all_history(self):
+        self.db.execute(
+            "INSERT INTO submissions(id,lecture_id,student_id,file_path,status,report_md) "
+            "VALUES(31,20,4,'course_10/student/older.pdf','已批改','OLD_REPORT')")
+        self.db.execute(
+            "INSERT INTO questions(id,submission_id,no,verdict,reviewed) "
+            "VALUES(41,31,'2','错',1)")
+        self.db.execute(
+            "INSERT INTO student_question_reviews(student_id,question_id,status) "
+            "VALUES(4,41,'reviewed')")
+        self.db.commit()
+        upload = (io.BytesIO(b"new pdf"), "new.pdf")
+        response = self.client(4).post(
+            self.url("student_lecture_page", hid=20),
+            data={"_csrf": "test-token", "files": upload},
+            content_type="multipart/form-data")
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM submissions WHERE lecture_id=20 AND student_id=4").fetchone()[0], 2)
+
+        upload = (io.BytesIO(b"new pdf"), "new.pdf")
+        with mock.patch.object(a, "_validate_upload", return_value="new.pdf"), \
+                mock.patch.object(a, "save_upload", return_value="course_10/student/new.pdf"), \
+                mock.patch.object(a, "_auto_enqueue_submission", return_value=False):
+            response = self.client(4).post(
+                self.url("student_lecture_page", hid=20),
+                data={"_csrf": "test-token", "confirm_replace": "1", "files": upload},
+                content_type="multipart/form-data")
+        self.assertEqual(response.status_code, 302)
+        rows = self.db.execute(
+            "SELECT id,file_path,prior_attempts,report_md FROM submissions "
+            "WHERE lecture_id=20 AND student_id=4").fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["file_path"], rows[0]["prior_attempts"], rows[0]["report_md"]),
+                         ("course_10/student/new.pdf", 2, ""))
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM questions WHERE submission_id IN (30,31)").fetchone()[0], 0)
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM student_question_reviews WHERE question_id=41").fetchone()[0], 0)
+
+    def test_teacher_upload_for_replacement_confirms_and_clears_old_results(self):
+        self.db.execute("INSERT INTO student_question_reviews(student_id,question_id,status) "
+                        "VALUES(4,40,'reviewed')")
+        self.db.commit()
+        upload = (io.BytesIO(b"teacher scan"), "scan.pdf")
+        response = self.client(2).post(
+            self.url("lecture_upload_for", hid=20),
+            data={"_csrf": "test-token", "student_id": "4", "files": upload},
+            content_type="multipart/form-data")
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM submissions WHERE lecture_id=20 AND student_id=4").fetchone()[0], 1)
+
+        upload = (io.BytesIO(b"teacher scan"), "scan.pdf")
+        with mock.patch.object(a, "_validate_upload", return_value="scan.pdf"), \
+                mock.patch.object(a, "save_upload", return_value="course_10/student/scan.pdf"), \
+                mock.patch.object(a, "_auto_enqueue_submission", return_value=False):
+            response = self.client(2).post(
+                self.url("lecture_upload_for", hid=20),
+                data={"_csrf": "test-token", "student_id": "4", "confirm_replace": "4",
+                      "files": upload}, content_type="multipart/form-data")
+        self.assertEqual(response.status_code, 302)
+        row = self.db.execute(
+            "SELECT file_path,prior_attempts,report_md FROM submissions "
+            "WHERE lecture_id=20 AND student_id=4").fetchone()
+        self.assertEqual(tuple(row), ("course_10/student/scan.pdf", 1, ""))
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM questions WHERE submission_id=30").fetchone()[0], 0)
+        self.assertEqual(self.db.execute(
+            "SELECT COUNT(*) FROM student_question_reviews WHERE question_id=40").fetchone()[0], 0)
+
+    def test_teacher_sidebar_always_shows_clock_start_time_and_version(self):
+        html = self.client(2).get("/courses").get_data(as_text=True)
+        self.assertIn('id="teacher-current-time"', html)
+        self.assertIn('data-timezone="', html)
+        self.assertIn("系统启动时间", html)
+        self.assertIn(f"v{a.cfg.APP_VERSION}", html)
 
     def test_course_files_authorize_all_read_modes(self):
         p = self.root / "uploads/course_10/answer.pdf"

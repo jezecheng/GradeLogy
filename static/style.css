@@ -624,6 +624,10 @@ button.btn-link:hover { text-decoration: underline; }
 .ai-filter-form select { width: 100%; }
 .ai-filter-form .monitor-search { flex: 1.4 1 190px; }
 .ai-filter-form .monitor-search input { width: 100%; }
+.ai-usage-filter-form { margin: 0; }
+.ai-usage-filter-form label { flex: 1 1 135px; }
+.ai-usage-filter-form select, .ai-usage-filter-form input { width: 100%; }
+.ai-usage-filter-note { margin: 8px 0 0; }
 .filter-actions { display: flex; align-items: center; gap: 10px; margin-left: auto; padding-top: 22px; }
 
 .monitor-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px;
