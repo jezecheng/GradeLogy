@@ -5069,6 +5069,8 @@ def assistant_chat():
             msgs.append({"role": role, "content": content[:4000]})
     if not msgs or msgs[-1]["role"] != "user":
         return jsonify({"error": "请先输入问题"}), 400
+    if not assistant.is_in_scope(msgs):
+        return jsonify({"error": assistant.ASSISTANT_SCOPE_MESSAGE}), 400
     # 学生与管理员没有自己的 AI 配置，统一用平台已配置的接口（取第一个可用的老师配置或环境变量）
     role = g.user["role"]
     cfg = llm.resolve_config(g.user["id"] if role == "teacher" else None)

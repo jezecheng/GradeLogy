@@ -107,6 +107,31 @@ class AssistantToolsTest(unittest.TestCase):
         self.assertTrue(all(section["source"] == "docs/admin.md"
                             for section in admin["sections"]))
 
+    def test_assistant_rejects_open_chat_but_allows_platform_and_subject_questions(self):
+        self.assertTrue(assistant.is_in_scope([
+            {"role": "user", "content": "我还有什么作业没交？"}]))
+        self.assertTrue(assistant.is_in_scope([
+            {"role": "user", "content": "怎么求解二次方程？"}]))
+        self.assertFalse(assistant.is_in_scope([
+            {"role": "user", "content": "写一首关于月亮的诗"}]))
+        with mock.patch.object(assistant.llm, "chat_completion") as chat:
+            reply, trace, error = assistant.reply(
+                [{"role": "user", "content": "讲个笑话"}], {}, 1)
+        self.assertEqual(reply, "")
+        self.assertEqual(trace, [])
+        self.assertIn("仅回答本平台操作", error)
+        chat.assert_not_called()
+        history = assistant.scoped_messages([
+            {"role": "user", "content": "我的作业批改结果是什么？"},
+            {"role": "assistant", "content": "有一道题答错。"},
+            {"role": "user", "content": "讲个笑话"},
+            {"role": "assistant", "content": "从前……"},
+            {"role": "user", "content": "这道错题怎么理解？"},
+        ])
+        self.assertEqual([message["role"] for message in history],
+                         ["user", "assistant", "user"])
+        self.assertTrue(all("笑话" not in message["content"] for message in history))
+
     def test_list_exams_counts_scored_and_missing(self):
         out = assistant.list_exams(1, "线性代数")
         self.assertEqual(out["course"], "线性代数")

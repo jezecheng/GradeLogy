@@ -83,6 +83,16 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertIn('class="student-report-button"', html)
         self.assertIn("点击查看详细报告", html)
 
+    def test_assistant_route_rejects_open_chat_before_calling_model(self):
+        with mock.patch.object(a.assistant, "reply") as reply:
+            response = self.client(4).post(
+                "/assistant/chat", json={"messages": [
+                    {"role": "user", "content": "写一首关于月亮的诗"}]},
+                headers={"X-CSRF-Token": "test-token"})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("不支持闲聊", response.json["error"])
+        reply.assert_not_called()
+
     def test_course_files_authorize_all_read_modes(self):
         p = self.root / "uploads/course_10/answer.pdf"
         p.parent.mkdir(parents=True)
@@ -285,12 +295,14 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertNotIn("知识图谱诊断", md)
         self.assertIn("## 三、评价", md)
         self.assertLess(md.index("正确率"), md.index("## 二、逐题明细"))
-        self.assertIn("| 例6 | — | — | 速率常数、初始速率 | 结合速率常数标签，本题求算正确。 |", md)
-        self.assertIn("| 例7 | — | — | 放射性衰变 | 放射性计算遗漏了衰变关系。 |", md)
+        self.assertIn("| **例6** | — | — | 速率常数、初始速率 | 结合速率常数标签，本题求算正确。 |", md)
+        self.assertIn("| **例7** | — | — | 放射性衰变 | 放射性计算遗漏了衰变关系。 |", md)
         self.assertNotIn("速率常数求算", md)
         self.assertIn("请结合本次讲义复习相关知识点", md)
         self.assertNotIn("| 速率常数 |", md)
         self.assertNotIn("纵向批阅", md)
+        self.assertIn("| **例6** |", md)
+        self.assertIn("| **例7** |", md)
         rendered = a.render_markdown(md)
         self.assertIn("report-question-table report-kg-question-table", rendered)
         self.assertIn("<th>题号</th>", rendered)
@@ -327,9 +339,15 @@ class ReviewRegressionTest(unittest.TestCase):
             {}, {})
         self.assertIn("1.1", md)
         self.assertIn("1.2", md)
+        self.assertIn("| **第1题** |", md)
+        self.assertIn("| 　**1.1** |", md)
+        self.assertIn("| 　**1.2** |", md)
         self.assertNotIn("母题公共条件", md)
         self.assertIn("以下小问独立判定", md)
-        self.assertIn("report-question-table", a.render_markdown(md))
+        rendered = a.render_markdown(md)
+        self.assertIn("report-question-table", rendered)
+        self.assertIn("<strong>第1题</strong>", rendered)
+        self.assertIn("　<strong>1.1</strong>", rendered)
         self.assertIn("正确率 50%（完全答对 1/2 个独立批改项）", md)
         self.assertEqual(a.accuracy_text(1, 0, 0, 2), "50%")
         summary = a._build_summary(
@@ -337,6 +355,15 @@ class ReviewRegressionTest(unittest.TestCase):
              {"no": "1.2", "verdict": "无法判定"}], [], "", [])
         self.assertEqual(summary["accuracy"], "50%")
         self.assertEqual(summary["total"], 2)
+
+    def test_legacy_report_table_formats_question_numbers_and_indents_subquestions(self):
+        md = ("| 题号 | 判定 | 批改说明 |\n| --- | --- | --- |\n"
+              "| 1 | ✅ | 正确 |\n| 8.1 | ⚠️ | 小问待补充 |\n"
+              "| 第 8 题 | — | 母题 |\n")
+        rendered = a.render_markdown(md)
+        self.assertIn("<strong>第1题</strong>", rendered)
+        self.assertIn("　<strong>8.1</strong>", rendered)
+        self.assertEqual(rendered.count("<strong>第8题</strong>"), 1)
 
     def test_ai_report_comment_generates_independent_kg_question_comments(self):
         reply = json.dumps({
@@ -694,7 +721,7 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertIn("OK", saved["report_md"])
         self.assertIn("人工复核已跳过", saved["report_md"])
         self.assertIn("| 题号 | 判定 | 批改说明 | 指示标签 | 单题评语 |", saved["report_md"])
-        self.assertIn("| 1 |", saved["report_md"])
+        self.assertIn("| **第1题** |", saved["report_md"])
         self.assertIn("| 氧化还原反应 | 结合标准答案，本题反应条件遗漏。 |",
                       saved["report_md"])
         self.assertEqual(json.loads(saved["report_detail"]), {

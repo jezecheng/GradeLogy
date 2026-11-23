@@ -307,7 +307,10 @@
         {% endfor %}
       </div>
       <div class="save-bar">
-        <button type="submit">保存并生成题目列表</button>
+        <button type="submit" {% if scope_busy %}class="is-busy" disabled aria-busy="true"{% endif %}>
+          {% if scope_busy %}<span class="spinner" aria-hidden="true"></span>正在生成题目列表…
+          {% else %}保存并生成题目列表{% endif %}
+        </button>
         <span class="muted small">全不选并保存＝用整份教师版 PDF 生成</span>
       </div>
     </form>

@@ -37,7 +37,23 @@ def _math_to_mathml(raw):
 
 def _md_cell(value):
     """表格单元格里的竖线与换行会破坏 Markdown 表格，统一收敛。"""
-    return str(value or "").replace("|", "｜").replace("\n", " ").strip()
+    return str(value or "").replace("|", "｜").replace("\n", " ").strip(" \t")
+
+
+def _question_number_md(value):
+    """把报告中的题号统一为粗体主问题号或缩进的小问题号。"""
+    number = str(value or "").strip()
+    number = re.sub(r"^\*\*(.*?)\*\*$", r"\1", number).strip()
+    parent = re.fullmatch(r"第\s*(.*?)\s*题", number)
+    if parent:
+        number = parent.group(1).strip()
+    if not number or number in ("—", "-"):
+        return number
+    if re.fullmatch(r"\d+(?:\.\d+)+", number):
+        return f"　**{number}**"
+    if re.fullmatch(r"\d+\.?", number):
+        return f"**第{number.rstrip('.')}题**"
+    return f"**{number}**"
 
 
 def _table_column_widths(rows):
@@ -101,7 +117,7 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
 
     def _nos(items, limit=6):
         names = [str(q.get("no")) for q in items]
-        text = "、".join(f"第 {n} 题" for n in names[:limit])
+        text = "、".join(_question_number_md(n) for n in names[:limit])
         return text + ("等" if len(names) > limit else "")
 
     accuracy = round(len(right) * 100 / n_total) if n_total else 0
@@ -121,7 +137,7 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
     if weak:
         out += ["| 题 | 类型 | 症结 |", "| --- | --- | --- |"]
         for w in weak:
-            out.append(f"| {_md_cell(w.get('no'))} | {_md_cell(w.get('type'))} | "
+            out.append(f"| {_question_number_md(w.get('no'))} | {_md_cell(w.get('type'))} | "
                        f"{_md_cell(w.get('detail'))} |")
     else:
         out.append("本次没有失分点。" if not (wrong or partial) else "AI 未给出失分归类，请参考逐题说明。")
@@ -157,7 +173,7 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
     for q in qs:
         parent_no = str(q.get("parent_no") or "").strip()
         if parent_no and parent_no != last_parent:
-            parent = [f"**第 {parent_no} 题**", "—", "母题（以下小问独立判定）"]
+            parent = [_question_number_md(parent_no), "—", "母题（以下小问独立判定）"]
             if has_kg_rows:
                 parent += ["—", "—"]
             out.append("| " + " | ".join(_md_cell(value) for value in parent) + " |")
@@ -165,7 +181,7 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
         icon = VERDICT_ICON.get(q.get("verdict") or "", q.get("verdict") or "—")
         # 优先用老师复核后的评语（note），为空时回退到 AI 原始评语
         comment = (q.get("note") or "").strip() or (q.get("ai_comment") or "").strip()
-        row = [_md_cell(q.get("no")), icon, _md_cell(comment)]
+        row = [_question_number_md(q.get("no")), icon, _md_cell(comment)]
         graph = kg_by_no.pop(str(q.get("no") or ""), None)
         if has_kg_rows:
             row += list(graph) if graph else ["—", "—"]
@@ -173,7 +189,7 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
 
     # 图谱可能包含没有出现在逐题批阅列表中的题目；仍并入同一张表，避免丢失诊断。
     for no, (tags_text, graph_comment) in kg_by_no.items():
-        label = f"第 {no} 题" if no[:1].isdigit() else no
+        label = _question_number_md(no)
         out.append("| " + " | ".join(_md_cell(value) for value in
                                       (label, "—", "—", tags_text, graph_comment)) + " |")
     out += ["", "> **复习提示：** 请结合本次讲义复习相关知识点，并完成对应例题巩固。", "",
@@ -285,10 +301,10 @@ def render_markdown(md, *, server_mathml=True):
             continue
         if line.startswith("|") and i + 1 < len(lines) and re.match(r"^\|[\s:|-]+\|$", lines[i + 1]):
             rows = []
-            rows.append([c.strip() for c in line.strip().strip("|").split("|")])
+            rows.append([c.strip(" \t") for c in line.strip().strip("|").split("|")])
             i += 2
             while i < len(lines) and lines[i].startswith("|"):
-                rows.append([c.strip() for c in lines[i].strip().strip("|").split("|")])
+                rows.append([c.strip(" \t") for c in lines[i].strip().strip("|").split("|")])
                 i += 1
             headers = rows[0] if rows else []
             # 老报告逐题表中的题干列只占空间；保留题号、判定和评语即可。
@@ -318,6 +334,17 @@ def render_markdown(md, *, server_mathml=True):
                     compact_rows.append([
                         values[0], "、".join(tags) or "—", values[len(headers) - 1]])
                 rows = compact_rows
+
+            # 新旧报告的题号统一加粗；保留小问前的全角空格作为层级缩进。
+            if rows and (rows[0][0] in ("题号", "#", "题")):
+                is_question_table = (
+                    rows[0][0] == "题" or "判定" in rows[0][1:]
+                    or rows[0][:2] == ["题号", "指示标签"]
+                )
+                if is_question_table:
+                    for row in rows[1:]:
+                        if row:
+                            row[0] = _question_number_md(row[0])
 
             table_class = "report-table"
             if (rows and len(rows[0]) in (2, 3, 5)

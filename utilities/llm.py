@@ -118,8 +118,13 @@ def _debug_fields(event, *, call_key, request_kind, stage, url, method,
 
 def chat_completion(api_url, api_key, payload, timeout=180, retries=3,
                     usage_hook=None, report_running=False, stage="", log_events=True):
-    """发送完整 OpenAI payload，返回 (message, finish_reason, error) 并保留逐次原始现场。"""
+    """发送 OpenAI payload 并记录每次尝试；非助手 AI 请求至少尝试两次。"""
     del report_running  # 兼容旧参数；所有带 hook 的请求都在发送前登记 running。
+    # 助手保持原有策略；其他 AI 任务至少自动重试一次，并统一使用较长超时。
+    is_assistant = str(stage or "").startswith("assistant.")
+    if not is_assistant:
+        retries = max(2, retries)
+        timeout = 180
     model = payload.get("model") or ""
     body = json.dumps(payload).encode()
     url = f"{api_url}/chat/completions"
@@ -184,10 +189,13 @@ def chat_completion(api_url, api_key, payload, timeout=180, retries=3,
             record(event(
                 status="error", error=error, exception=e,
                 provider_request_id=e.headers.get("x-request-id") if e.headers else None))
-            if e.code == 429 and attempt < retries - 1:
+            retryable_status = (e.code == 429 or e.code in (408, 425)
+                                or 500 <= e.code < 600)
+            if retryable_status and attempt < retries - 1:
                 if log_events:
-                    _log.warning("AI 限流 429 model=%s，第 %s 次重试", model, attempt + 1)
-                time.sleep(5 * (attempt + 1))
+                    _log.warning("AI 请求 HTTP %s model=%s，第 %s 次重试",
+                                 e.code, model, attempt + 1)
+                time.sleep(5 * (attempt + 1) if e.code == 429 else 2)
                 continue
             if log_events:
                 _log.warning("AI 请求失败 model=%s HTTP %s %s", model, e.code, detail[:120])

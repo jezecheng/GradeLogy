@@ -81,7 +81,7 @@ MAX_PAGES = 40          # 单份文件页数上限，避免一次请求图片过
 RENDER_SCALE = 2.0      # 约 144dpi，兼顾手写字辨识度与图片体积
 JPEG_QUALITY = 80
 GRADE_TIMEOUT = 300     # 单次批阅超时；实测 90~110 秒，留足余量但不至于卡太久
-GRADE_RETRIES = 1       # 批阅不重试：失败让老师手动重试，避免一个请求占住线程十几分钟
+GRADE_RETRIES = 2       # 批阅失败时自动重试一次，与其他报告类请求保持一致
 VERDICTS = ("对", "半对", "错", "无法判定")
 _MIME = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
          ".jpeg": "image/jpeg", ".webp": "image/webp"}

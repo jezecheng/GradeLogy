@@ -102,7 +102,8 @@ class AIDebugLogTest(unittest.TestCase):
         with self.app.test_request_context():
             return a.url_for(endpoint, **values)
 
-    def run_chat(self, effects, payload=None, retries=1, operation_type="grade"):
+    def run_chat(self, effects, payload=None, retries=1, operation_type="grade",
+                 stage="test.stage"):
         payload = payload or {
             "model": "model-a", "messages": [{"role": "user", "content": "学生答案"}],
             "max_tokens": 100,
@@ -114,7 +115,7 @@ class AIDebugLogTest(unittest.TestCase):
                 message, finish, error = llm.chat_completion(
                     "https://ai.example/v1?credential=url-secret", API_KEY, payload,
                     timeout=1, retries=retries, usage_hook=operation["usage_hook"],
-                    stage="test.stage")
+                    stage=stage)
             a._finish_ai_operation(
                 operation, "failed" if error else "success", error,
                 result={"reply": message.get("content", "")} if not error else None)
@@ -197,17 +198,46 @@ class AIDebugLogTest(unittest.TestCase):
         self.assertEqual(self.payload(events[0], "request"), result["request_bytes"])
         self.assertEqual(self.payload(events[1], "request"), result["request_bytes"])
 
+    def test_non_assistant_retries_server_errors_but_assistant_policy_is_unchanged(self):
+        body = json.dumps({"error": {"message": "provider unavailable"}}).encode()
+        result = self.run_chat(
+            [http_error(503, body), FakeResponse(chat_body("重试成功"))], retries=1)
+        self.assertEqual(result["error"], "")
+        self.assertEqual([row["attempt"] for row in result["events"]], [1, 2])
+
+        assistant_result = self.run_chat(
+            [http_error(503, body)], retries=1, stage="assistant.round.1")
+        self.assertIn("HTTP 503", assistant_result["error"])
+        self.assertEqual(len(assistant_result["events"]), 1)
+
+        permanent = self.run_chat([http_error(400, body)], retries=1)
+        self.assertIn("HTTP 400", permanent["error"])
+        self.assertEqual(len(permanent["events"]), 1)
+
+    def test_non_assistant_timeout_is_180_seconds_but_assistant_timeout_is_unchanged(self):
+        for stage, expected in (("scope_analyze", 180), ("assistant.round.1", 12)):
+            with self.subTest(stage=stage), mock.patch.object(
+                    llm.urllib.request, "urlopen",
+                    return_value=FakeResponse(chat_body("正常"))) as urlopen:
+                llm.chat_completion(
+                    "https://ai.example/v1", API_KEY,
+                    {"model": "model-a", "messages": []},
+                    timeout=12, retries=1, stage=stage)
+                self.assertEqual(urlopen.call_args.kwargs["timeout"], expected)
+
     def test_network_and_invalid_json_failures_keep_available_evidence(self):
-        network = self.run_chat([urllib.error.URLError("connection down")])
+        network = self.run_chat([urllib.error.URLError("connection down")
+                                 for _ in range(2)])
         self.assertIn("connection down", network["error"])
-        event = network["events"][0]
+        self.assertEqual([row["attempt"] for row in network["events"]], [1, 2])
+        event = network["events"][-1]
         self.assertEqual(event["status"], "error")
         self.assertTrue(event["request_path"])
         self.assertFalse(event["response_path"])
 
-        malformed = self.run_chat([FakeResponse(b"{not-json")])
+        malformed = self.run_chat([FakeResponse(b"{not-json") for _ in range(2)])
         self.assertTrue(malformed["error"])
-        event = malformed["events"][0]
+        event = malformed["events"][-1]
         self.assertEqual(self.payload(event, "response"), b"{not-json")
         self.assertEqual(json.loads(event["debug_json"])["exception"]["type"],
                          "JSONDecodeError")
@@ -320,7 +350,7 @@ class AIDebugLogTest(unittest.TestCase):
                 "/assistant/chat", json={"messages": [{"role": "user", "content": "怎么批阅"}]},
                 headers={"X-CSRF-Token": CSRF})
             student_response = self.student.post(
-                "/assistant/chat", json={"messages": [{"role": "user", "content": "你好"}]},
+                "/assistant/chat", json={"messages": [{"role": "user", "content": "我还有什么作业没交？"}]},
                 headers={"X-CSRF-Token": CSRF})
             ai_info.assert_not_called()
             ai_warning.assert_not_called()

@@ -108,6 +108,17 @@ class LecturePreparationTest(unittest.TestCase):
             mock.patch.object(app_module, "_get_max_tokens", return_value=512),
         )
 
+    def test_page_picker_button_stays_in_generation_state_while_queued(self):
+        with app_module.app.app_context():
+            app_module._start_ai_operation(
+                2, "scope_analyze", "model", course_id=10, lecture_id=20,
+                status="queued")
+        response = self.client.get(self._url("lecture_detail", hid=20))
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("正在生成题目列表…", html)
+        self.assertIn('class="is-busy" disabled aria-busy="true"', html)
+
     def test_replacing_answer_clears_saved_pages_and_scope(self):
         with mock.patch.object(app_module, "save_upload", return_value="new-answer.pdf"), \
                 mock.patch.object(app_module, "analyze_answer_pdf") as analyze:
