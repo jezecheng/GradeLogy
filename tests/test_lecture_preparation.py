@@ -240,6 +240,8 @@ class LecturePreparationTest(unittest.TestCase):
 
     def test_scope_change_requires_confirmation_and_recomputes_old_results(self):
         con = self._db()
+        con.execute("UPDATE lectures SET tags_generated_scope=? WHERE id=20",
+                    (app_module.tag_scope_signature(["q0"]),))
         con.executemany(
             "INSERT INTO lectures(id,course_id,title) VALUES(?,10,?)",
             [(21, "第二讲")])
@@ -292,6 +294,8 @@ class LecturePreparationTest(unittest.TestCase):
         con = self._db()
         self.assertEqual(json.loads(con.execute(
             "SELECT scope_selected FROM lectures WHERE id=20").fetchone()[0]), ["q1"])
+        self.assertEqual(con.execute(
+            "SELECT tags_generated_scope FROM lectures WHERE id=20").fetchone()[0], "")
         sub = con.execute(
             "SELECT status,file_path,score,feedback,ai_summary,report_md,report_published "
             "FROM submissions WHERE id=30").fetchone()

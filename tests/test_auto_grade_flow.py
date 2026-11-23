@@ -56,8 +56,9 @@ class AutoGradeFlowTest(unittest.TestCase):
                           {"key": "q1", "no": "2", "hint": "第二题"}]
             db.execute(
                 "INSERT INTO lectures(id,course_id,title,answer_pdf,scope_candidates,"
-                "scope_selected) VALUES(100,30,'第1讲','ans.pdf',?,?)",
-                (json.dumps(candidates, ensure_ascii=False), json.dumps(["q0"])))
+                "scope_selected,tags_generated_scope) VALUES(100,30,'第1讲','ans.pdf',?,?,?)",
+                (json.dumps(candidates, ensure_ascii=False), json.dumps(["q0"]),
+                 a.tag_scope_signature(["q0"])))
             db.commit()
         self.lecture_url = self.url("student_lecture_page", hid=100)
         self.teacher_lecture_url = self.url("lecture_scope_save", hid=100)
@@ -120,6 +121,50 @@ class AutoGradeFlowTest(unittest.TestCase):
         run.assert_not_called()
         self.assertEqual(self.submissions()[0]["status"], "已提交")
 
+    def test_upload_waits_for_scope_tags_then_pending_submission_auto_enqueues(self):
+        with self.app.app_context():
+            db = a.get_db()
+            db.execute("UPDATE lectures SET tags_generated_scope='' WHERE id=100")
+            db.commit()
+        with mock.patch.object(a, "get_setting", side_effect=self.setting), \
+                mock.patch.object(a, "run_grading", return_value=self.payload()) as run:
+            response = self.upload(self.student)
+            self.assertIn("等待老师批改", response.get_data(as_text=True))
+            run.assert_not_called()
+
+            with self.app.app_context():
+                db = a.get_db()
+                db.execute("UPDATE lectures SET tags_generated_scope=? WHERE id=100",
+                           (a.tag_scope_signature(["q0"]),))
+                db.commit()
+                queued = a._grading_queue.auto_enqueue_lecture(100)
+
+        self.assertEqual(queued, 1)
+        run.assert_called_once()
+        self.assertEqual(self.submissions()[0]["status"], "待批改")
+
+    def test_upload_waits_for_tags_then_auto_enqueues_when_tags_finish(self):
+        with self.app.app_context():
+            a.get_db().execute("UPDATE lectures SET tags_generated_scope='' WHERE id=100")
+            a.get_db().commit()
+        with mock.patch.object(a, "get_setting", side_effect=self.setting), \
+                mock.patch.object(a, "run_grading", return_value=self.payload()) as run:
+            resp = self.upload(self.student)
+            self.assertIn("等待老师批改", resp.get_data(as_text=True))
+            run.assert_not_called()
+            sid = self.submissions()[0]["id"]
+
+            with self.app.app_context():
+                a.get_db().execute(
+                    "UPDATE lectures SET tags_generated_scope=? WHERE id=100",
+                    (a.tag_scope_signature(["q0"]),))
+                a.get_db().commit()
+                queued = a._grading_queue.auto_enqueue_lecture(100)
+
+        self.assertEqual(queued, 1)
+        run.assert_called_once()
+        self.assertEqual(self.submissions()[0]["status"], "待批改")
+
     def test_student_page_locks_while_grading_and_rejects_resubmit(self):
         with self.app.app_context():
             db = a.get_db()
@@ -180,7 +225,7 @@ class AutoGradeFlowTest(unittest.TestCase):
         self.assertTrue(all(ok for ok, _ in results))
         self.assertEqual(run.call_count, 4)
 
-    def test_saving_scope_enqueues_pending_submission(self):
+    def test_saving_scope_waits_for_tag_generation_before_enqueuing_pending_submission(self):
         with self.app.app_context():
             db = a.get_db()
             db.execute("UPDATE lectures SET scope_selected='' WHERE id=100")
@@ -194,9 +239,8 @@ class AutoGradeFlowTest(unittest.TestCase):
                                      data={"_csrf": CSRF, "no": ["q0", "q1"]},
                                      follow_redirects=True)
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("已自动加入批改队列 1 份", resp.get_data(as_text=True))
-        run.assert_called_once()
-        self.assertEqual(self.submissions()[0]["status"], "待批改")
+        run.assert_not_called()
+        self.assertEqual(self.submissions()[0]["status"], "已提交")
 
 
 if __name__ == "__main__":

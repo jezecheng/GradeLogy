@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS lectures(
   student_pdf TEXT DEFAULT '',
   scope_candidates TEXT DEFAULT '',
   scope_selected TEXT DEFAULT '',
+  tags_generated_scope TEXT DEFAULT '',
   created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS exams(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -522,7 +523,7 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=(), reco
     if "student_pdf" not in lcols:
         con.execute("ALTER TABLE lectures ADD COLUMN student_pdf TEXT DEFAULT ''")
     # 轻量迁移：作业范围（AI 识别的题目清单 + 老师勾选的批阅范围）
-    for col in ("scope_candidates", "scope_selected"):
+    for col in ("scope_candidates", "scope_selected", "tags_generated_scope"):
         if col not in lcols:
             con.execute(f"ALTER TABLE lectures ADD COLUMN {col} TEXT DEFAULT ''")
     # 轻量迁移：教师版 PDF 只发送指定页码（逗号分隔的 1 起页码）

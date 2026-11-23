@@ -5,6 +5,7 @@
 """
 
 import fcntl
+import json
 import logging
 import os
 import threading
@@ -17,6 +18,18 @@ ACTIVE_STATUSES = ("queued", "running")
 
 # 同一份作业默认只有前 3 次提交会自动批改，之后需要老师手动触发。
 DEFAULT_AUTO_GRADE_ATTEMPTS = 3
+
+
+def tag_scope_signature(scope_selected):
+    """Canonical signature of selected independent questions covered by tag generation."""
+    try:
+        values = json.loads(scope_selected) if isinstance(scope_selected, str) else scope_selected
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(values, list):
+        return ""
+    keys = sorted({str(value).strip() for value in values if str(value).strip()})
+    return json.dumps(keys, ensure_ascii=False, separators=(",", ":")) if keys else ""
 
 
 def latest_operation(db, sid):
@@ -111,13 +124,14 @@ class GradingQueue:
     def auto_enqueue(self, sid, gate_cache=None):
         """按自动批改规则尝试把一份作业加入队列，返回 (是否入队, 跳过原因)。
 
-        自动批改需要同时满足：作业仍在「已提交」状态、讲次已上传教师版答案并
-        划定题目范围、老师已配置可用的 AI，且这份作业属于该学生前 N 次提交。
+        自动批改需要同时满足：作业仍在「已提交」状态、讲次已上传教师版答案，
+        已划定题目范围并完成该范围的知识点标签生成、老师已配置可用的 AI，
+        且这份作业属于该学生前 N 次提交。
         """
         db = self._get_db()
         row = db.execute(
             "SELECT s.id,s.lecture_id,s.student_id,l.course_id,c.teacher_id,"
-            "l.answer_pdf,l.scope_candidates,l.scope_selected,"
+            "l.answer_pdf,l.scope_candidates,l.scope_selected,l.tags_generated_scope,"
             "(SELECT COUNT(*) FROM submissions x WHERE x.lecture_id=s.lecture_id "
             " AND x.student_id=s.student_id AND x.id<=s.id) AS attempt_no "
             "FROM submissions s JOIN lectures l ON l.id=s.lecture_id "
@@ -131,6 +145,9 @@ class GradingQueue:
         if not (row["scope_candidates"] or "").strip() \
                 or not (row["scope_selected"] or "").strip():
             return False, "作业范围与题目未标注"
+        signature = tag_scope_signature(row["scope_selected"])
+        if not signature or signature != (row["tags_generated_scope"] or ""):
+            return False, "当前作业范围的知识点标签尚未生成完成"
         tid = row["teacher_id"]
         if gate_cache is not None:
             if tid not in gate_cache:
@@ -170,8 +187,8 @@ class GradingQueue:
     def scan(self):
         """扫描「已提交」且讲次已上传教师版答案的作业，自动加入后台批阅队列。
 
-        只处理从未批阅过的作业（status='已提交'）；没有答案 PDF 或还没划定作业范围
-        的讲次一律跳过。演示模式、未配置 API Key、以及开启「仅闲时批阅」但正处
+        只处理从未批阅过的作业（status='已提交'）；没有答案 PDF、还没划定作业范围，
+        或当前范围的知识点标签尚未生成完成的讲次一律跳过。演示模式、未配置 API Key、以及开启「仅闲时批阅」但正处
         高峰时段的老师也会跳过，避免无谓的失败记录和费用。超过自动批改次数上限
         的提交同样跳过，等待老师手动触发。
         """
@@ -184,6 +201,7 @@ class GradingQueue:
             "AND TRIM(COALESCE(l.answer_pdf,''))<>'' "
             "AND TRIM(COALESCE(l.scope_candidates,''))<>'' "
             "AND TRIM(COALESCE(l.scope_selected,''))<>'' "
+            "AND TRIM(COALESCE(l.tags_generated_scope,''))<>'' "
             "ORDER BY s.id").fetchall()
 
         gate_cache = {}   # teacher_id -> 跳过原因，避免逐份作业重复查设置

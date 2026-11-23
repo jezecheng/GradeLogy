@@ -158,6 +158,26 @@ class TagRouteTest(unittest.TestCase):
             resp = self._post("lecture_tags_generate", hid=20)
         self.assertEqual(resp.status_code, 302)
         self.assertEqual(self._tags(), [("3", "离子方程式")])
+        con = self._db()
+        signature = con.execute(
+            "SELECT tags_generated_scope FROM lectures WHERE id=20").fetchone()[0]
+        con.close()
+        self.assertEqual(signature, app_module.tag_scope_signature(["q0"]))
+
+    def test_empty_tag_result_still_marks_current_scope_generation_complete(self):
+        ai_rows = [{"key": "q0", "no": "3", "category": "", "tags": []}]
+        with mock.patch.object(app_module, "_ai_endpoint",
+                               return_value=("http://api", "key", "model", "")), \
+                mock.patch.object(app_module, "analyze_question_tags",
+                                  return_value=(ai_rows, "")):
+            response = self._post("lecture_tags_generate", hid=20)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self._tags(), [])
+        con = self._db()
+        signature = con.execute(
+            "SELECT tags_generated_scope FROM lectures WHERE id=20").fetchone()[0]
+        con.close()
+        self.assertEqual(signature, app_module.tag_scope_signature(["q0"]))
 
     def test_tag_routes_reject_other_teacher(self):
         other = self.login(3)

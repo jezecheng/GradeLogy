@@ -931,9 +931,9 @@ class AsyncGradingTest(unittest.TestCase):
         con.execute("INSERT INTO course_teachers(course_id,teacher_id) VALUES(30,2)")
         con.execute(
             "INSERT INTO lectures(id,course_id,title,answer_pdf,scope_candidates,"
-            "scope_selected) VALUES(100,30,'第1讲','ans.pdf',?,?)",
+            "scope_selected,tags_generated_scope) VALUES(100,30,'第1讲','ans.pdf',?,?,?)",
             (json.dumps([{"key": "1", "no": "1", "hint": "求极限"}], ensure_ascii=False),
-             json.dumps(["1"])))
+             json.dumps(["1"]), app_module.tag_scope_signature(["1"])))
         con.execute(
             "INSERT INTO submissions(id,lecture_id,student_id,file_path,status) "
             "VALUES(?,100,4,'stu1','已提交')", (self.SID,))

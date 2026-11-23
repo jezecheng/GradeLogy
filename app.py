@@ -48,7 +48,7 @@ from ai_usage import (AI_OPERATION_LABEL, AI_STATUS_LABEL, _ai_dashboard_data,
                       _ai_operation_history, _ai_usage_text, _compact_number,
                       _finish_ai_operation, _now_in_peak, _start_ai_operation)
 from db import DB_PATH, close_db, get_db
-from grading_service import GradingQueue, latest_operation
+from grading_service import GradingQueue, latest_operation, tag_scope_signature
 from model_catalog import (EST_TOKENS_INPUT, EST_TOKENS_OUTPUT, MODEL_CATALOG,
                            _now_text, build_model_rows, fetch_available_models,
                            fetch_tokenhub_prices, parse_tokenhub_prices,
@@ -2065,7 +2065,8 @@ def _invalidate_lecture_scope_results(db, lecture_id, course_id):
         db.execute(
             f"DELETE FROM tag_analyses WHERE kind='vertical' AND course_id=? "
             f"AND student_id IN ({marks})", (course_id, *student_ids))
-    db.execute("UPDATE lectures SET summary_md='',summary_at='' WHERE id=?", (lecture_id,))
+    db.execute("UPDATE lectures SET summary_md='',summary_at='',tags_generated_scope='' "
+               "WHERE id=?", (lecture_id,))
 
     # 旧提交不再公开；对每位受影响学生，仅清掉这些标签在本课程已无公开来源的卡片，
     # 其余标签依据其他已发布讲次重算，保留学生备注和复习状态。
@@ -2160,6 +2161,7 @@ def _generate_question_tags(hw, keys):
     answer_pages = hw["answer_pages"]
     lecture_id = hw["id"]
     scope_selected = hw["scope_selected"] or ""
+    generated_scope = tag_scope_signature(keys)
     generation = _scope_analysis_generations.get(lecture_id, 0)
     course_id = hw["course_id"]
     teacher_id = g.user["id"]
@@ -2191,7 +2193,8 @@ def _generate_question_tags(hw, keys):
             if (not current or _scope_analysis_generations.get(lecture_id, 0) != generation
                     or (current["answer_pdf"] or "") != answer_pdf
                     or (current["answer_pages"] or "") != answer_pages
-                    or set(map(str, current_scope)) != set(map(str, keys))):
+                    or set(map(str, current_scope)) != set(map(str, keys))
+                    or tag_scope_signature(current_scope) != generated_scope):
                 _finish_ai_operation(
                     operation, "failed", "答案、页码或作业范围已更改，已忽略过期知识点标签")
                 return
@@ -2214,8 +2217,12 @@ def _generate_question_tags(hw, keys):
                         "category,source) VALUES(?,?,?,?,?,'ai')",
                         (lecture_id, row["key"], row["no"], tag, row["category"]))
                     count += 1
+            database.execute("UPDATE lectures SET tags_generated_scope=? WHERE id=?",
+                             (generated_scope, lecture_id))
             _finish_ai_operation(operation, "success")
             log.info("生成知识点标签 lecture=%s 题数=%s 标签数=%s", lecture_id, len(rows), count)
+        # 先前因缺少标签而等待的学生提交，现在满足条件后立即尝试自动批改。
+        _grading_queue.auto_enqueue_lecture(lecture_id)
 
     operation, queue_err = _ai_task_queue.submit(
         teacher_id, "question_tagging", model=model, runner=runner,
