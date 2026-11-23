@@ -6204,7 +6204,12 @@ def submission_report_download(sid):
     sub, hw, _ = own_submission(sid)
     if not sub["report_md"]:
         abort(404)
-    name = f"{hw['title']}_批改报告.md".replace("/", "_")
+    student = get_db().execute("SELECT display_name FROM users WHERE id=?",
+                               (sub["student_id"],)).fetchone()
+    student_name = student["display_name"] if student else "学生"
+    stem = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "_",
+                  f"{student_name}_{hw['title']}_批阅报告").strip(" ._")
+    name = f"{stem or '批阅报告'}.md"
     import io as _io
     return send_file(_io.BytesIO(sub["report_md"].encode("utf-8")),
                      mimetype="text/markdown", as_attachment=True, download_name=name)

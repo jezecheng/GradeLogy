@@ -8,6 +8,7 @@ import sys
 import unittest
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import unquote
 from unittest import mock
 
 try:
@@ -709,6 +710,7 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertIn('id="download-report-pdf"', page)
         self.assertIn('id="report-pdf-progress"', page)
         self.assertIn('class="report-download-button"', page)
+        self.assertIn('data-filename="Student_Lecture_批阅报告.pdf"', page)
         self.assertIn("vendor/html2canvas/html2canvas.min.js", page)
         self.assertIn("vendor/jspdf/jspdf.umd.min.js", page)
         self.assertIn('id="report-pdf-button-spinner"', page)
@@ -718,6 +720,11 @@ class ReviewRegressionTest(unittest.TestCase):
             '<details class="report-editor"', 1)[0]
         self.assertNotIn("不需要显示的题干", visible_report)
         self.assertIn(r"$\mathrm{Cl^-}$", visible_report)
+        markdown_download = self.client(2).get(
+            self.url("submission_report_download", sid=30))
+        self.assertEqual(markdown_download.status_code, 200)
+        self.assertIn("Student_Lecture_批阅报告.md",
+                      unquote(markdown_download.headers["Content-Disposition"]))
 
     def test_env_key_takes_over_entire_ai_configuration(self):
         import ai_config

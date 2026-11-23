@@ -19,9 +19,9 @@
          <button class="small {{ 'danger' if sub.report_published else '' }}">
            {{ '撤回发布' if sub.report_published else '一键发布给学生' }}</button>
       </form>
-       <a class="report-download-button" href="{{ url_for('submission_report_download', sid=sub.id) }}">下载 .md</a>
+      <a class="report-download-button" href="{{ url_for('submission_report_download', sid=sub.id) }}">下载 .md</a>
        <button type="button" class="report-download-button" id="download-report-pdf"
-              data-filename="{{ hw.title }}_批改报告.pdf">
+              data-filename="{{ student_name }}_{{ hw.title }}_批阅报告.pdf">
         <span class="report-pdf-spinner" id="report-pdf-button-spinner" aria-hidden="true" hidden></span>
         <span data-pdf-button-label>下载 PDF</span>
       </button>
@@ -147,20 +147,39 @@
       }).filter(function (bottom) {
         return Number.isFinite(bottom) && bottom > 0 && bottom < canvas.height;
       }).sort(function (a, b) { return a - b; });
+      // 永远以完整内容块的边界分页；最后一页边界也纳入，不能退回固定高度硬切。
+      candidates.push(canvas.height);
 
       var breaks = [];
       var top = 0;
       while (top < canvas.height) {
-        var limit = Math.min(canvas.height, top + maxHeight);
-        var earliest = top + Math.min(maxHeight * 0.68, 120);
+        var ideal = Math.min(canvas.height, top + maxHeight);
+        var nearStart = top + maxHeight * 0.72;
+        var nearEnd = top + maxHeight * 1.12;
+        var before = null;
+        var after = null;
         var safe = null;
+        var nearest = Infinity;
         for (var i = 0; i < candidates.length; i += 1) {
-          if (candidates[i] > limit) break;
-          if (candidates[i] >= earliest) safe = candidates[i];
+          var boundary = candidates[i];
+          if (boundary <= top + 1) continue;
+          if (boundary < ideal) before = boundary;
+          else if (after === null) after = boundary;
+          if (boundary >= nearStart && boundary <= nearEnd) {
+            var distance = Math.abs(boundary - ideal);
+            if (distance < nearest) {
+              nearest = distance;
+              safe = boundary;
+            }
+          }
         }
-        // 优先在表格行、段落和标题之间分页；超高单个内容块才回退到定长切片。
-        var next = safe === null ? limit : Math.round(safe);
-        if (next <= top) next = limit;
+        // 没有接近页面底部的边界时，优先延后到下一个完整块，不把文字/表格行切成两半。
+        if (safe === null) {
+          if (after !== null && (before === null || after - ideal <= ideal - before)) safe = after;
+          else safe = before !== null ? before : after;
+        }
+        var next = safe === null ? canvas.height : Math.round(safe);
+        if (next <= top) next = canvas.height;
         breaks.push(next);
         top = next;
       }
@@ -208,14 +227,18 @@
           var height = breaks[index] - top;
           var pageCanvas = canvasSlice(canvas, top, height);
           var image = pageCanvas.toDataURL('image/jpeg', 0.94);
-          var imageHeight = height * contentWidth / canvas.width;
-          pdf.addImage(image, 'JPEG', margin, margin, contentWidth, imageHeight, undefined, 'FAST');
+          var imageScale = Math.min(contentWidth / canvas.width, contentHeight / height);
+          var imageWidth = canvas.width * imageScale;
+          var imageHeight = height * imageScale;
+          var imageX = (pageWidth - imageWidth) / 2;
+          pdf.addImage(image, 'JPEG', imageX, margin, imageWidth, imageHeight, undefined, 'FAST');
           pageCanvas.width = 0;
           pageCanvas.height = 0;
           top = breaks[index];
         }
-        var filename = (pdfButton.dataset.filename || '批改报告.pdf')
-          .replace(/[\\/:*?"<>|]+/g, '_');
+        var filename = (pdfButton.dataset.filename || '批阅报告.pdf')
+          .replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '_').replace(/[ ._]+$/g, '');
+        if (!filename) filename = '批阅报告.pdf';
         pdf.save(filename);
         canvas.width = 0;
         canvas.height = 0;
