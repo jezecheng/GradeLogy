@@ -109,22 +109,35 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
     if nxt:
         out += [f"**下一步建议：** {nxt}", ""]
 
-    # 知识图谱诊断：以题目为行、关联知识点为列展示掌握状态。
+    # 知识图谱诊断：每道题一行，知识点标签居中列举，单题评语独立展示。
     if kg_diagnosis:
         out += ["## 四、知识图谱诊断", "",
-                "> 每行是一道题，按题目关联知识点显示状态；绿色✓表示判定正常，黄色!表示需要关注，红色表示可能存在问题。", ""]
+                "> 每行是一道题；中间列列出本题涉及的知识点标签，单题评语结合学生作答、标准答案和复核评语生成。", ""]
         matrix = kg_diagnosis.get("matrix") if isinstance(kg_diagnosis, dict) else None
         if matrix and matrix.get("columns"):
-            headers = ["题号", "题目简述"] + [c["name"] for c in matrix["columns"]] + ["知识点点评"]
+            headers = ["题目", "指示标签", "单题评语"]
             out.append("| " + " | ".join(_md_cell(x) for x in headers) + " |")
-            out.append("| " + " | ".join(["---"] * len(headers)) + " |")
-            matrix_rows = matrix.get("rows") or []
-            columns = matrix["columns"]
-            for row in matrix_rows:
-                cells = [row.get("no", ""), row.get("brief", "")]
-                cells.extend(row.get("cells", {}).get(c["tag"], "—") for c in columns)
-                cells.append(row.get("analysis", ""))
-                out.append("| " + " | ".join(_md_cell(x) for x in cells) + " |")
+            out.append("| --- | --- | --- |")
+            comments = (detail or {}).get("question_comments") or {}
+            if isinstance(comments, list):
+                comments = {str(row.get("no") or ""): str(row.get("comment") or "")
+                            for row in comments if isinstance(row, dict)}
+            if not isinstance(comments, dict):
+                comments = {}
+            for row in matrix.get("rows") or []:
+                no = str(row.get("no") or "")
+                brief = str(row.get("brief") or "").strip()
+                label = f"第 {no} 题" if no[:1].isdigit() else no
+                question = label + (f"：{brief}" if brief else "")
+                tags = row.get("tags")
+                if tags is None:
+                    tags = [tag for tag, status in (row.get("cells") or {}).items()
+                            if status not in (None, "", "—")]
+                tags_text = "、".join(str(tag) for tag in tags if str(tag).strip()) or "—"
+                comment = (comments.get(no) or row.get("review_comment") or
+                           row.get("analysis") or "AI 未提供本题单独评语")
+                out.append("| " + " | ".join(_md_cell(x) for x in
+                                                (question, tags_text, comment)) + " |")
             out.append("")
         else:
             # 兼容旧格式的已保存/外部调用数据。

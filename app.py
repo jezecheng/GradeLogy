@@ -5469,6 +5469,9 @@ def generate_report(db, sub_id, teacher_id, reuse=False, operation=None):
         report_question["parent_stem"] = item.get("parent_stem", "")
         report_question["stem"] = item.get("stem", "")
         report_questions.append(report_question)
+    kg_diag = _kg_diagnosis(db, sub) if questions else None
+    kg_context = _kg_diagnosis_text(kg_diag) if kg_diag else ""
+    kg_question_context = _kg_question_diagnosis_text(kg_diag)
     completion_error = None
     summary = _json_or_none(sub["ai_summary"]) or {}
     detail = _json_or_none(sub["report_detail"]) or {} if reuse else {}
@@ -5488,15 +5491,14 @@ def generate_report(db, sub_id, teacher_id, reuse=False, operation=None):
                         teacher_id, "report_generate", model, course_id=sub["course_id"],
                         lecture_id=sub["lecture_id"], submission_id=sub_id)
                 try:
-                    kg_diag = _kg_diagnosis(db, sub)
-                    kg_context = _kg_diagnosis_text(kg_diag) if kg_diag else ""
                     detail = ai_report_comment(
                         questions, summary.get("weak_points") or [],
                         summary.get("evaluation", ""), api_url, api_key, model,
                         prompt=_prompt_content("report", course["report_prompt_id"] if course else 0),
                         usage_hook=operation["usage_hook"],
                         max_tokens=_get_max_tokens(teacher_id, "max_tokens_report"),
-                        kg_context=kg_context)
+                        kg_context=kg_context,
+                        kg_question_context=kg_question_context)
                 except Exception as e:
                     completion_error = str(e)
                     log.exception("生成报告评语异常 submission=%s by=%s", sub_id, teacher_id)
@@ -5513,7 +5515,7 @@ def generate_report(db, sub_id, teacher_id, reuse=False, operation=None):
         date_label = ""
     md = build_report_md(sub["display_name"], sub["lecture_title"], date_label,
                          report_questions, summary, detail,
-                         kg_diagnosis=_kg_diagnosis(db, sub))
+                         kg_diagnosis=kg_diag)
     if sub["review_skipped"]:
         lines = md.splitlines()
         notice = "> ⚠️ 本报告由 AI 自动批阅生成，人工复核已跳过；发布前请在此页检查报告内容。"
@@ -5944,7 +5946,8 @@ def _kg_diagnosis(db, sub):
     columns = [{"tag": tag, "name": tag_nodes[tag]["name"]} for tag in sorted(tag_nodes)]
     matrix_rows = []
     for question in questions:
-        related = [tag for tag in qkey_to_tags.get(question["no"], []) if tag in tag_nodes]
+        question_tags = qkey_to_tags.get(question["no"], [])
+        related = [tag for tag in question_tags if tag in tag_nodes]
         verdict = question["verdict"] or ""
         if verdict == "对":
             icon, label = "✅", "掌握良好"
@@ -5968,7 +5971,10 @@ def _kg_diagnosis(db, sub):
         else:
             analysis_text = "；".join(analysis)
         matrix_rows.append({"no": question["no"], "brief": brief_for(question),
-                            "cells": cells, "analysis": analysis_text})
+                            "tags": question_tags, "cells": cells,
+                            "analysis": analysis_text,
+                            "review_comment": str(question["note"] or
+                                                  question["ai_comment"] or "").strip()})
 
     kg_log.info("KG 诊断匹配结果 submission=%s: 薄弱知识点=%d, 匹配成功=%d [%s], 未匹配=%d [%s]",
              sub["id"], len(weak_tags), len(matched_tags), "; ".join(matched_tags),
@@ -5977,6 +5983,20 @@ def _kg_diagnosis(db, sub):
         return None
     return {"diagnoses": diagnoses,
             "matrix": {"columns": columns, "rows": matrix_rows}}
+
+
+def _kg_question_diagnosis_text(kg_diagnosis):
+    """给报告 AI 的逐题图谱上下文，作为生成「单题评语」的补充依据。"""
+    if not isinstance(kg_diagnosis, dict):
+        return ""
+    matrix = kg_diagnosis.get("matrix") or {}
+    rows = matrix.get("rows") or []
+    if not rows:
+        return ""
+    payload = [{"no": row.get("no", ""), "tags": row.get("tags") or [],
+                "graph_diagnosis": row.get("analysis") or ""}
+               for row in rows]
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _kg_diagnosis_text(diagnoses):

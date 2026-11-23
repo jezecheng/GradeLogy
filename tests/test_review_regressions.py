@@ -253,22 +253,28 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertIn("【标准答案本次输入第 1 页；教师 PDF 第 4 页】", labels)
         self.assertEqual(chat.call_args.kwargs["max_tokens"], 32768)
 
-    def test_report_knowledge_graph_matrix_is_a_question_by_concept_table(self):
+    def test_report_knowledge_graph_rows_have_tags_and_single_question_comment_columns(self):
         md = a.build_report_md(
-            "学生", "讲次", "6月1日", [], {}, {},
+            "学生", "讲次", "6月1日", [], {},
+            {"question_comments": {"例6": "结合速率常数标签，本题求算正确。",
+                                   "例7": "放射性计算遗漏了衰变关系。"}},
             kg_diagnosis={"matrix": {
                 "columns": [{"tag": "速率常数", "name": "速率常数"},
                             {"tag": "初始速率", "name": "初始速率"}],
                 "rows": [{"no": "例6", "brief": "速率常数求算",
+                          "tags": ["速率常数", "初始速率"],
                           "cells": {"速率常数": "⚠️", "初始速率": "⚠️"},
                           "analysis": "速率常数掌握不完整；前置薄弱：初始速率"},
-                         {"no": "例7", "brief": "放射性年代计算",
-                          "cells": {"速率常数": "🔴", "初始速率": "⚠️"},
-                          "analysis": "计算题未完成，需关注相关前置知识"}],
+                          {"no": "例7", "brief": "放射性年代计算",
+                           "tags": ["放射性衰变"],
+                           "cells": {"速率常数": "🔴", "初始速率": "⚠️"},
+                           "analysis": "计算题未完成，需关注相关前置知识",
+                           "review_comment": "复核意见：漏写衰变关系"}],
             }, "diagnoses": []})
-        self.assertIn("| 题号 | 题目简述 | 速率常数 | 初始速率 | 知识点点评 |", md)
-        self.assertIn("| 例6 | 速率常数求算 | ⚠️ |", md)
-        self.assertIn("前置薄弱：初始速率", md)
+        self.assertIn("| 题目 | 指示标签 | 单题评语 |", md)
+        self.assertIn("| 例6：速率常数求算 | 速率常数、初始速率 | 结合速率常数标签，本题求算正确。 |", md)
+        self.assertIn("| 例7：放射性年代计算 | 放射性衰变 | 放射性计算遗漏了衰变关系。 |", md)
+        self.assertNotIn("| 速率常数 |", md)
         self.assertNotIn("纵向批阅", md)
 
     def test_report_renders_parent_stem_and_independent_child_rows(self):
@@ -289,6 +295,28 @@ class ReviewRegressionTest(unittest.TestCase):
              {"no": "1.2", "verdict": "无法判定"}], [], "", [])
         self.assertEqual(summary["accuracy"], "50%")
         self.assertEqual(summary["total"], 2)
+
+    def test_ai_report_comment_generates_independent_kg_question_comments(self):
+        reply = json.dumps({
+            "good": "整体认真",
+            "improve": [],
+            "next": "再核对条件",
+            "question_comments": [{"no": "1.1", "comment": "该题条件遗漏，建议对照氧化还原反应规律。"}],
+        }, ensure_ascii=False)
+        question = {"no": "1.1", "verdict": "错", "note": "复核后确认遗漏",
+                    "ocr_text": "学生作答内容", "standard_answer": "标准答案内容"}
+        with mock.patch.object(pdfgrade.llm, "chat", return_value=(reply, "stop", "")) as chat:
+            result = pdfgrade.ai_report_comment(
+                [question], [], "", "https://fixture", "key", "model",
+                kg_question_context='[{"no":"1.1","tags":["氧化还原反应"]}]')
+        sent = chat.call_args.args[3][0]["text"]
+        self.assertIn("student_answer", sent)
+        self.assertIn("学生作答内容", sent)
+        self.assertIn("标准答案内容", sent)
+        self.assertIn("复核后确认遗漏", sent)
+        self.assertIn("氧化还原反应", sent)
+        self.assertEqual(result["question_comments"], {
+            "1.1": "该题条件遗漏，建议对照氧化还原反应规律。"})
 
     def test_review_uses_manual_review_label_and_report_button_is_conditional(self):
         html = self.client(2).get(self.url("submission_review", sid=30)).get_data(as_text=True)
@@ -596,18 +624,36 @@ class ReviewRegressionTest(unittest.TestCase):
         self.db.execute("UPDATE courses SET report_prompt_id=100 WHERE id=10")
         self.db.execute("INSERT INTO courses(id,name,teacher_id,report_prompt_id) VALUES(20,'Other',3,101)")
         self.db.execute("UPDATE submissions SET review_skipped=1 WHERE id=30")
+        self.db.execute(
+            "UPDATE questions SET ocr_text='学生遗漏反应条件',standard_answer='应写反应条件',"
+            "note='复核：条件缺失' WHERE id=40")
         self.db.commit()
+        kg = {"diagnoses": [], "matrix": {
+            "columns": [{"tag": "氧化还原反应", "name": "氧化还原反应"}],
+            "rows": [{"no": "1", "brief": "反应条件判断", "tags": ["氧化还原反应"],
+                      "analysis": "本题知识点判定为可能存在问题",
+                      "review_comment": "复核：条件缺失"}]}}
         with (a.app.app_context(),
               mock.patch.object(a, "get_setting", side_effect=lambda tid, key, default="": {
-                    "ai_api_url": "https://fixture", "ai_api_key": "key", "ai_model": "model"}.get(key, default)),
-              mock.patch.object(a, "ai_report_comment", return_value={"good": "OK"}) as call):
+                     "ai_api_url": "https://fixture", "ai_api_key": "key", "ai_model": "model"}.get(key, default)),
+              mock.patch.object(a, "_kg_diagnosis", return_value=kg),
+              mock.patch.object(a, "ai_report_comment", return_value={
+                  "good": "OK", "question_comments": {"1": "结合标准答案，本题反应条件遗漏。"}}) as call):
             a.generate_report(a.get_db(), 30, 2)
         self.assertEqual(call.call_args.kwargs["prompt"], "PROMPT_A")
+        self.assertIn("氧化还原反应", call.call_args.kwargs["kg_question_context"])
+        self.assertEqual(call.call_args.args[0][0]["ocr_text"], "学生遗漏反应条件")
+        self.assertEqual(call.call_args.args[0][0]["standard_answer"], "应写反应条件")
+        self.assertEqual(call.call_args.args[0][0]["note"], "复核：条件缺失")
         saved = self.db.execute(
             "SELECT report_md,report_detail FROM submissions WHERE id=30").fetchone()
         self.assertIn("OK", saved["report_md"])
         self.assertIn("人工复核已跳过", saved["report_md"])
-        self.assertEqual(json.loads(saved["report_detail"]), {"good": "OK"})
+        self.assertIn("| 题目 | 指示标签 | 单题评语 |", saved["report_md"])
+        self.assertIn("| 第 1 题：反应条件判断 | 氧化还原反应 | 结合标准答案，本题反应条件遗漏。 |",
+                      saved["report_md"])
+        self.assertEqual(json.loads(saved["report_detail"]), {
+            "good": "OK", "question_comments": {"1": "结合标准答案，本题反应条件遗漏。"}})
         operation = self.db.execute(
             "SELECT status FROM ai_operations WHERE submission_id=30 "
             "AND operation_type='report_generate' ORDER BY id DESC LIMIT 1").fetchone()
