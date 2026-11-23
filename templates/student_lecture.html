@@ -63,7 +63,12 @@
       {% set st = '批改中' if locked and loop.first else s.student_status %}
       <span class="tag tag-{{ st }}">{{ st }}</span>
       {% if revealed and sm_acc %}<span class="score" title="正确率">{{ sm_acc }}</span>{% endif %}
-      {% if s.report_published %}<a class="btn-link" href="{{ url_for('student_report', sid=s.id) }}">查看批改报告</a>{% endif %}
+       {% if s.report_published %}
+       <span class="student-report-action">
+         <a class="student-report-button" href="{{ url_for('student_report', sid=s.id) }}">查看批改报告</a>
+         <span class="muted small">点击查看详细报告</span>
+       </span>
+       {% endif %}
     </div>
     {% if sm and revealed %}
     <p class="small">AI 汇总：正确率 <span class="score">{{ sm_acc or '—' }}</span> ·
@@ -75,25 +80,29 @@
     {% elif s.status == '已批改' and not s.report_published %}<p class="muted small">老师已完成批改，结果暂未发布。</p>
     {% elif revealed and s.status == '已批改' %}<p class="muted small">老师已完成批改，暂无文字评语。</p>
     {% else %}<p class="muted small">老师批阅中，结果暂不公开。</p>{% endif %}
-  </div>
-  {% endfor %}
+   </div>
+   {% endfor %}
    {% if question_groups %}
-   <h2 style="margin-top:16px">逐题批改明细</h2>
-   {% for group in question_groups %}
-   {% if group.grouped %}
-   <details class="student-question-group">
-     <summary>第 {{ group.parent_no }} 题（{{ group.questions|length }} 个小问）</summary>
-     {% if group.parent_stem %}<p class="qa-stem question-stem student-parent-stem">{{ group.parent_stem }}</p>{% endif %}
-     {% for q in group.questions %}
-     <div class="qa-item" id="question-{{ q.id }}" tabindex="-1">
+   <details class="student-question-details">
+    <summary>
+      <strong>逐题批改明细</strong>
+      <span class="muted small">点击展开，查看每题的作答与批改结果</span>
+    </summary>
+    {% for group in question_groups %}
+    {% if group.grouped %}
+    <div class="student-question-group">
+      <strong class="student-question-group-title">第 {{ group.parent_no }} 题（{{ group.questions|length }} 个小问）</strong>
+      {% if group.parent_stem %}<p class="qa-stem question-stem student-parent-stem">{{ group.parent_stem }}</p>{% endif %}
+      {% for q in group.questions %}
+      <div class="qa-item" id="question-{{ q.id }}" tabindex="-1">
        <strong>第 {{ q.no }} 小问</strong>
        {% if q.verdict %}<span class="verdict verdict-{{ verdict_cls.get(q.verdict, '') }}">{{ q.verdict }}</span>{% endif %}
        {% if q.stem %}<p class="qa-stem question-stem"><span class="muted small">小问题干</span><br>{{ q.stem }}</p>{% endif %}
        {% if q.ocr_text %}<p class="muted small question-comment">我的作答：{{ q.ocr_text }}</p>{% endif %}
        {% if q.note %}<span class="question-comment"> — {{ q.note }}</span>{% endif %}
-     </div>
-     {% endfor %}
-   </details>
+      </div>
+      {% endfor %}
+    </div>
    {% else %}
    {% set q = group.questions[0] %}
    <div class="qa-item" id="question-{{ q.id }}" tabindex="-1">
@@ -105,9 +114,10 @@
     {% if q.ocr_text %}<p class="muted small question-comment">我的作答：{{ q.ocr_text }}</p>{% endif %}
     {% if q.note %}<span class="question-comment"> — {{ q.note }}</span>{% endif %}
    </div>
+    {% endif %}
+    {% endfor %}
+   </details>
    {% endif %}
-   {% endfor %}
-  {% endif %}
   {% else %}
   <p class="muted">还没有提交记录。</p>
   {% endif %}
@@ -117,8 +127,11 @@
 (function () {
   var target = location.hash ? document.getElementById(location.hash.slice(1)) : null;
   if (!target) return;
-  var parent = target.closest('.student-question-group');
-  if (parent) parent.open = true;
+  var parent = target.closest('details');
+  while (parent) {
+    parent.open = true;
+    parent = parent.parentElement.closest('details');
+  }
   target.scrollIntoView({ block: 'center' });
 })();
 </script>

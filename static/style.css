@@ -252,6 +252,12 @@ td.right > * + * { margin-left: 10px; }
 .sub-card { border: 1px solid #eef0f3; border-radius: 8px; padding: 14px; margin-bottom: 14px; }
 .sub-head { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
 .sub-head form { margin-left: auto; }
+.student-report-action { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+.student-report-button { display: inline-flex; align-items: center; justify-content: center;
+  padding: 7px 12px; border-radius: 6px; background: #1456f0; color: #fff;
+  font-size: 13px; font-weight: 700; text-decoration: none; box-shadow: 0 1px 2px #1456f033; }
+.student-report-button:hover { background: #0e45c8; color: #fff; text-decoration: none; }
+.student-report-button:focus-visible { outline: 3px solid #a9c3ff; outline-offset: 2px; }
 .score { font-weight: 700; color: #1456f0; }
 .confidence-chip { --confidence-hue: 60; display: inline-flex; align-items: center;
                    padding: 3px 9px; border: 1px solid hsl(var(--confidence-hue), 55%, 76%);
@@ -327,8 +333,16 @@ details summary { cursor: pointer; color: #1456f0; }
 .col-title { font-size: 13px; color: #8a8f99; }
 .save-bar { display: flex; gap: 12px; align-items: center; margin-top: 16px; }
 .qa-item { border-bottom: 1px dashed #eef0f3; padding: 6px 0; font-size: 14px; }
-.student-question-group { border-bottom: 1px solid #e3e7ee; padding: 4px 0; }
-.student-question-group > summary { cursor: pointer; padding: 8px 4px; font-weight: 600; }
+.student-question-details { margin-top: 16px; }
+.student-question-details > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px;
+  padding: 10px 12px; border: 1px solid #e3e7ee; border-radius: 8px; background: #f8f9fb;
+  list-style: none; }
+.student-question-details > summary::-webkit-details-marker { display: none; }
+.student-question-details > summary::before { content: "▸"; color: #1456f0; transition: transform .15s; }
+.student-question-details[open] > summary::before { transform: rotate(90deg); }
+.student-question-details > summary strong { color: #252a34; }
+.student-question-group { border-bottom: 1px solid #e3e7ee; padding: 8px 0 4px; }
+.student-question-group-title { display: inline-block; padding: 4px 0; }
 .student-parent-stem { padding: 8px 12px; }
 .qa-item:target { scroll-margin-top: 24px; background: #fffbe6; outline: 2px solid #f0c75e;
                   outline-offset: 4px; border-radius: 4px; }

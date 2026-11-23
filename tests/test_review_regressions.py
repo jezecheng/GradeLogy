@@ -75,6 +75,14 @@ class ReviewRegressionTest(unittest.TestCase):
     def post(self, endpoint, user=2, **values):
         return self.client(user).post(self.url(endpoint, **values), data={"_csrf": "test-token"})
 
+    def test_student_lecture_collapses_question_details_and_highlights_report_link(self):
+        html = self.client(4).get(self.url("student_lecture_page", hid=20)).get_data(as_text=True)
+        self.assertIn('<details class="student-question-details">', html)
+        self.assertNotIn('<details class="student-question-details" open', html)
+        self.assertIn("点击展开，查看每题的作答与批改结果", html)
+        self.assertIn('class="student-report-button"', html)
+        self.assertIn("点击查看详细报告", html)
+
     def test_course_files_authorize_all_read_modes(self):
         p = self.root / "uploads/course_10/answer.pdf"
         p.parent.mkdir(parents=True)
