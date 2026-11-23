@@ -8,7 +8,6 @@ import sys
 import unittest
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import unquote
 from unittest import mock
 
 try:
@@ -271,23 +270,36 @@ class ReviewRegressionTest(unittest.TestCase):
                            "analysis": "计算题未完成，需关注相关前置知识",
                            "review_comment": "复核意见：漏写衰变关系"}],
             }, "diagnoses": []})
-        self.assertIn("| 题目 | 指示标签 | 单题评语 |", md)
-        self.assertIn("| 例6：速率常数求算 | 速率常数、初始速率 | 结合速率常数标签，本题求算正确。 |", md)
-        self.assertIn("| 例7：放射性年代计算 | 放射性衰变 | 放射性计算遗漏了衰变关系。 |", md)
+        self.assertIn("| 题号 | 指示标签 | 单题评语 |", md)
+        self.assertIn("## 三、知识图谱诊断", md)
+        self.assertIn("## 四、评价", md)
+        self.assertIn("| 例6 | 速率常数、初始速率 | 结合速率常数标签，本题求算正确。 |", md)
+        self.assertIn("| 例7 | 放射性衰变 | 放射性计算遗漏了衰变关系。 |", md)
+        self.assertNotIn("速率常数求算", md)
         self.assertNotIn("| 速率常数 |", md)
         self.assertNotIn("纵向批阅", md)
+        rendered = a.render_markdown(md)
+        self.assertIn("report-kg-question-table", rendered)
+        self.assertIn("<th>题号</th>", rendered)
+
+    def test_report_without_knowledge_graph_keeps_evaluation_as_section_three(self):
+        md = a.build_report_md("学生", "讲次", "6月1日", [], {},
+                               {"good": "完成情况不错。"})
+        self.assertIn("## 三、评价", md)
+        self.assertNotIn("## 四、评价", md)
 
     def test_report_renders_parent_stem_and_independent_child_rows(self):
         md = a.build_report_md(
             "学生", "讲次", "6月1日",
             [{"no": "1.1", "parent_no": "1", "parent_stem": "母题公共条件",
               "stem": "第一小问", "verdict": "对", "note": "正确"},
-             {"no": "1.2", "parent_no": "1", "parent_stem": "母题公共条件",
+              {"no": "1.2", "parent_no": "1", "parent_stem": "母题公共条件",
               "stem": "第二小问", "verdict": "无法判定", "note": "需核对"}],
             {}, {})
         self.assertIn("1.1", md)
         self.assertIn("1.2", md)
         self.assertIn("母题公共条件", md)
+        self.assertIn("report-question-table", a.render_markdown(md))
         self.assertIn("正确率 50%（完全答对 1/2 个独立批改项）", md)
         self.assertEqual(a.accuracy_text(1, 0, 0, 2), "50%")
         summary = a._build_summary(
@@ -649,8 +661,8 @@ class ReviewRegressionTest(unittest.TestCase):
             "SELECT report_md,report_detail FROM submissions WHERE id=30").fetchone()
         self.assertIn("OK", saved["report_md"])
         self.assertIn("人工复核已跳过", saved["report_md"])
-        self.assertIn("| 题目 | 指示标签 | 单题评语 |", saved["report_md"])
-        self.assertIn("| 第 1 题：反应条件判断 | 氧化还原反应 | 结合标准答案，本题反应条件遗漏。 |",
+        self.assertIn("| 题号 | 指示标签 | 单题评语 |", saved["report_md"])
+        self.assertIn("| 第 1 题 | 氧化还原反应 | 结合标准答案，本题反应条件遗漏。 |",
                       saved["report_md"])
         self.assertEqual(json.loads(saved["report_detail"]), {
             "good": "OK", "question_comments": {"1": "结合标准答案，本题反应条件遗漏。"}})
@@ -659,28 +671,23 @@ class ReviewRegressionTest(unittest.TestCase):
             "AND operation_type='report_generate' ORDER BY id DESC LIMIT 1").fetchone()
         self.assertEqual(operation["status"], "success")
 
-    def test_report_pdf_download_renders_chinese_report_and_table(self):
+    def test_report_page_exports_pdf_from_the_browser_rendered_view(self):
         self.db.execute(
             "UPDATE submissions SET report_md=? WHERE id=30",
             ("# 化学作业报告\n\n| 题号 | 题干 | 判定 |\n| --- | --- | --- |\n"
              "| 1.1 | $\\mathrm{Fe^{3+}}$ + $\\mathrm{Cl^-}$ | 对 |",))
         self.db.commit()
-        response = self.client(2).get(self.url("submission_report_download_pdf", sid=30))
+        response = self.client(2).get(self.url("submission_report", sid=30))
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.mimetype, "application/pdf")
-        self.assertTrue(response.data.startswith(b"%PDF"))
-        self.assertIn("批改报告.pdf", unquote(response.headers["Content-Disposition"]))
-        document = pdfgrade.pdfium.PdfDocument(response.data)
-        try:
-            text = "\n".join(document[index].get_textpage().get_text_range()
-                              for index in range(len(document)))
-        finally:
-            document.close()
-        self.assertIn("化学作业报告", text)
-        self.assertIn("1.1", text)
-        self.assertIn("Fe³⁺", text)
-        self.assertIn("Cl⁻", text)
-        self.assertIn("对", text)
+        page = response.get_data(as_text=True)
+        self.assertIn('id="report-export-content"', page)
+        self.assertIn('id="download-report-pdf"', page)
+        self.assertIn('id="report-pdf-progress"', page)
+        self.assertIn("vendor/html2canvas/html2canvas.min.js", page)
+        self.assertIn("vendor/jspdf/jspdf.umd.min.js", page)
+        self.assertIn('id="report-pdf-button-spinner"', page)
+        self.assertIn("化学作业报告", page)
+        self.assertIn(r"$\mathrm{Fe^{3+}}$", page)
 
     def test_env_key_takes_over_entire_ai_configuration(self):
         import ai_config
@@ -742,17 +749,39 @@ class ReviewRegressionTest(unittest.TestCase):
     def test_regrading_enqueue_hides_published_results_before_worker_runs(self):
         with a.app.app_context():
             queue = a.app.extensions["grading_queue"]
+            self.db.execute(
+                "UPDATE submissions SET report_detail='Old detail',review_skipped=1,"
+                "grader='旧批改来源' WHERE id=30")
+            self.db.commit()
             with mock.patch.object(queue._pool, "submit") as submit:
                 operation, error = queue.enqueue(2, 30, 10, 20)
                 self.addCleanup(queue._discard, 30)
                 self.assertIsNone(error)
                 self.assertIsNotNone(operation)
                 submit.assert_called_once()
-            row = self.db.execute("SELECT status,report_published FROM submissions WHERE id=30").fetchone()
-            self.assertEqual((row["status"], row["report_published"]), ("待批改", 0))
+            row = self.db.execute(
+                "SELECT status,report_published,review_skipped,report_md,report_detail,grader "
+                "FROM submissions WHERE id=30").fetchone()
+            self.assertEqual(tuple(row), ("待批改", 0, 0, "", "", ""))
         response = self.client(4).get(self.url("student_report", sid=30))
         self.assertEqual(response.status_code, 404)
         self.assertNotIn(b"Old report", response.data)
+        active_page = self.client(2).get(self.url("lecture_detail", hid=20)).get_data(as_text=True)
+        self.assertNotIn("打开评阅报告", active_page)
+        self.assertNotIn('class="skip-review-form"', active_page)
+
+        # 新批阅成功且新题目已保存后，才重新出现跳过复核入口。
+        with a.app.app_context():
+            a._save_grading_result(a.get_db(), 30, {
+                "questions": [{"no": "1", "verdict": "对", "comment": "新批阅"}],
+                "summary": {"accuracy": "100%"},
+            })
+            self.db.execute("UPDATE ai_operations SET status='success' WHERE id=?",
+                            (operation["id"],))
+            self.db.commit()
+        success_page = self.client(2).get(self.url("lecture_detail", hid=20)).get_data(as_text=True)
+        self.assertNotIn("打开评阅报告", success_page)
+        self.assertIn('class="skip-review-form"', success_page)
 
     def test_import_does_not_create_database_or_start_workers(self):
         root = self.root / "import-only"

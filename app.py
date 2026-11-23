@@ -63,7 +63,6 @@ from utilities import tags as tag_utils
 from utilities.time_utils import BEIJING_TZ, beijing_wall_now, now_beijing
 from utilities.teacher_views import workload
 from utilities.report import build_report_md, render_markdown
-from utilities.report_pdf import markdown_report_pdf
 from utilities.sessions import (
     IDLE_TIMEOUT_SECONDS, auth_session_activity, create_auth_session,
     revoke_auth_session, revoke_sessions, session_epoch, touch_auth_session)
@@ -4106,7 +4105,7 @@ def knowledge_graph_import():
                     break
                 size += len(chunk)
                 if size > cfg.get("MAX_RESTORE_MB") * 1024 * 1024:
-                    raise ValueError(f"迁移包超过 {cfg.get("MAX_RESTORE_MB")}MB 限制")
+                    raise ValueError(f"迁移包超过 {cfg.get('MAX_RESTORE_MB')}MB 限制")
                 tmp.write(chunk)
         result = kg_transfer.import_graph(
             get_db(), package_path, _upload_dir(), g.user["id"], name=name)
@@ -4514,7 +4513,7 @@ def knowledge_graph_upload(gid):
                 fh.write(chunk)
         if too_big:
             os.remove(abs_path)
-            flash(f"「{filename}」超过 {cfg.get("KG_MAX_UPLOAD_MB")}MB，已跳过")
+            flash(f"「{filename}」超过 {cfg.get('KG_MAX_UPLOAD_MB')}MB，已跳过")
             continue
         sha = digest.hexdigest()
         duplicate = db.execute(
@@ -6044,7 +6043,7 @@ def submission_report(sid):
     stu = db.execute("SELECT display_name FROM users WHERE id=?", (sub["student_id"],)).fetchone()
     kg_diag = _kg_diagnosis(db, sub)
     return render_template("report.html", sub=sub, hw=hw, course=course, md=md,
-                           body=render_markdown(md), student_name=stu["display_name"],
+                           body=render_markdown(md, server_mathml=False), student_name=stu["display_name"],
                            is_teacher=True, kg_diagnosis=kg_diag,
                            report_operation=report_operation,
                            ai_operations=_ai_operation_history(submission_id=sid, limit=5))
@@ -6209,19 +6208,6 @@ def submission_report_download(sid):
     import io as _io
     return send_file(_io.BytesIO(sub["report_md"].encode("utf-8")),
                      mimetype="text/markdown", as_attachment=True, download_name=name)
-
-
-@_routes.route("/submission/<oid:sid>/report/download.pdf")
-@role_required("teacher")
-def submission_report_download_pdf(sid):
-    """下载与报告页渲染内容一致的 PDF 版本。"""
-    sub, hw, _ = own_submission(sid)
-    if not sub["report_md"]:
-        abort(404)
-    name = f"{hw['title']}_批改报告.pdf".replace("/", "_")
-    data = markdown_report_pdf(sub["report_md"], title=f"{hw['title']} 批改报告")
-    return send_file(io.BytesIO(data), mimetype="application/pdf",
-                     as_attachment=True, download_name=name)
 
 
 @_routes.route("/student/submission/<oid:sid>/report")
@@ -6886,7 +6872,7 @@ def _extract_backup_zip(zpath, extract_root):
                 return None, "备份包包含非法路径，已拒绝导入"
             total += info.file_size
             if total > limit:
-                return None, f"备份包解压后超过 {cfg.get("MAX_RESTORE_MB")}MB 上限，已拒绝导入"
+                return None, f"备份包解压后超过 {cfg.get('MAX_RESTORE_MB')}MB 上限，已拒绝导入"
         z.extractall(extract_root)
 
     src_db = os.path.join(extract_root, "data.sqlite")
@@ -6973,7 +6959,7 @@ def admin_restore():
         return redirect(url_for("consistency_page"))
     except OSError:
         log.exception("恢复失败（磁盘/权限）")
-        flash(f"恢复失败，当前数据已备份到 {os.path.join(cfg.get("DATA_DIR"), 'backups')}，请检查磁盘与权限")
+        flash(f"恢复失败，当前数据已备份到 {os.path.join(cfg.get('DATA_DIR'), 'backups')}，请检查磁盘与权限")
         return redirect(url_for("consistency_page"))
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

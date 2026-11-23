@@ -60,12 +60,17 @@
   <div class="ui-filter"><label>查找提交<input type="search" placeholder="学生姓名或账号" data-filter="[data-submission-row]" data-filter-status="submission-filter-status"></label><span class="muted small" id="submission-filter-status" role="status"></span></div>
   {% if subs %}
   {% for s in subs %}
+  {% set job = grade_jobs.get(s.id) %}
+  {% set job_status = job.status if job else '' %}
+  {% set grading_active = job_status in ('queued', 'running') %}
   <div class="sub-card" data-submission-row data-search="{{ s.display_name }} {{ s.username }}">
     <div class="sub-head">
       <strong>{{ s.display_name }}</strong>
       <span class="muted">{{ s.username }} · {{ s.created_at|localtime }}</span>
       <span class="tag tag-{{ s.status }}">{{ s.status }}</span>
-      {% if s.n_questions %}
+      {% if grading_active %}
+        <span class="review-state review-pending" title="正在重新生成这份作业的批阅结果">⟳ AI 重新批阅中</span>
+      {% elif s.n_questions %}
         <span class="review-state review-done" title="AI 已完成批阅">✓ AI 已批阅</span>
         {% if s.review_skipped %}
         <span class="review-state review-pending" title="报告由 AI 生成，逐题人工复核已跳过">⚠ 人工复核已跳过</span>
@@ -77,8 +82,8 @@
         {% endif %}
       {% endif %}
       {% set acc = acc_by.get(s.id) %}
-      {% if acc %}<span class="score" title="正确率">{{ acc }}</span>{% endif %}
-      {% if s.ai_confidence is not none %}
+      {% if acc and not grading_active %}<span class="score" title="正确率">{{ acc }}</span>{% endif %}
+      {% if s.ai_confidence is not none and not grading_active %}
       {% set confidence_pct = (s.ai_confidence * 100)|round|int %}
       <span class="confidence-chip" style="--confidence-hue:{{ (s.ai_confidence * 120)|round|int }}"
             title="各题 AI 批阅信心值均值；模型自评，不是正确率，也不代表已人工复核">AI 信心均值 {{ confidence_pct }}%</span>
@@ -90,19 +95,26 @@
            data-pdf-toggle data-pdf-src="{{ url_for('uploaded_file', filename=f) }}"
            data-pdf-title="{{ s.display_name }} · 扫描件{% if sfiles|length > 1 %} {{ loop.index }}{% endif %}">查看扫描件{% if sfiles|length > 1 %} {{ loop.index }}{% endif %}</a>
         {% endfor %}
+        {% if grading_active %}
+        <button type="button" class="submission-action" disabled>重新批阅完成后可复核</button>
+        <button type="button" class="submission-action" disabled>重新批阅完成后可生成报告</button>
+        {% else %}
         <a class="submission-action" href="{{ url_for('submission_review', sid=s.id) }}">人工复核</a>
         {% if s.report_md %}
         <a class="submission-action" href="{{ url_for('submission_report', sid=s.id) }}">打开评阅报告</a>
         {% elif s.report_job_status in ('queued', 'running') %}
         <button type="button" class="submission-action" disabled>报告生成中…</button>
-        {% elif s.n_questions %}
+        {% elif s.n_questions and job_status in ('', 'success') %}
         <form method="post" action="{{ url_for('submission_review_skip_and_report', sid=s.id) }}"
               class="skip-review-form">
           <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
           <button type="submit" class="submission-action">跳过人工复核并生成报告</button>
         </form>
+        {% elif s.n_questions %}
+        <button type="button" class="submission-action" disabled title="请先成功完成本次 AI 批阅">批阅成功后可生成报告</button>
         {% else %}
         <button type="button" class="submission-action" disabled title="请先完成 AI 批阅">先完成 AI 批阅</button>
+        {% endif %}
         {% endif %}
       </div>
       {% if s.report_published %}
@@ -110,8 +122,6 @@
       {% elif s.report_md %}
         <span class="pending-badge">报告草稿</span>
       {% endif %}
-      {% set job = grade_jobs.get(s.id) %}
-      {% set job_status = job.status if job else '' %}
       <form method="post" action="{{ url_for('submission_grade', sid=s.id) }}" class="grade-form"
             data-has-result="{{ '1' if (s.n_questions or s.status == '已批改') else '0' }}">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
@@ -130,8 +140,8 @@
     {% if job_status == 'failed' %}
     <p class="muted small danger-text">上次后台批阅失败：{{ job.error }}</p>
     {% endif %}
-    {% if s.grader %}<p class="muted small">批改来源：{{ s.grader }} · 更新于 {{ s.updated_at|localtime }}</p>{% endif %}
-    {% if s.feedback %}
+    {% if s.grader and not grading_active %}<p class="muted small">批改来源：{{ s.grader }} · 更新于 {{ s.updated_at|localtime }}</p>{% endif %}
+    {% if s.feedback and not grading_active %}
     <details class="sub-feedback-toggle">
       <summary class="small" style="cursor:pointer; color:#4a6fa5; margin-top:4px; user-select:none">
         展开总评 ▾

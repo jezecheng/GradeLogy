@@ -84,7 +84,10 @@ class GradingQueue:
                 teacher_id, "grade", self._get_setting(teacher_id, "ai_model"),
                 course_id=course_id, lecture_id=lecture_id,
                 submission_id=sid, status="queued")
-            db.execute("UPDATE submissions SET status='待批改',report_published=0 WHERE id=?", (sid,))
+            # 重批一经入队，旧报告和「跳过人工复核」结论就不再对应即将生成的新结果。
+            db.execute(
+                "UPDATE submissions SET status='待批改',report_published=0,review_skipped=0,"
+                "report_md='',report_detail='',grader='' WHERE id=?", (sid,))
             db.commit()
             self._pool.submit(self._execute, teacher_id, sid, operation)
         except Exception as e:

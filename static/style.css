@@ -383,6 +383,13 @@ details summary { cursor: pointer; color: #1456f0; }
 .report-editor > summary { color: #1456f0; cursor: pointer; font-size: 14px; }
 .report-editor textarea.mono { margin-top: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
                                font-size: 13px; line-height: 1.55; }
+.report-pdf-progress { display: inline-flex; align-items: center; gap: 7px; color: #475467;
+                       font-size: 13px; }
+.report-pdf-progress[hidden], .report-pdf-spinner[hidden] { display: none !important; }
+.report-pdf-spinner { display: inline-block; width: 13px; height: 13px; flex: 0 0 13px;
+                      border: 2px solid #c8d4f5; border-top-color: #1456f0;
+                      border-radius: 50%; animation: report-pdf-spin .75s linear infinite; }
+@keyframes report-pdf-spin { to { transform: rotate(360deg); } }
 .pending-badge { background: #fff4e0; color: #b25e09; border-radius: 999px;
                  padding: 1px 8px; font-size: 12px; font-weight: 500; }
 
@@ -394,9 +401,29 @@ details summary { cursor: pointer; color: #1456f0; }
 .report-body li { margin-bottom: 4px; }
 .report-body table.report-table { margin: 8px 0 12px; }
 .report-body table.report-table th, .report-body table.report-table td { font-size: 14px; vertical-align: top; }
+.report-body table.report-question-table { width: 100%; table-layout: fixed; }
+.report-body table.report-question-table th:nth-child(1),
+.report-body table.report-question-table td:nth-child(1) { width: 8%; }
+.report-body table.report-question-table th:nth-child(2),
+.report-body table.report-question-table td:nth-child(2) { width: 34%; overflow-wrap: anywhere; word-break: break-word; }
+.report-body table.report-question-table th:nth-child(3),
+.report-body table.report-question-table td:nth-child(3) { width: 12%; }
+.report-body table.report-question-table th:nth-child(4),
+.report-body table.report-question-table td:nth-child(4) { width: 46%; overflow-wrap: anywhere; word-break: break-word; }
+.report-body table.report-kg-question-table { width: 100%; table-layout: fixed; }
+.report-body table.report-kg-question-table th:nth-child(1),
+.report-body table.report-kg-question-table td:nth-child(1) { width: 14%; }
+.report-body table.report-kg-question-table th:nth-child(2),
+.report-body table.report-kg-question-table td:nth-child(2) { width: 31%; overflow-wrap: anywhere; word-break: break-word; }
+.report-body table.report-kg-question-table th:nth-child(3),
+.report-body table.report-kg-question-table td:nth-child(3) { width: 55%; overflow-wrap: anywhere; word-break: break-word; }
 .report-body .kg-sourced { overflow-x: auto; }
-.report-body .kg-sourced table.report-table { min-width: 760px; width: max-content; }
+.report-body .kg-sourced table.report-table:not(.report-kg-question-table) { min-width: 760px; width: max-content; }
 .report-body .kg-sourced table.report-table td:last-child { min-width: 220px; max-width: 360px; white-space: normal; }
+.report-pdf-capturing .report-body .kg-sourced { overflow: visible; }
+.report-pdf-capturing .report-body .kg-sourced table.report-table:not(.report-kg-question-table) {
+  width: 100%; min-width: 0; max-width: 100%; table-layout: fixed;
+}
 .report-body td .katex-display, .lecture-summary-body .katex-display,
 .tag-analysis-body .katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; }
 .report-body .katex, .lecture-summary-body .katex, .tag-analysis-body .katex { font-size: 1.05em; }

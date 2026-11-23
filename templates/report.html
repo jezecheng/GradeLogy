@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 {% block title %}批改报告{% endblock %}
 {% block content %}
-<div class="card">
+<div class="card" id="report-export-content">
   <div class="card-head">
     <h1>批改报告</h1>
     {% if is_teacher %}
-    <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <div style="display:flex;gap:8px;flex-wrap:wrap" data-html2canvas-ignore>
       <form method="post" action="{{ url_for('submission_report_build', sid=sub.id) }}"
             class="report-build-form" data-has-result="{{ '1' if md else '0' }}">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
@@ -20,7 +20,15 @@
            {{ '撤回发布' if sub.report_published else '一键发布给学生' }}</button>
       </form>
       <a class="btn-link" href="{{ url_for('submission_report_download', sid=sub.id) }}">下载 .md</a>
-      <a class="btn-link" href="{{ url_for('submission_report_download_pdf', sid=sub.id) }}">下载 PDF</a>
+      <button type="button" class="small ghost" id="download-report-pdf"
+              data-filename="{{ hw.title }}_批改报告.pdf">
+        <span class="report-pdf-spinner" id="report-pdf-button-spinner" aria-hidden="true" hidden></span>
+        <span data-pdf-button-label>下载 PDF</span>
+      </button>
+      <span class="report-pdf-progress" id="report-pdf-progress" role="status"
+            aria-live="polite" hidden>
+        <span class="report-pdf-spinner" aria-hidden="true"></span>正在按页面显示效果生成 PDF…
+      </span>
       {% endif %}
     </div>
     {% endif %}
@@ -32,19 +40,19 @@
     {% elif is_teacher and md %}<span class="pending-badge">草稿（报告与逐题内容均不可见）</span>{% endif %}
     {% if is_teacher and sub.review_skipped %}<span class="pending-badge">人工复核已跳过</span>{% endif %}
     {% if is_teacher %}
-      · <a href="{{ url_for('submission_review', sid=sub.id) }}">返回人工复核</a>
-      · <a href="{{ url_for('lecture_detail', hid=hw.id) }}">返回讲次</a>
+      · <a data-html2canvas-ignore href="{{ url_for('submission_review', sid=sub.id) }}">返回人工复核</a>
+      · <a data-html2canvas-ignore href="{{ url_for('lecture_detail', hid=hw.id) }}">返回讲次</a>
     {% endif %}
   </p>
 
   {% if is_teacher and report_operation and report_operation.status in ('queued', 'running') %}
-  <p id="report-build-status" class="pending-badge" role="status"
+  <p id="report-build-status" class="pending-badge" role="status" data-html2canvas-ignore
      data-operation-id="{{ report_operation.id }}"
      data-status-url="{{ url_for('submission_report_build_status', sid=sub.id) }}">
     评阅报告正在后台生成，完成后本页会自动更新。{% if md %}当前显示的是上一次已保存的报告。{% endif %}
   </p>
   {% elif is_teacher and report_operation and report_operation.status == 'failed' %}
-  <p class="danger-text" role="alert">评阅报告生成失败：{{ report_operation.error or 'AI 未返回可用的报告评价，请重试。' }}{% if md %}当前保留的是上一次已保存的报告。{% endif %}</p>
+  <p class="danger-text" role="alert" data-html2canvas-ignore>评阅报告生成失败：{{ report_operation.error or 'AI 未返回可用的报告评价，请重试。' }}{% if md %}当前保留的是上一次已保存的报告。{% endif %}</p>
   {% elif is_teacher and not md and report_operation and report_operation.status == 'success' %}
   <p class="danger-text" role="alert">生成任务已结束，但没有保存报告内容。请重新生成；如果问题仍然存在，请检查 AI 调试日志。</p>
   {% endif %}
@@ -62,7 +70,7 @@
   {% endif %}
 
   {% if is_teacher %}
-  <details class="report-editor">
+  <details class="report-editor" data-html2canvas-ignore>
     <summary>编辑报告内容（Markdown）</summary>
     <form method="post" action="{{ url_for('submission_report_save', sid=sub.id) }}">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
@@ -86,8 +94,114 @@
 </div>
 
 {% if is_teacher %}
+<script src="{{ url_for('static', filename='vendor/html2canvas/html2canvas.min.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/jspdf/jspdf.umd.min.js') }}"></script>
 <script>
 // 重新生成报告：已有内容时先确认覆盖，提交后按钮显示小圆环并禁用
+(function () {
+  var pdfButton = document.getElementById('download-report-pdf');
+  var pdfProgress = document.getElementById('report-pdf-progress');
+  var pdfButtonLabel = pdfButton && pdfButton.querySelector('[data-pdf-button-label]');
+  var pdfButtonSpinner = document.getElementById('report-pdf-button-spinner');
+  if (pdfButton && pdfProgress) {
+    var buttonLabel = pdfButtonLabel ? pdfButtonLabel.textContent : '下载 PDF';
+    function nextFrame() {
+      return new Promise(function (resolve) {
+        window.requestAnimationFrame(function () {
+          window.requestAnimationFrame(resolve);
+        });
+      });
+    }
+    function waitForMathRenderer() {
+      return new Promise(function (resolve) {
+        var attempts = 0;
+        (function check() {
+          if (typeof window.renderKatex === 'function'
+              && typeof window.renderMathInElement === 'function') {
+            window.renderKatex();
+            resolve();
+          } else if (attempts++ < 80) {
+            window.setTimeout(check, 50);
+          } else {
+            resolve();
+          }
+        })();
+      });
+    }
+    function canvasSlice(source, top, height) {
+      var slice = document.createElement('canvas');
+      slice.width = source.width;
+      slice.height = height;
+      slice.getContext('2d').drawImage(source, 0, top, source.width, height,
+                                       0, 0, slice.width, slice.height);
+      return slice;
+    }
+    pdfButton.addEventListener('click', async function () {
+      if (pdfButton.disabled) return;
+      var target = document.getElementById('report-export-content');
+      if (!target || typeof window.html2canvas !== 'function'
+          || !window.jspdf || typeof window.jspdf.jsPDF !== 'function') {
+        alert('PDF 导出组件未能加载，请刷新页面后重试。');
+        return;
+      }
+      pdfButton.disabled = true;
+      if (pdfButtonSpinner) pdfButtonSpinner.hidden = false;
+      if (pdfButtonLabel) pdfButtonLabel.textContent = '生成中…';
+      pdfProgress.hidden = false;
+      target.classList.add('report-pdf-capturing');
+      try {
+        await waitForMathRenderer();
+        if (document.fonts && document.fonts.ready) await document.fonts.ready;
+        await nextFrame();
+        var canvas = await window.html2canvas(target, {
+          backgroundColor: '#ffffff',
+          scale: Math.min(2, Math.max(1.5, window.devicePixelRatio || 1)),
+          useCORS: true,
+          logging: false,
+          windowWidth: document.documentElement.clientWidth,
+          ignoreElements: function (element) {
+            return element.hasAttribute('data-html2canvas-ignore');
+          }
+        });
+        if (!canvas.width || !canvas.height) throw new Error('报告页面没有可导出的内容');
+
+        var jsPDF = window.jspdf.jsPDF;
+        var pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
+        var pageWidth = 210, pageHeight = 297, margin = 8;
+        var contentWidth = pageWidth - margin * 2;
+        var contentHeight = pageHeight - margin * 2;
+        var sliceHeight = Math.max(1, Math.floor(canvas.width * contentHeight / contentWidth));
+        var pages = Math.ceil(canvas.height / sliceHeight);
+        for (var index = 0; index < pages; index += 1) {
+          if (index) pdf.addPage();
+          var top = index * sliceHeight;
+          var height = Math.min(sliceHeight, canvas.height - top);
+          var pageCanvas = canvasSlice(canvas, top, height);
+          var image = pageCanvas.toDataURL('image/jpeg', 0.94);
+          var imageHeight = height * contentWidth / canvas.width;
+          pdf.addImage(image, 'JPEG', margin, margin, contentWidth, imageHeight, undefined, 'FAST');
+          pageCanvas.width = 0;
+          pageCanvas.height = 0;
+        }
+        var filename = (pdfButton.dataset.filename || '批改报告.pdf')
+          .replace(/[\\/:*?"<>|]+/g, '_');
+        pdf.save(filename);
+        canvas.width = 0;
+        canvas.height = 0;
+      } catch (error) {
+        console.error('批改报告 PDF 导出失败', error);
+        alert('PDF 生成失败，请刷新页面后重试。');
+      } finally {
+        target.classList.remove('report-pdf-capturing');
+        pdfProgress.hidden = true;
+        if (pdfButtonSpinner) pdfButtonSpinner.hidden = true;
+        pdfButton.disabled = false;
+        if (pdfButtonLabel) pdfButtonLabel.textContent = buttonLabel;
+      }
+    });
+  }
+})();
+
 (function () {
   var form = document.querySelector('.report-build-form');
   if (form) {

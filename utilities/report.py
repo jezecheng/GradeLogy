@@ -45,7 +45,7 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
 
     逐题明细的「批改说明」优先使用老师复核后的 note（人工评语），
     为空时回退到 AI 原始的 ai_comment。
-    kg_diagnosis: 知识图谱诊断数据列表，存在时在报告末尾追加 KG 分析部分。
+    kg_diagnosis: 知识图谱诊断数据列表，存在时在报告中加入 KG 分析部分。
     """
     qs = [dict(q) for q in questions]
     n_total = len(qs)
@@ -96,7 +96,45 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
     else:
         out.append("本次没有失分点。" if not (wrong or partial) else "AI 未给出失分归类，请参考逐题说明。")
 
-    out += ["", "## 三、评价", ""]
+    # 知识图谱诊断放在总评之前：每道题一行，标签居中列举，不再展开成多列。
+    if kg_diagnosis:
+        out += ["## 三、知识图谱诊断", "",
+                "> 每行是一道题；中间列列出本题涉及的知识点标签，单题评语结合学生作答、标准答案和复核评语生成。", ""]
+        matrix = kg_diagnosis.get("matrix") if isinstance(kg_diagnosis, dict) else None
+        if matrix and matrix.get("columns"):
+            headers = ["题号", "指示标签", "单题评语"]
+            out.append("| " + " | ".join(_md_cell(x) for x in headers) + " |")
+            out.append("| --- | --- | --- |")
+            comments = (detail or {}).get("question_comments") or {}
+            if isinstance(comments, list):
+                comments = {str(row.get("no") or ""): str(row.get("comment") or "")
+                            for row in comments if isinstance(row, dict)}
+            if not isinstance(comments, dict):
+                comments = {}
+            for row in matrix.get("rows") or []:
+                no = str(row.get("no") or "")
+                label = f"第 {no} 题" if no[:1].isdigit() else no
+                tags = row.get("tags")
+                if tags is None:
+                    tags = [tag for tag, status in (row.get("cells") or {}).items()
+                            if status not in (None, "", "—")]
+                tags_text = "、".join(str(tag) for tag in tags if str(tag).strip()) or "—"
+                comment = (comments.get(no) or row.get("review_comment") or
+                           row.get("analysis") or "AI 未提供本题单独评语")
+                out.append("| " + " | ".join(_md_cell(x) for x in
+                                                (label, tags_text, comment)) + " |")
+            out.append("")
+        else:
+            # 兼容旧格式的已保存/外部调用数据。
+            for d in (kg_diagnosis if isinstance(kg_diagnosis, list) else []):
+                p = d["perf"]
+                out.append(f"### {d['tag']}（对{p['right']}/半对{p['partial']}/错{p['wrong']}）")
+                if d.get("weak_prereqs"):
+                    out.append("前置知识薄弱：" + "、".join(x["name"] for x in d["weak_prereqs"]))
+                out.append("")
+
+    evaluation_section = "四" if kg_diagnosis else "三"
+    out += ["", f"## {evaluation_section}、评价", ""]
     good = (detail or {}).get("good") or (summary or {}).get("evaluation", "")
     if good:
         out += [good, ""]
@@ -108,45 +146,6 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
     nxt = (detail or {}).get("next") or ""
     if nxt:
         out += [f"**下一步建议：** {nxt}", ""]
-
-    # 知识图谱诊断：每道题一行，知识点标签居中列举，单题评语独立展示。
-    if kg_diagnosis:
-        out += ["## 四、知识图谱诊断", "",
-                "> 每行是一道题；中间列列出本题涉及的知识点标签，单题评语结合学生作答、标准答案和复核评语生成。", ""]
-        matrix = kg_diagnosis.get("matrix") if isinstance(kg_diagnosis, dict) else None
-        if matrix and matrix.get("columns"):
-            headers = ["题目", "指示标签", "单题评语"]
-            out.append("| " + " | ".join(_md_cell(x) for x in headers) + " |")
-            out.append("| --- | --- | --- |")
-            comments = (detail or {}).get("question_comments") or {}
-            if isinstance(comments, list):
-                comments = {str(row.get("no") or ""): str(row.get("comment") or "")
-                            for row in comments if isinstance(row, dict)}
-            if not isinstance(comments, dict):
-                comments = {}
-            for row in matrix.get("rows") or []:
-                no = str(row.get("no") or "")
-                brief = str(row.get("brief") or "").strip()
-                label = f"第 {no} 题" if no[:1].isdigit() else no
-                question = label + (f"：{brief}" if brief else "")
-                tags = row.get("tags")
-                if tags is None:
-                    tags = [tag for tag, status in (row.get("cells") or {}).items()
-                            if status not in (None, "", "—")]
-                tags_text = "、".join(str(tag) for tag in tags if str(tag).strip()) or "—"
-                comment = (comments.get(no) or row.get("review_comment") or
-                           row.get("analysis") or "AI 未提供本题单独评语")
-                out.append("| " + " | ".join(_md_cell(x) for x in
-                                                (question, tags_text, comment)) + " |")
-            out.append("")
-        else:
-            # 兼容旧格式的已保存/外部调用数据。
-            for d in (kg_diagnosis if isinstance(kg_diagnosis, list) else []):
-                p = d["perf"]
-                out.append(f"### {d['tag']}（对{p['right']}/半对{p['partial']}/错{p['wrong']}）")
-                if d.get("weak_prereqs"):
-                    out.append("前置知识薄弱：" + "、".join(x["name"] for x in d["weak_prereqs"]))
-                out.append("")
     return "\n".join(out).strip() + "\n"
 
 
@@ -248,7 +247,12 @@ def render_markdown(md, *, server_mathml=True):
             while i < len(lines) and lines[i].startswith("|"):
                 rows.append([c.strip() for c in lines[i].strip().strip("|").split("|")])
                 i += 1
-            html.append("<table class='report-table'>")
+            table_class = "report-table"
+            if rows and len(rows[0]) >= 2 and rows[0][:2] == ["题号", "题干/小问"]:
+                table_class += " report-question-table"
+            elif rows and len(rows[0]) == 3 and rows[0][:2] == ["题号", "指示标签"]:
+                table_class += " report-kg-question-table"
+            html.append(f"<table class='{table_class}'>")
             for r, cells in enumerate(rows):
                 tag = "th" if r == 0 else "td"
                 html.append("<tr>"
