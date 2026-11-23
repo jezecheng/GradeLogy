@@ -102,7 +102,9 @@
 </details>
 {% endmacro %}
 
-<p><a href="{{ url_for('lecture_detail', hid=hw.id) }}">← 返回 {{ hw.title }}</a></p>
+<nav class="back-navigation" aria-label="返回导航">
+  <a class="back-button" href="{{ url_for('lecture_detail', hid=hw.id) }}">← 返回 {{ hw.title }}</a>
+</nav>
 <h1>人工复核：{{ sub.display_name }}</h1>
 <p class="muted">
   {{ sub.username }} · {{ hw.title }} · 提交于 {{ sub.created_at|localtime }}

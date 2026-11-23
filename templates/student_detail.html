@@ -1,7 +1,9 @@
 {% extends "base.html" %}
 {% block title %}{{ student.display_name }} - {{ course.name }}{% endblock %}
 {% block content %}
-<p><a href="{{ url_for('course_detail', cid=course.id) }}">← 返回 {{ course.name }}</a></p>
+<nav class="back-navigation" aria-label="返回导航">
+  <a class="back-button" href="{{ url_for('course_detail', cid=course.id) }}">← 返回 {{ course.name }}</a>
+</nav>
 <h1>{{ student.display_name }}</h1>
 <p class="muted">{{ course.name }} · {{ student.username }}{% if student.student_no %} · 学籍号 {{ student.student_no }}{% endif %}</p>
 
@@ -76,8 +78,10 @@
     </details>
     {% endif %}
   </div>
+  {% elif not vertical_has_tagged_data %}
+  <p class="muted small">暂无可关联的纵向分析数据：请确认讲次已生成知识点标签，并且该生有已批阅且题号可匹配的作业。</p>
   {% elif not weak_stats %}
-  <p class="muted small">暂无可分析数据：先给讲次生成知识点标签，并完成该生作业的 AI 批阅。</p>
+  <p class="muted small">目前未发现按知识点重复的错题或半对题；仍可生成纵向学情分析，查看各讲表现与进步情况。</p>
   {% endif %}
 </div>
 

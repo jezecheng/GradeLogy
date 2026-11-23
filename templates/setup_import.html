@@ -1,7 +1,9 @@
 {% extends "base.html" %}
 {% block title %}初始化导入{% endblock %}
 {% block content %}
-<p><a href="{{ url_for('admin_users') }}">← 返回首页</a></p>
+<nav class="back-navigation" aria-label="返回导航">
+  <a class="back-button" href="{{ url_for('admin_users') }}">← 返回首页</a>
+</nav>
 <h1>初始化导入向导</h1>
 <p class="muted">仅当系统全新全空（没有老师 / 学生账号，也没有课程、讲次、考试与提交）时可用。
   把旧系统「系统维护 → 导出全部数据」生成的 zip 一次导入，即可恢复全部账号、课程、讲次、批改记录与附件。</p>

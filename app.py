@@ -2786,7 +2786,10 @@ def student_detail(cid, sid):
         FROM exams x LEFT JOIN exam_scores s ON s.exam_id=x.id AND s.student_id=?
         WHERE x.course_id=? ORDER BY x.id DESC""", (sid, cid)).fetchall()
     acc_by = _accuracy_by_submission(db, [h["last_sub_id"] for h in lectures])
-    weak_stats = tag_utils.student_stats(db, cid, sid)
+    mastery_stats = tag_utils.student_mastery_stats(db, cid, sid)
+    weak_stats = [row for row in mastery_stats if row["n_wrong"] or row["n_partial"]]
+    weak_stats.sort(key=lambda row: (-row["n_wrong"], -row["n_partial"],
+                                    -row["n_lectures"], row["tag"]))
     vertical_kg_chains = _student_kg_longitudinal_context(db, cid, weak_stats)
     vertical_operation = db.execute(
         "SELECT id,status,error FROM ai_operations WHERE course_id=? AND operation_type='tag_vertical' "
@@ -2795,6 +2798,7 @@ def student_detail(cid, sid):
         "student_detail.html", course=course, student=student,
         lectures=lectures, exams=exams, acc_by=acc_by,
         weak_stats=weak_stats,
+        vertical_has_tagged_data=bool(mastery_stats),
         vertical_kg_chains=vertical_kg_chains,
         tag_analysis=tag_utils.latest_analysis(db, "vertical", student_id=sid, course_id=cid),
         vertical_operation=vertical_operation)
@@ -2808,10 +2812,24 @@ def student_tag_analysis(cid, sid):
     student = own_student(cid, sid)
     course = own_course(cid)
     mastery = tag_utils.student_mastery_stats(db, cid, sid)
-    weak = [row for row in mastery if row["n_wrong"] or row["n_partial"]]
-    if not weak:
-        flash("暂时没有可分析的数据：需要先给讲次生成知识点标签，并且该生有批改结果。")
+    if not mastery:
+        graded_count = db.execute(
+            "SELECT COUNT(*) FROM questions q JOIN submissions s ON s.id=q.submission_id "
+            "JOIN lectures l ON l.id=s.lecture_id WHERE s.student_id=? AND l.course_id=? "
+            "AND TRIM(COALESCE(q.verdict,''))<>''", (sid, cid)).fetchone()[0]
+        tag_count = db.execute(
+            "SELECT COUNT(*) FROM question_tags t JOIN lectures l ON l.id=t.lecture_id "
+            "WHERE l.course_id=? AND TRIM(t.tag)<>''", (cid,)).fetchone()[0]
+        if not graded_count:
+            message = "该生在本课程还没有可分析的逐题批改结果。"
+        elif not tag_count:
+            message = "本课程还没有生成知识点标签，请先完成讲次标签生成。"
+        else:
+            message = ("已找到批改结果和课程标签，但没有标签能按题号关联到该生的批改题目；"
+                       "请检查各讲次标签题号与批改题号是否对应。")
+        flash(message)
         return redirect(url_for("student_detail", cid=cid, sid=sid))
+    weak = [row for row in mastery if row["n_wrong"] or row["n_partial"]]
     trend = tag_utils.student_trend(db, cid, sid)
     titles = [row["lecture"] for row in trend]
     lecture_range = (f"{titles[0]} ~ {titles[-1]}（共 {len(titles)} 讲）"

@@ -1,7 +1,9 @@
 {% extends "base.html" %}
 {% block title %}批量建号结果{% endblock %}
 {% block content %}
-<p><a href="{{ url_for('admin_users') }}">← 返回用户管理</a></p>
+<nav class="back-navigation" aria-label="返回导航">
+  <a class="back-button" href="{{ url_for('admin_users') }}">← 返回用户管理</a>
+</nav>
 <h1>批量建号完成</h1>
 <p class="muted">角色：{{ {'teacher':'老师','student':'学生'}[role] }} · 共创建 {{ created|length }} 个账号 ·
   初始密码 {{ password }}（首次登录需改密）</p>

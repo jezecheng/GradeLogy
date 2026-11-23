@@ -370,7 +370,28 @@ class TagRouteTest(unittest.TestCase):
         self.assertIn("复习电子守恒", row["content_md"])
         self.assertIn("mastery", row["stats_json"])
 
-    def test_vertical_analysis_requires_tagged_errors(self):
+    def test_vertical_analysis_runs_when_tagged_questions_have_no_weak_verdicts(self):
+        con = self._db()
+        con.execute("UPDATE questions SET verdict='对' WHERE submission_id=30")
+        con.commit()
+        con.close()
+        result = {"learning_profile": "已关联知识点均掌握稳定。",
+                  "progress_highlights": ["本次已标注知识点均答对"]}
+        with mock.patch.object(app_module, "_ai_endpoint",
+                               return_value=("http://api", "key", "model", "")), \
+                mock.patch.object(app_module, "ai_vertical_analysis",
+                                  return_value=result) as ai:
+            response = self._post("student_tag_analysis", cid=10, sid=4)
+        self.assertEqual(response.status_code, 302)
+        ai.assert_called_once()
+        con = self._db()
+        saved = con.execute(
+            "SELECT content_md FROM tag_analyses WHERE kind='vertical' AND student_id=4"
+        ).fetchone()
+        con.close()
+        self.assertIn("已关联知识点均掌握稳定", saved["content_md"])
+
+    def test_vertical_analysis_requires_matched_tagged_results(self):
         con = self._db()
         con.execute("DELETE FROM question_tags WHERE lecture_id=20")
         con.commit()

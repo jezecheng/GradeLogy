@@ -190,7 +190,7 @@ def student_mastery_stats(db, course_id, student_id):
         "SELECT l.id AS lecture_id,q.no,q.verdict,q.ai_comment FROM questions q "
         "JOIN submissions s ON s.id=q.submission_id "
         "JOIN lectures l ON l.id=s.lecture_id "
-        "WHERE s.student_id=? AND l.course_id=? AND q.verdict<>'' "
+        "WHERE s.student_id=? AND l.course_id=? AND TRIM(q.verdict)<>'' "
         "ORDER BY l.id,q.id", (student_id, course_id)).fetchall()
 
     stats = {}
@@ -198,13 +198,14 @@ def student_mastery_stats(db, course_id, student_id):
     for q in q_rows:
         lid = q["lecture_id"]
         no = str(q["no"] or "").strip()
+        verdict = str(q["verdict"] or "").strip()
         for tag in _matched_tags(by_lecture.get(lid, {}), no):
             item = stats.setdefault(tag, {
                 "tag": tag, "n_total": 0, "n_right": 0, "n_partial": 0,
                 "n_wrong": 0, "n_unknown": 0, "lecture_ids": set(),
                 "lecture_breakdown": {}, "episodes": [], "comments": []})
             item["n_total"] += 1
-            field = _VERDICT_FIELD.get(q["verdict"])
+            field = _VERDICT_FIELD.get(verdict)
             if field:
                 item[field] += 1
             item["lecture_ids"].add(lid)
@@ -215,7 +216,7 @@ def student_mastery_stats(db, course_id, student_id):
             if field:
                 by_lecture[field[2:]] += 1
             comment = str(q["ai_comment"] or "").strip()
-            if q["verdict"] in ("错", "半对"):
+            if verdict in ("错", "半对"):
                 mark = (tag, lid, no)
                 if mark not in seen_episode and len(item["episodes"]) < 8:
                     seen_episode.add(mark)
@@ -223,7 +224,7 @@ def student_mastery_stats(db, course_id, student_id):
                         "lecture": titles.get(lid, ""),
                         "lecture_id": lid,
                         "no": no,
-                        "verdict": q["verdict"],
+                        "verdict": verdict,
                         "comment": comment,
                     })
                 if comment and comment not in item["comments"] and len(item["comments"]) < 3:
@@ -261,13 +262,13 @@ def student_trend(db, course_id, student_id):
     """按讲次给出该生的判定趋势，供纵向提示词比较近期与早期表现。"""
     rows = db.execute(
         "SELECT l.id,l.title,COUNT(q.id) AS total,"
-        "SUM(CASE WHEN q.verdict='对' THEN 1 ELSE 0 END) AS right_n,"
-        "SUM(CASE WHEN q.verdict='半对' THEN 1 ELSE 0 END) AS partial_n,"
-        "SUM(CASE WHEN q.verdict='错' THEN 1 ELSE 0 END) AS wrong_n,"
-        "SUM(CASE WHEN q.verdict='无法判定' THEN 1 ELSE 0 END) AS unknown_n "
+        "SUM(CASE WHEN TRIM(q.verdict)='对' THEN 1 ELSE 0 END) AS right_n,"
+        "SUM(CASE WHEN TRIM(q.verdict)='半对' THEN 1 ELSE 0 END) AS partial_n,"
+        "SUM(CASE WHEN TRIM(q.verdict)='错' THEN 1 ELSE 0 END) AS wrong_n,"
+        "SUM(CASE WHEN TRIM(q.verdict)='无法判定' THEN 1 ELSE 0 END) AS unknown_n "
         "FROM questions q JOIN submissions s ON s.id=q.submission_id "
         "JOIN lectures l ON l.id=s.lecture_id "
-        "WHERE s.student_id=? AND l.course_id=? AND q.verdict<>'' "
+        "WHERE s.student_id=? AND l.course_id=? AND TRIM(q.verdict)<>'' "
         "GROUP BY l.id ORDER BY l.id", (student_id, course_id)).fetchall()
     return [{
         "lecture": row["title"], "total": row["total"],
@@ -294,7 +295,7 @@ def habit_stats(db, course_id, student_id):
         "SELECT q.ai_comment FROM questions q "
         "JOIN submissions s ON s.id=q.submission_id "
         "JOIN lectures l ON l.id=s.lecture_id "
-        "WHERE s.student_id=? AND l.course_id=? AND q.verdict IN ('错','半对') "
+        "WHERE s.student_id=? AND l.course_id=? AND TRIM(q.verdict) IN ('错','半对') "
         "AND TRIM(q.ai_comment)<>''", (student_id, course_id)).fetchall()
     counts = {}
     for row in rows:

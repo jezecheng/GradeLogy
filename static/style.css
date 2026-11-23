@@ -164,6 +164,19 @@ dialog.modal h2 { margin-bottom: 4px; }
 button.ghost { background: #fff; color: #4a5260; border: 1px solid #d0d5dd; }
 button.ghost:hover { background: #f4f6f8; }
 
+/* 页面层级导航：统一用高对比按钮显示返回入口 */
+.back-navigation { display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+                   margin: 0 0 16px; }
+.back-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+               min-height: 42px; padding: 8px 14px; border: 1px solid #1456f0;
+               border-radius: 7px; background: #1456f0; color: #fff;
+               font: inherit; font-size: 14px; font-weight: 650; line-height: 1.25;
+               text-decoration: none; white-space: nowrap; cursor: pointer;
+               box-shadow: 0 1px 2px rgba(20, 86, 240, .18); }
+.back-button:hover, a.back-button:hover { border-color: #0e45c8; background: #0e45c8;
+                                         color: #fff; text-decoration: none; }
+.back-button:focus-visible { outline: 3px solid #a9c3ff; outline-offset: 2px; }
+
 /* 「帮助」→ 关于：版本与文档入口 */
 dialog.modal.about-modal { width: min(460px, 92vw); }
 .session-idle-dialog { width: min(440px, 92vw); }

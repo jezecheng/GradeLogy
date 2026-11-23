@@ -1,10 +1,10 @@
 {% extends "base.html" %}
 {% block title %}错题本 - 我的学习{% endblock %}
 {% block content %}
-<p>
-  <a href="{{ url_for('student_home') }}">← 返回我的学习</a> ·
-  <a href="{{ url_for('student_weak_points') }}">薄弱点图谱 →</a>
-</p>
+<nav class="back-navigation" aria-label="返回导航">
+  <a class="back-button" href="{{ url_for('student_home') }}">← 返回我的学习</a>
+  <a class="btn-link" href="{{ url_for('student_weak_points') }}">薄弱点图谱 →</a>
+</nav>
 <h1>我的错题本</h1>
 <p class="muted">收录老师已公开批改结果中的错题和半对题；按讲次整理，可逐题标记复习状态。</p>
 

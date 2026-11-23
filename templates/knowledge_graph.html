@@ -107,7 +107,9 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
 .kg-storage-summary b { font-size: 18px; }
 </style>
 
-<p class="muted small"><a href="{{ url_for('knowledge_graphs') }}">← 返回知识图谱列表</a></p>
+<nav class="back-navigation" aria-label="返回导航">
+  <a class="back-button" href="{{ url_for('knowledge_graphs') }}">← 返回知识图谱列表</a>
+</nav>
 <div class="card-head">
   <h1>{{ graph.name }} <span class="subject-badge">{{ graph.subject }}</span>
     <span class="kg-role-badge">{{ role_label }}</span></h1>

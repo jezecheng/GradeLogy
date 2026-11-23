@@ -42,11 +42,13 @@
     {% if sub.report_published %}<span class="reviewed-badge">报告与逐题批改已发布</span>
     {% elif is_teacher and md %}<span class="pending-badge">草稿（报告与逐题内容均不可见）</span>{% endif %}
     {% if is_teacher and sub.review_skipped %}<span class="pending-badge">人工复核已跳过</span>{% endif %}
-    {% if is_teacher %}
-      · <a data-html2canvas-ignore href="{{ url_for('submission_review', sid=sub.id) }}">返回人工复核</a>
-      · <a data-html2canvas-ignore href="{{ url_for('lecture_detail', hid=hw.id) }}">返回讲次</a>
-    {% endif %}
   </p>
+  {% if is_teacher %}
+  <nav class="back-navigation" aria-label="返回导航" data-html2canvas-ignore>
+    <a class="back-button" href="{{ url_for('submission_review', sid=sub.id) }}">← 返回人工复核</a>
+    <a class="back-button" href="{{ url_for('lecture_detail', hid=hw.id) }}">← 返回讲次</a>
+  </nav>
+  {% endif %}
 
   {% if is_teacher and report_operation and report_operation.status in ('queued', 'running') %}
   <p id="report-build-status" class="pending-badge" role="status" data-html2canvas-ignore

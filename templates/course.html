@@ -16,7 +16,9 @@
 .enrollment-confirm { border: 1px solid #d8dee8; border-radius: 10px; padding: 12px; margin: 12px 0; }
 .enrollment-confirm-list { max-height: 180px; overflow: auto; }
 </style>
-<p><a href="{{ url_for('courses') }}">← 返回课程列表</a></p>
+<nav class="back-navigation" aria-label="返回导航">
+  <a class="back-button" href="{{ url_for('courses') }}">← 返回课程列表</a>
+</nav>
 <div class="card-head">
   <h1>{{ course.name }}</h1>
   {% if can_manage_teachers %}
@@ -140,7 +142,7 @@
       <p class="muted small">仅新增本课程的选课关系；不会更改成绩、提交或其他课程数据。</p>
       <div class="inline-form">
         <button id="confirm-enrollment" type="submit">确认加入所选学生</button>
-        <button id="edit-enrollment-selection" type="button" class="ghost">返回修改</button>
+        <button id="edit-enrollment-selection" type="button" class="back-button">← 返回修改</button>
       </div>
     </section>
   </form>

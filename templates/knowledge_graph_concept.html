@@ -23,10 +23,10 @@
 }
 </style>
 
-<p class="kg-crumb">
-  <a href="{{ url_for('knowledge_graph_detail', gid=graph.id) }}">← {{ graph.name }}</a>
-  · {{ graph.subject }}
-</p>
+<nav class="back-navigation" aria-label="返回导航">
+  <a class="back-button" href="{{ url_for('knowledge_graph_detail', gid=graph.id) }}">← 返回 {{ graph.name }}</a>
+  <span class="muted small">{{ graph.subject }}</span>
+</nav>
 
 <div class="kg-neighbors">
   <section>

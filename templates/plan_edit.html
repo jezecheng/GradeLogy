@@ -1,7 +1,9 @@
 {% extends "base.html" %}
 {% block title %}编辑教案 - {{ plan.title }}{% endblock %}
 {% block content %}
-<p><a href="{{ url_for('course_detail', cid=plan.course_id) }}">← 返回课程</a></p>
+<nav class="back-navigation" aria-label="返回导航">
+  <a class="back-button" href="{{ url_for('course_detail', cid=plan.course_id) }}">← 返回课程</a>
+</nav>
 <h1>编辑教案</h1>
 <p class="muted">最近更新：{{ plan.updated_at|localtime }}</p>
 <div class="card">
