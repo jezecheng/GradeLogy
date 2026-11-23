@@ -271,8 +271,11 @@ class ReviewRegressionTest(unittest.TestCase):
                            "review_comment": "复核意见：漏写衰变关系"}],
             }, "diagnoses": []})
         self.assertIn("| 题号 | 指示标签 | 单题评语 |", md)
+        self.assertIn("## 一、正确率与失分归因", md)
+        self.assertIn("## 二、逐题明细", md)
         self.assertIn("## 三、知识图谱诊断", md)
         self.assertIn("## 四、评价", md)
+        self.assertLess(md.index("正确率"), md.index("## 二、逐题明细"))
         self.assertIn("| 例6 | 速率常数、初始速率 | 结合速率常数标签，本题求算正确。 |", md)
         self.assertIn("| 例7 | 放射性衰变 | 放射性计算遗漏了衰变关系。 |", md)
         self.assertNotIn("速率常数求算", md)
@@ -287,6 +290,22 @@ class ReviewRegressionTest(unittest.TestCase):
                                {"good": "完成情况不错。"})
         self.assertIn("## 三、评价", md)
         self.assertNotIn("## 四、评价", md)
+
+    def test_legacy_wide_knowledge_graph_table_is_compacted_for_page_width(self):
+        md = (
+            "## 四、知识图谱诊断\n\n"
+            "| 题号 | 题目简述 | 反应级数 | 半衰期 | 速率常数 | 初始浓度 | 知识点点评 |\n"
+            "| --- | --- | --- | --- | --- | --- | --- |\n"
+            "| 例1 | 速率计算 | ✅ | — | ⚠️ | — | 速率常数计算不完整 |\n"
+        )
+        rendered = a.render_markdown(md)
+        self.assertIn("report-kg-question-table", rendered)
+        self.assertIn("<th>指示标签</th>", rendered)
+        self.assertIn("反应级数：✅", rendered)
+        self.assertIn("速率常数：⚠️", rendered)
+        self.assertIn("速率常数计算不完整", rendered)
+        self.assertNotIn("题目简述", rendered)
+        self.assertNotIn("report-dynamic-table", rendered)
 
     def test_report_renders_parent_stem_and_independent_child_rows(self):
         md = a.build_report_md(
@@ -683,9 +702,11 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertIn('id="report-export-content"', page)
         self.assertIn('id="download-report-pdf"', page)
         self.assertIn('id="report-pdf-progress"', page)
+        self.assertIn('class="report-download-button"', page)
         self.assertIn("vendor/html2canvas/html2canvas.min.js", page)
         self.assertIn("vendor/jspdf/jspdf.umd.min.js", page)
         self.assertIn('id="report-pdf-button-spinner"', page)
+        self.assertIn("pageBreaks", page)
         self.assertIn("化学作业报告", page)
         self.assertIn(r"$\mathrm{Fe^{3+}}$", page)
 

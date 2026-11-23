@@ -19,8 +19,8 @@
          <button class="small {{ 'danger' if sub.report_published else '' }}">
            {{ '撤回发布' if sub.report_published else '一键发布给学生' }}</button>
       </form>
-      <a class="btn-link" href="{{ url_for('submission_report_download', sid=sub.id) }}">下载 .md</a>
-      <button type="button" class="small ghost" id="download-report-pdf"
+       <a class="report-download-button" href="{{ url_for('submission_report_download', sid=sub.id) }}">下载 .md</a>
+       <button type="button" class="report-download-button" id="download-report-pdf"
               data-filename="{{ hw.title }}_批改报告.pdf">
         <span class="report-pdf-spinner" id="report-pdf-button-spinner" aria-hidden="true" hidden></span>
         <span data-pdf-button-label>下载 PDF</span>
@@ -136,6 +136,36 @@
                                        0, 0, slice.width, slice.height);
       return slice;
     }
+    function pageBreaks(target, canvas, maxHeight) {
+      var rect = target.getBoundingClientRect();
+      var scaleY = canvas.height / Math.max(1, rect.height);
+      var candidates = Array.from(target.querySelectorAll(
+        '.report-body h1, .report-body h2, .report-body h3, .report-body p, '
+        + '.report-body li, .report-body tr, .report-body blockquote'
+      )).map(function (element) {
+        return (element.getBoundingClientRect().bottom - rect.top) * scaleY;
+      }).filter(function (bottom) {
+        return Number.isFinite(bottom) && bottom > 0 && bottom < canvas.height;
+      }).sort(function (a, b) { return a - b; });
+
+      var breaks = [];
+      var top = 0;
+      while (top < canvas.height) {
+        var limit = Math.min(canvas.height, top + maxHeight);
+        var earliest = top + Math.min(maxHeight * 0.68, 120);
+        var safe = null;
+        for (var i = 0; i < candidates.length; i += 1) {
+          if (candidates[i] > limit) break;
+          if (candidates[i] >= earliest) safe = candidates[i];
+        }
+        // 优先在表格行、段落和标题之间分页；超高单个内容块才回退到定长切片。
+        var next = safe === null ? limit : Math.round(safe);
+        if (next <= top) next = limit;
+        breaks.push(next);
+        top = next;
+      }
+      return breaks;
+    }
     pdfButton.addEventListener('click', async function () {
       if (pdfButton.disabled) return;
       var target = document.getElementById('report-export-content');
@@ -171,17 +201,18 @@
         var contentWidth = pageWidth - margin * 2;
         var contentHeight = pageHeight - margin * 2;
         var sliceHeight = Math.max(1, Math.floor(canvas.width * contentHeight / contentWidth));
-        var pages = Math.ceil(canvas.height / sliceHeight);
-        for (var index = 0; index < pages; index += 1) {
+        var breaks = pageBreaks(target, canvas, sliceHeight);
+        var top = 0;
+        for (var index = 0; index < breaks.length; index += 1) {
           if (index) pdf.addPage();
-          var top = index * sliceHeight;
-          var height = Math.min(sliceHeight, canvas.height - top);
+          var height = breaks[index] - top;
           var pageCanvas = canvasSlice(canvas, top, height);
           var image = pageCanvas.toDataURL('image/jpeg', 0.94);
           var imageHeight = height * contentWidth / canvas.width;
           pdf.addImage(image, 'JPEG', margin, margin, contentWidth, imageHeight, undefined, 'FAST');
           pageCanvas.width = 0;
           pageCanvas.height = 0;
+          top = breaks[index];
         }
         var filename = (pdfButton.dataset.filename || '批改报告.pdf')
           .replace(/[\\/:*?"<>|]+/g, '_');

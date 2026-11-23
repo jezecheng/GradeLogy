@@ -5,6 +5,7 @@ build_report_md 负责逐题明细/失分归因/评价的排版，render_markdow
 Markdown（标题/表格/列表/粗体）渲染成 HTML，避免引入额外依赖。
 """
 import re
+import unicodedata
 from html import escape, unescape
 from urllib.parse import urlsplit
 
@@ -39,6 +40,41 @@ def _md_cell(value):
     return str(value or "").replace("|", "｜").replace("\n", " ").strip()
 
 
+def _table_column_widths(rows):
+    """按表头用途和内容长度估算各列比例，避免长文本列被平均挤窄。"""
+    headers = rows[0] if rows else []
+    count = len(headers)
+    if not count:
+        return []
+    if headers[:2] == ["题号", "题干/小问"] and count == 4:
+        return [8, 34, 12, 46]
+    if headers[:2] == ["题号", "指示标签"] and count == 3:
+        return [14, 31, 55]
+    if headers[:3] == ["题", "类型", "症结"]:
+        return [10, 25, 65]
+
+    def display_length(value):
+        return sum(2 if unicodedata.east_asian_width(char) in "FWA" else 1
+                   for char in str(value))
+
+    weights = []
+    for index, header in enumerate(headers):
+        lengths = [display_length(row[index]) for row in rows[:25] if index < len(row)]
+        content = min(max(lengths or [0]), 36)
+        weight = max(8, min(36, display_length(header), content or 12))
+        label = str(header)
+        if index == 0 and any(token in label for token in ("题号", "编号", "序号", "学生")):
+            weight = min(weight, 14)
+        if any(token in label for token in ("评语", "说明", "症结", "点评", "诊断", "内容")):
+            weight = min(48, weight * 1.35)
+        weights.append(weight)
+
+    minimum = min(8, 100 / count)
+    widths = [max(minimum, weight * 100 / sum(weights)) for weight in weights]
+    total = sum(widths)
+    return [width * 100 / total for width in widths]
+
+
 def build_report_md(student_name, lecture_title, date_label, questions, summary, detail,
                     kg_diagnosis=None):
     """生成学生的 Markdown 批改报告：逐题明细 + 失分归因 + 评价 + KG 诊断。
@@ -55,9 +91,35 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
     unknown = [q for q in qs if (q.get("verdict") or "") == "无法判定"]
     skipped = [q for q in qs if "未作答" in (q.get("ai_comment") or "")]
 
+    def _nos(items, limit=6):
+        names = [str(q.get("no")) for q in items]
+        text = "、".join(f"第 {n} 题" for n in names[:limit])
+        return text + ("等" if len(names) > limit else "")
+
+    accuracy = round(len(right) * 100 / n_total) if n_total else 0
     out = [f"# {student_name} · {date_label}作业《{lecture_title}》批改结果", "",
-           f"## 一、逐题明细（{n_total} 个独立批改项）", "",
-           "| 题号 | 题干/小问 | 判定 | 批改说明 |", "| --- | --- | :---: | --- |"]
+           "## 一、正确率与失分归因", "", "### 正确率", ""]
+    stat = [f"正确率 {accuracy}%（完全答对 {len(right)}/{n_total} 个独立批改项）",
+            f"统计：{VERDICT_ICON['对']} {len(right)}"]
+    stat.append(f"{VERDICT_ICON['错']} {len(wrong)}" + (f"（{_nos(wrong)}）" if wrong else ""))
+    stat.append(f"{VERDICT_ICON['半对']} {len(partial)}" + (f"（{_nos(partial)}）" if partial else ""))
+    if unknown:
+        stat.append(f"{VERDICT_ICON['无法判定']} {len(unknown)}（{_nos(unknown)}）")
+    stat.append(f"未作答 {len(skipped)}")
+    out += ["", " | ".join(stat), ""]
+
+    weak = (summary or {}).get("weak_points") or []
+    out += ["", "### 失分归因", ""]
+    if weak:
+        out += ["| 题 | 类型 | 症结 |", "| --- | --- | --- |"]
+        for w in weak:
+            out.append(f"| {_md_cell(w.get('no'))} | {_md_cell(w.get('type'))} | "
+                       f"{_md_cell(w.get('detail'))} |")
+    else:
+        out.append("本次没有失分点。" if not (wrong or partial) else "AI 未给出失分归类，请参考逐题说明。")
+
+    out += ["", f"## 二、逐题明细（{n_total} 个独立批改项）", "",
+            "| 题号 | 题干/小问 | 判定 | 批改说明 |", "| --- | --- | :---: | --- |"]
     last_parent = None
     for q in qs:
         parent_no = str(q.get("parent_no") or "").strip()
@@ -70,31 +132,6 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
         comment = (q.get("note") or "").strip() or (q.get("ai_comment") or "").strip()
         stem = _md_cell(q.get("stem"))
         out.append(f"| {_md_cell(q.get('no'))} | {stem} | {icon} | {_md_cell(comment)} |")
-
-    def _nos(items, limit=6):
-        names = [str(q.get("no")) for q in items]
-        text = "、".join(f"第 {n} 题" for n in names[:limit])
-        return text + ("等" if len(names) > limit else "")
-
-    accuracy = round(len(right) * 100 / n_total) if n_total else 0
-    stat = [f"正确率 {accuracy}%（完全答对 {len(right)}/{n_total} 个独立批改项）",
-            f"统计：{VERDICT_ICON['对']} {len(right)}"]
-    stat.append(f"{VERDICT_ICON['错']} {len(wrong)}" + (f"（{_nos(wrong)}）" if wrong else ""))
-    stat.append(f"{VERDICT_ICON['半对']} {len(partial)}" + (f"（{_nos(partial)}）" if partial else ""))
-    if unknown:
-        stat.append(f"{VERDICT_ICON['无法判定']} {len(unknown)}（{_nos(unknown)}）")
-    stat.append(f"未作答 {len(skipped)}")
-    out += ["", " | ".join(stat), ""]
-
-    weak = (summary or {}).get("weak_points") or []
-    out += ["## 二、失分点归因", ""]
-    if weak:
-        out += ["| 题 | 类型 | 症结 |", "| --- | --- | --- |"]
-        for w in weak:
-            out.append(f"| {_md_cell(w.get('no'))} | {_md_cell(w.get('type'))} | "
-                       f"{_md_cell(w.get('detail'))} |")
-    else:
-        out.append("本次没有失分点。" if not (wrong or partial) else "AI 未给出失分归类，请参考逐题说明。")
 
     # 知识图谱诊断放在总评之前：每道题一行，标签居中列举，不再展开成多列。
     if kg_diagnosis:
@@ -247,12 +284,36 @@ def render_markdown(md, *, server_mathml=True):
             while i < len(lines) and lines[i].startswith("|"):
                 rows.append([c.strip() for c in lines[i].strip().strip("|").split("|")])
                 i += 1
+            headers = rows[0] if rows else []
+            # 旧报告中的知识图谱矩阵有几十个横向标签列；折叠为逐题标签清单，
+            # 既保留每个非空诊断状态，也能在手机和 PDF 页面内完整阅读。
+            if (len(headers) >= 7 and headers[0] == "题号"
+                    and any(token in headers[1] for token in ("题目", "题干"))
+                    and "点评" in headers[-1]):
+                compact_rows = [["题号", "指示标签", "单题评语"]]
+                for row in rows[1:]:
+                    values = row + [""] * max(0, len(headers) - len(row))
+                    tags = []
+                    for index, value in enumerate(values[2:len(headers) - 1], 2):
+                        if value.strip() not in ("", "-", "—", "–"):
+                            tags.append(f"{headers[index]}：{value.strip()}")
+                    compact_rows.append([
+                        values[0], "、".join(tags) or "—", values[len(headers) - 1]])
+                rows = compact_rows
+
             table_class = "report-table"
-            if rows and len(rows[0]) >= 2 and rows[0][:2] == ["题号", "题干/小问"]:
+            if rows and len(rows[0]) == 4 and rows[0][:2] == ["题号", "题干/小问"]:
                 table_class += " report-question-table"
             elif rows and len(rows[0]) == 3 and rows[0][:2] == ["题号", "指示标签"]:
                 table_class += " report-kg-question-table"
-            html.append(f"<table class='{table_class}'>")
+            elif rows and rows[0][:3] == ["题", "类型", "症结"]:
+                table_class += " report-attribution-table"
+            else:
+                table_class += " report-dynamic-table"
+            widths = _table_column_widths(rows)
+            html.append(f"<table class='{table_class}'><colgroup>"
+                        + "".join(f'<col style="width:{width:.2f}%">' for width in widths)
+                        + "</colgroup>")
             for r, cells in enumerate(rows):
                 tag = "th" if r == 0 else "td"
                 html.append("<tr>"
