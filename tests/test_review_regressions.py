@@ -252,7 +252,7 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertIn("【标准答案本次输入第 1 页；教师 PDF 第 4 页】", labels)
         self.assertEqual(chat.call_args.kwargs["max_tokens"], 32768)
 
-    def test_report_knowledge_graph_rows_have_tags_and_single_question_comment_columns(self):
+    def test_report_merges_question_and_knowledge_graph_columns(self):
         md = a.build_report_md(
             "学生", "讲次", "6月1日", [], {},
             {"question_comments": {"例6": "结合速率常数标签，本题求算正确。",
@@ -270,19 +270,20 @@ class ReviewRegressionTest(unittest.TestCase):
                            "analysis": "计算题未完成，需关注相关前置知识",
                            "review_comment": "复核意见：漏写衰变关系"}],
             }, "diagnoses": []})
-        self.assertIn("| 题号 | 指示标签 | 单题评语 |", md)
+        self.assertIn("| 题号 | 判定 | 批改说明 | 指示标签 | 单题评语 |", md)
         self.assertIn("## 一、正确率与失分归因", md)
         self.assertIn("## 二、逐题明细", md)
-        self.assertIn("## 三、知识图谱诊断", md)
-        self.assertIn("## 四、评价", md)
+        self.assertNotIn("知识图谱诊断", md)
+        self.assertIn("## 三、评价", md)
         self.assertLess(md.index("正确率"), md.index("## 二、逐题明细"))
-        self.assertIn("| 例6 | 速率常数、初始速率 | 结合速率常数标签，本题求算正确。 |", md)
-        self.assertIn("| 例7 | 放射性衰变 | 放射性计算遗漏了衰变关系。 |", md)
+        self.assertIn("| 例6 | — | — | 速率常数、初始速率 | 结合速率常数标签，本题求算正确。 |", md)
+        self.assertIn("| 例7 | — | — | 放射性衰变 | 放射性计算遗漏了衰变关系。 |", md)
         self.assertNotIn("速率常数求算", md)
+        self.assertIn("请结合本次讲义复习相关知识点", md)
         self.assertNotIn("| 速率常数 |", md)
         self.assertNotIn("纵向批阅", md)
         rendered = a.render_markdown(md)
-        self.assertIn("report-kg-question-table", rendered)
+        self.assertIn("report-question-table report-kg-question-table", rendered)
         self.assertIn("<th>题号</th>", rendered)
 
     def test_report_without_knowledge_graph_keeps_evaluation_as_section_three(self):
@@ -317,7 +318,8 @@ class ReviewRegressionTest(unittest.TestCase):
             {}, {})
         self.assertIn("1.1", md)
         self.assertIn("1.2", md)
-        self.assertIn("母题公共条件", md)
+        self.assertNotIn("母题公共条件", md)
+        self.assertIn("以下小问独立判定", md)
         self.assertIn("report-question-table", a.render_markdown(md))
         self.assertIn("正确率 50%（完全答对 1/2 个独立批改项）", md)
         self.assertEqual(a.accuracy_text(1, 0, 0, 2), "50%")
@@ -680,8 +682,9 @@ class ReviewRegressionTest(unittest.TestCase):
             "SELECT report_md,report_detail FROM submissions WHERE id=30").fetchone()
         self.assertIn("OK", saved["report_md"])
         self.assertIn("人工复核已跳过", saved["report_md"])
-        self.assertIn("| 题号 | 指示标签 | 单题评语 |", saved["report_md"])
-        self.assertIn("| 第 1 题 | 氧化还原反应 | 结合标准答案，本题反应条件遗漏。 |",
+        self.assertIn("| 题号 | 判定 | 批改说明 | 指示标签 | 单题评语 |", saved["report_md"])
+        self.assertIn("| 1 |", saved["report_md"])
+        self.assertIn("| 氧化还原反应 | 结合标准答案，本题反应条件遗漏。 |",
                       saved["report_md"])
         self.assertEqual(json.loads(saved["report_detail"]), {
             "good": "OK", "question_comments": {"1": "结合标准答案，本题反应条件遗漏。"}})
@@ -693,8 +696,9 @@ class ReviewRegressionTest(unittest.TestCase):
     def test_report_page_exports_pdf_from_the_browser_rendered_view(self):
         self.db.execute(
             "UPDATE submissions SET report_md=? WHERE id=30",
-            ("# 化学作业报告\n\n| 题号 | 题干 | 判定 |\n| --- | --- | --- |\n"
-             "| 1.1 | $\\mathrm{Fe^{3+}}$ + $\\mathrm{Cl^-}$ | 对 |",))
+            ("# 化学作业报告\n\n| 题号 | 题干/小问 | 判定 | 批改说明 |\n"
+             "| --- | --- | --- | --- |\n"
+             "| 1.1 | 不需要显示的题干 | 对 | $\\mathrm{Cl^-}$ 判断正确 |",))
         self.db.commit()
         response = self.client(2).get(self.url("submission_report", sid=30))
         self.assertEqual(response.status_code, 200)
@@ -708,7 +712,10 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertIn('id="report-pdf-button-spinner"', page)
         self.assertIn("pageBreaks", page)
         self.assertIn("化学作业报告", page)
-        self.assertIn(r"$\mathrm{Fe^{3+}}$", page)
+        visible_report = page.split('<div class="report-body">', 1)[1].split(
+            '<details class="report-editor"', 1)[0]
+        self.assertNotIn("不需要显示的题干", visible_report)
+        self.assertIn(r"$\mathrm{Cl^-}$", visible_report)
 
     def test_env_key_takes_over_entire_ai_configuration(self):
         import ai_config

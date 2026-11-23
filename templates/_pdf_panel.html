@@ -106,9 +106,16 @@
     if (!open) showMobile(false);
     panel.hidden = !open;
     document.body.classList.toggle('pdf-open', open);
+    document.querySelectorAll('[data-pdf-toggle]').forEach(function (trigger) {
+      var triggerSrc = trigger.dataset.pdfSrc || trigger.getAttribute('href');
+      trigger.setAttribute('aria-expanded', open && triggerSrc === current ? 'true' : 'false');
+      trigger.setAttribute('aria-controls', 'pdf-panel');
+    });
   }
 
   document.querySelectorAll('[data-pdf-toggle]').forEach(function (a) {
+    a.setAttribute('aria-controls', 'pdf-panel');
+    a.setAttribute('aria-expanded', 'false');
     a.addEventListener('click', function (e) {
       var src = a.dataset.pdfSrc || a.getAttribute('href');
       if (prefersNewTab() && src) {
@@ -118,7 +125,9 @@
         return;
       }
       e.preventDefault();
-      toggle(true, src, a.dataset.pdfTitle);
+      // 再次点击当前扫描件关闭面板；点击其他扫描件则在原面板中切换内容。
+      var closeCurrent = !panel.hidden && src === current;
+      toggle(!closeCurrent, src, a.dataset.pdfTitle);
     });
   });
   document.getElementById('pdf-close').addEventListener('click', function () { toggle(false); });

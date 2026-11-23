@@ -46,12 +46,20 @@ def _table_column_widths(rows):
     count = len(headers)
     if not count:
         return []
-    if headers[:2] == ["题号", "题干/小问"] and count == 4:
-        return [8, 34, 12, 46]
+    if headers[:2] == ["题号", "判定"] and count == 2:
+        return [20, 80]
+    if headers[:2] == ["#", "判定"] and count == 3:
+        return [15, 12, 73]
+    if headers[:2] == ["题号", "判定"] and count == 3:
+        return [15, 12, 73]
+    if headers[:2] == ["题号", "判定"] and count == 5:
+        return [12, 12, 26, 22, 28]
     if headers[:2] == ["题号", "指示标签"] and count == 3:
         return [14, 31, 55]
+    if headers[:2] == ["#", "判定"] and count == 3:
+        return [10, 12, 78]
     if headers[:3] == ["题", "类型", "症结"]:
-        return [10, 25, 65]
+        return [15, 25, 60]
 
     def display_length(value):
         return sum(2 if unicodedata.east_asian_width(char) in "FWA" else 1
@@ -77,11 +85,11 @@ def _table_column_widths(rows):
 
 def build_report_md(student_name, lecture_title, date_label, questions, summary, detail,
                     kg_diagnosis=None):
-    """生成学生的 Markdown 批改报告：逐题明细 + 失分归因 + 评价 + KG 诊断。
+    """生成学生的 Markdown 批改报告：正确率/失分归因 + 合并逐题表 + 评价。
 
     逐题明细的「批改说明」优先使用老师复核后的 note（人工评语），
     为空时回退到 AI 原始的 ai_comment。
-    kg_diagnosis: 知识图谱诊断数据列表，存在时在报告中加入 KG 分析部分。
+    kg_diagnosis: 知识图谱逐题诊断；有数据时合并进逐题明细表。
     """
     qs = [dict(q) for q in questions]
     n_total = len(qs)
@@ -106,10 +114,10 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
     if unknown:
         stat.append(f"{VERDICT_ICON['无法判定']} {len(unknown)}（{_nos(unknown)}）")
     stat.append(f"未作答 {len(skipped)}")
-    out += ["", " | ".join(stat), ""]
+    out += [" | ".join(stat), ""]
 
     weak = (summary or {}).get("weak_points") or []
-    out += ["", "### 失分归因", ""]
+    out += ["### 失分归因", ""]
     if weak:
         out += ["| 题 | 类型 | 症结 |", "| --- | --- | --- |"]
         for w in weak:
@@ -118,60 +126,58 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
     else:
         out.append("本次没有失分点。" if not (wrong or partial) else "AI 未给出失分归类，请参考逐题说明。")
 
+    matrix = kg_diagnosis.get("matrix") if isinstance(kg_diagnosis, dict) else None
+    kg_rows = (matrix or {}).get("rows") or []
+    comments = (detail or {}).get("question_comments") or {}
+    if isinstance(comments, list):
+        comments = {str(row.get("no") or ""): str(row.get("comment") or "")
+                    for row in comments if isinstance(row, dict)}
+    if not isinstance(comments, dict):
+        comments = {}
+    kg_by_no = {}
+    for row in kg_rows:
+        no = str(row.get("no") or "")
+        tags = row.get("tags")
+        if tags is None:
+            tags = [tag for tag, status in (row.get("cells") or {}).items()
+                    if status not in (None, "", "—")]
+        tags_text = "、".join(str(tag) for tag in tags if str(tag).strip()) or "—"
+        comment = (comments.get(no) or row.get("review_comment") or row.get("analysis")
+                   or "AI 未提供本题单独评语")
+        kg_by_no[no] = (tags_text, comment)
+
+    has_kg_rows = bool(kg_by_no)
+    headers = ["题号", "判定", "批改说明"]
+    if has_kg_rows:
+        headers += ["指示标签", "单题评语"]
     out += ["", f"## 二、逐题明细（{n_total} 个独立批改项）", "",
-            "| 题号 | 题干/小问 | 判定 | 批改说明 |", "| --- | --- | :---: | --- |"]
+            "| " + " | ".join(headers) + " |",
+            "| " + " | ".join("---" for _ in headers) + " |"]
     last_parent = None
     for q in qs:
         parent_no = str(q.get("parent_no") or "").strip()
         if parent_no and parent_no != last_parent:
-            parent_stem = _md_cell(q.get("parent_stem"))
-            out.append(f"| **第 {parent_no} 题** | {parent_stem} | — | 母题（各小问独立判定） |")
+            parent = [f"**第 {parent_no} 题**", "—", "母题（以下小问独立判定）"]
+            if has_kg_rows:
+                parent += ["—", "—"]
+            out.append("| " + " | ".join(_md_cell(value) for value in parent) + " |")
             last_parent = parent_no
         icon = VERDICT_ICON.get(q.get("verdict") or "", q.get("verdict") or "—")
         # 优先用老师复核后的评语（note），为空时回退到 AI 原始评语
         comment = (q.get("note") or "").strip() or (q.get("ai_comment") or "").strip()
-        stem = _md_cell(q.get("stem"))
-        out.append(f"| {_md_cell(q.get('no'))} | {stem} | {icon} | {_md_cell(comment)} |")
+        row = [_md_cell(q.get("no")), icon, _md_cell(comment)]
+        graph = kg_by_no.pop(str(q.get("no") or ""), None)
+        if has_kg_rows:
+            row += list(graph) if graph else ["—", "—"]
+        out.append("| " + " | ".join(_md_cell(value) for value in row) + " |")
 
-    # 知识图谱诊断放在总评之前：每道题一行，标签居中列举，不再展开成多列。
-    if kg_diagnosis:
-        out += ["## 三、知识图谱诊断", "",
-                "> 每行是一道题；中间列列出本题涉及的知识点标签，单题评语结合学生作答、标准答案和复核评语生成。", ""]
-        matrix = kg_diagnosis.get("matrix") if isinstance(kg_diagnosis, dict) else None
-        if matrix and matrix.get("columns"):
-            headers = ["题号", "指示标签", "单题评语"]
-            out.append("| " + " | ".join(_md_cell(x) for x in headers) + " |")
-            out.append("| --- | --- | --- |")
-            comments = (detail or {}).get("question_comments") or {}
-            if isinstance(comments, list):
-                comments = {str(row.get("no") or ""): str(row.get("comment") or "")
-                            for row in comments if isinstance(row, dict)}
-            if not isinstance(comments, dict):
-                comments = {}
-            for row in matrix.get("rows") or []:
-                no = str(row.get("no") or "")
-                label = f"第 {no} 题" if no[:1].isdigit() else no
-                tags = row.get("tags")
-                if tags is None:
-                    tags = [tag for tag, status in (row.get("cells") or {}).items()
-                            if status not in (None, "", "—")]
-                tags_text = "、".join(str(tag) for tag in tags if str(tag).strip()) or "—"
-                comment = (comments.get(no) or row.get("review_comment") or
-                           row.get("analysis") or "AI 未提供本题单独评语")
-                out.append("| " + " | ".join(_md_cell(x) for x in
-                                                (label, tags_text, comment)) + " |")
-            out.append("")
-        else:
-            # 兼容旧格式的已保存/外部调用数据。
-            for d in (kg_diagnosis if isinstance(kg_diagnosis, list) else []):
-                p = d["perf"]
-                out.append(f"### {d['tag']}（对{p['right']}/半对{p['partial']}/错{p['wrong']}）")
-                if d.get("weak_prereqs"):
-                    out.append("前置知识薄弱：" + "、".join(x["name"] for x in d["weak_prereqs"]))
-                out.append("")
-
-    evaluation_section = "四" if kg_diagnosis else "三"
-    out += ["", f"## {evaluation_section}、评价", ""]
+    # 图谱可能包含没有出现在逐题批阅列表中的题目；仍并入同一张表，避免丢失诊断。
+    for no, (tags_text, graph_comment) in kg_by_no.items():
+        label = f"第 {no} 题" if no[:1].isdigit() else no
+        out.append("| " + " | ".join(_md_cell(value) for value in
+                                      (label, "—", "—", tags_text, graph_comment)) + " |")
+    out += ["", "> **复习提示：** 请结合本次讲义复习相关知识点，并完成对应例题巩固。", "",
+            "## 三、评价", ""]
     good = (detail or {}).get("good") or (summary or {}).get("evaluation", "")
     if good:
         out += [good, ""]
@@ -285,6 +291,18 @@ def render_markdown(md, *, server_mathml=True):
                 rows.append([c.strip() for c in lines[i].strip().strip("|").split("|")])
                 i += 1
             headers = rows[0] if rows else []
+            # 老报告逐题表中的题干列只占空间；保留题号、判定和评语即可。
+            if (len(headers) >= 3 and headers[0] in ("题号", "#")
+                    and any(token in headers[1] for token in ("题干", "题目"))
+                    and "判定" in headers):
+                keep = [0, headers.index("判定")]
+                comment_index = next((index for index, header in enumerate(headers)
+                                      if any(token in header for token in ("批改说明", "评语"))), None)
+                if comment_index is not None and comment_index not in keep:
+                    keep.append(comment_index)
+                rows = [[row[index] for index in keep if index < len(row)] for row in rows]
+                headers = rows[0] if rows else []
+
             # 旧报告中的知识图谱矩阵有几十个横向标签列；折叠为逐题标签清单，
             # 既保留每个非空诊断状态，也能在手机和 PDF 页面内完整阅读。
             if (len(headers) >= 7 and headers[0] == "题号"
@@ -302,10 +320,19 @@ def render_markdown(md, *, server_mathml=True):
                 rows = compact_rows
 
             table_class = "report-table"
-            if rows and len(rows[0]) == 4 and rows[0][:2] == ["题号", "题干/小问"]:
+            if (rows and len(rows[0]) in (2, 3, 5)
+                    and rows[0][:2] == ["题号", "判定"]):
                 table_class += " report-question-table"
+                if len(rows[0]) == 5:
+                    table_class += " report-kg-question-table"
+                elif len(rows[0]) == 2:
+                    table_class += " report-question-table-compact"
+            elif rows and rows[0][:2] == ["#", "判定"]:
+                table_class += " report-question-table"
+                if len(rows[0]) == 2:
+                    table_class += " report-question-table-compact"
             elif rows and len(rows[0]) == 3 and rows[0][:2] == ["题号", "指示标签"]:
-                table_class += " report-kg-question-table"
+                table_class += " report-kg-question-table report-legacy-kg-table"
             elif rows and rows[0][:3] == ["题", "类型", "症结"]:
                 table_class += " report-attribution-table"
             else:
