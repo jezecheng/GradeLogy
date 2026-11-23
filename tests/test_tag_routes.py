@@ -16,7 +16,7 @@ import app as app_module  # noqa: E402
 from tests import patch_sync_queue  # noqa: E402
 
 _TABLES = ("student_question_reviews", "student_weak_points", "tag_analyses",
-           "question_tags", "questions",
+           "question_assessments", "question_tags", "questions",
            "submissions", "lectures", "exams", "exam_scores", "enrollments",
            "course_teachers", "course_knowledge_graphs", "kg_edges", "kg_nodes",
            "kg_category_maps", "knowledge_graphs",
@@ -179,15 +179,35 @@ class TagRouteTest(unittest.TestCase):
         con.close()
         self.assertEqual(signature, app_module.tag_scope_signature(["q0"]))
 
-    def test_tag_routes_reject_other_teacher(self):
+    def test_all_teachers_can_access_course_and_lecture_content(self):
         other = self.login(3)
+        self.assertEqual(other.get(self.url("course_detail", cid=10)).status_code, 200)
+        self.assertEqual(other.get(self.url("lecture_detail", hid=20)).status_code, 200)
+        edited = self._post("course_edit", {"name": "协作老师已编辑"},
+                            client=other, cid=10)
+        self.assertEqual(edited.status_code, 302)
+        lecture_edit = self._post(
+            "lecture_edit", {"title": "协作老师编辑的讲次"}, client=other, hid=20)
+        self.assertEqual(lecture_edit.status_code, 302)
+        con = self._db()
+        self.assertEqual(con.execute(
+            "SELECT name FROM courses WHERE id=10").fetchone()[0], "协作老师已编辑")
+        self.assertEqual(con.execute(
+            "SELECT title FROM lectures WHERE id=20").fetchone()[0], "协作老师编辑的讲次")
+        con.close()
         self.assertEqual(
-            self._post("lecture_tags_generate", client=other, hid=20).status_code, 403)
+            self._post("lecture_tags_generate", client=other, hid=20).status_code, 302)
         self.assertEqual(
-            self._post("lecture_tag_analysis", client=other, hid=20).status_code, 403)
+            self._post("lecture_tag_analysis", client=other, hid=20).status_code, 302)
         self.assertEqual(
             self._post("student_tag_analysis", client=other, cid=10, sid=4).status_code,
-            403)
+            302)
+
+    def test_temporary_teacher_access_flag_restores_course_membership_checks(self):
+        settings = app_module.app.config.setdefault("GRADELOGY_SETTINGS", {})
+        with mock.patch.dict(settings, {"TEMPORARY_GLOBAL_TEACHER_ACCESS": False}):
+            self.assertEqual(
+                self.login(3).get(self.url("course_detail", cid=10)).status_code, 403)
 
     def test_question_reviewed_saves_verdict_and_fields(self):
         """点「已复核」应同时保存判定/OCR/标准答案/评语，而不只是 reviewed 标记。"""

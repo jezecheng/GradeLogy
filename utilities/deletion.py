@@ -15,6 +15,7 @@ def delete_submissions(db, where, params):
 def delete_lecture(db, lecture_id):
     delete_submissions(db, "lecture_id=?", (lecture_id,))
     db.execute("DELETE FROM question_tags WHERE lecture_id=?", (lecture_id,))
+    db.execute("DELETE FROM question_assessments WHERE lecture_id=?", (lecture_id,))
     db.execute("DELETE FROM tag_analyses WHERE lecture_id=?", (lecture_id,))
     db.execute("DELETE FROM lectures WHERE id=?", (lecture_id,))
 

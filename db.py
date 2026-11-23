@@ -229,6 +229,18 @@ CREATE TABLE IF NOT EXISTS question_tags(
   created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS idx_question_tags_lecture ON question_tags(lecture_id, question_no);
 CREATE INDEX IF NOT EXISTS idx_question_tags_tag ON question_tags(tag);
+-- 每道独立题目的难度；AI 估值与老师手动覆盖分开保存，避免一题多个标签重复存难度。
+CREATE TABLE IF NOT EXISTS question_assessments(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lecture_id INTEGER NOT NULL REFERENCES lectures(id),
+  question_key TEXT NOT NULL,
+  question_no TEXT NOT NULL,
+  difficulty REAL,
+  manual_difficulty REAL,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(lecture_id, question_key));
+CREATE INDEX IF NOT EXISTS idx_question_assessments_lecture
+  ON question_assessments(lecture_id, question_no);
 -- 知识点分析结果：horizontal=同一讲的全班共性问题，vertical=同一学生跨讲次的薄弱点
 CREATE TABLE IF NOT EXISTS tag_analyses(
   id INTEGER PRIMARY KEY AUTOINCREMENT,

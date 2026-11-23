@@ -21,13 +21,13 @@
 </nav>
 <div class="card-head">
   <h1>{{ course.name }}</h1>
-  {% if can_manage_teachers %}
+  {% if can_edit_course %}
   <button type="button" class="small" data-dialog-open="course-edit-dialog">编辑课程</button>
   {% endif %}
 </div>
 <p class="muted">{{ course.description }}</p>
 
-{% if can_manage_teachers %}
+{% if can_edit_course %}
 <dialog id="course-edit-dialog" class="modal">
   <h2>编辑课程信息</h2>
   <form method="post" action="{{ url_for('course_edit', cid=course.id) }}" class="stack-form">

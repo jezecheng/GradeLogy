@@ -141,13 +141,7 @@ class CourseEnrollmentBatchTest(unittest.TestCase):
         self.assertIn("请选择至少一名学生", response.text)
         self.assertEqual(self.enrollment_rows(10), [4])
 
-    def test_only_course_teachers_can_manage_enrollment(self):
-        denied = self.post({"student_ids": ["5"]}, user=3, follow_redirects=False)
-        self.assertEqual(denied.status_code, 403)
-        self.assertEqual(self.enrollment_rows(10), [4])
-
-        self.db.execute("INSERT INTO course_teachers(course_id,teacher_id) VALUES(10,3)")
-        self.db.commit()
+    def test_any_teacher_can_manage_enrollment_in_temporary_open_mode(self):
         allowed = self.post({"student_ids": ["5"]}, user=3)
         self.assertEqual(allowed.status_code, 200)
         self.assertIn("新增 1 人", allowed.text)

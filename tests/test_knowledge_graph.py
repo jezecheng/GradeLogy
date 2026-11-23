@@ -25,7 +25,7 @@ from utilities import kg_cli, kg_text, kg_transfer, knowledge_graph as kg  # noq
 
 _TABLES = ("kg_category_maps", "kg_members", "kg_audits", "kg_chunks", "kg_edges",
            "kg_nodes", "kg_materials", "knowledge_graphs", "tag_analyses",
-           "question_tags", "questions", "submissions", "lectures", "exams",
+           "question_assessments", "question_tags", "questions", "submissions", "lectures", "exams",
            "exam_scores", "enrollments", "course_teachers", "courses", "users",
            "settings", "ai_usage_events", "ai_operations")
 
@@ -1045,17 +1045,18 @@ class KGRouteTest(unittest.TestCase):
         con.close()
         self.assertEqual(row["name"], "必修一知识图谱")
 
-    def test_other_teacher_cannot_edit_graph(self):
+    def test_other_teacher_can_edit_graph_content_and_metadata_but_not_delete_graph(self):
         graph = self._create_graph()
         other = self.login(3)
         resp = self._post("knowledge_graph_edit", {"name": "被改名"}, client=other,
                           gid=graph["id"])
-        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.status_code, 302)
         con = self._db()
-        row = con.execute("SELECT name FROM knowledge_graphs WHERE id=?",
-                          (graph["id"],)).fetchone()
+        self.assertEqual(con.execute("SELECT name FROM knowledge_graphs WHERE id=?",
+                                     (graph["id"],)).fetchone()[0], "被改名")
         con.close()
-        self.assertEqual(row["name"], "必修一知识图谱")
+        removed = self._post("knowledge_graph_delete", client=other, gid=graph["id"])
+        self.assertEqual(removed.status_code, 403)
 
     def test_create_requires_subject_and_name(self):
         self._post("knowledge_graph_create", {"subject": "", "name": "x"})
@@ -1115,18 +1116,23 @@ class KGRouteTest(unittest.TestCase):
             "SELECT COUNT(*) FROM kg_materials").fetchone()[0], 0)
         con.close()
 
-    def test_other_teacher_can_view_but_not_upload(self):
+    def test_other_teacher_can_view_upload_and_edit_graph_metadata(self):
         graph = self._create_graph()
         other = self.login(3)
         resp = other.get(self.url("knowledge_graph_detail", gid=graph["id"]))
         self.assertEqual(resp.status_code, 200)
+        self.assertIn("编辑信息", resp.get_data(as_text=True))
         with mock.patch.object(app_module, "_kg_start_build"):
             resp = other.post(
                 self.url("knowledge_graph_upload", gid=graph["id"]),
                 data={"_csrf": "test-token",
                       "files": (io.BytesIO(b"x"), "notes.txt")},
                 content_type="multipart/form-data")
-        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.status_code, 302)
+        con = self._db()
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM kg_materials WHERE graph_id=?", (graph["id"],)).fetchone()[0], 1)
+        con.close()
 
     def test_delete_material_removes_file_chunks_and_nodes(self):
         graph = self._create_graph()
@@ -1206,7 +1212,7 @@ class KGRouteTest(unittest.TestCase):
             "SELECT COUNT(*) FROM kg_materials").fetchone()[0], 1)
         con.close()
 
-    def test_other_teacher_cannot_delete_material(self):
+    def test_other_teacher_can_delete_graph_material_in_temporary_open_mode(self):
         graph = self._create_graph()
         con = self._db()
         con.execute(
@@ -1218,10 +1224,10 @@ class KGRouteTest(unittest.TestCase):
         other = self.login(3)
         resp = other.post(self.url("knowledge_graph_material_delete", mid=70),
                           data={"_csrf": "test-token"})
-        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.status_code, 302)
         con = self._db()
         self.assertEqual(con.execute(
-            "SELECT COUNT(*) FROM kg_materials").fetchone()[0], 1)
+            "SELECT COUNT(*) FROM kg_materials").fetchone()[0], 0)
         con.close()
 
     def test_other_teacher_cannot_delete_graph(self):
@@ -1756,7 +1762,8 @@ class KGRouteTest(unittest.TestCase):
         other = self.login(3)
         detail = other.get(self.url("knowledge_graph_detail", gid=graph["id"]))
         self.assertEqual(detail.status_code, 200)
-        self.assertIn("只读", detail.get_data(as_text=True))
+        self.assertNotIn("只读", detail.get_data(as_text=True))
+        self.assertIn("上传资料", detail.get_data(as_text=True))
         self._post("course_knowledge_graphs_save", client=other, cid=9,
                    data={"graph_ids": [str(graph["id"])]})
         con = self._db()
@@ -1828,10 +1835,8 @@ class KGRouteTest(unittest.TestCase):
         con.close()
         self.assertEqual(count, 0)
 
-    def test_export_route_requires_manage_and_downloads_package(self):
+    def test_all_teachers_can_export_graph_and_download_package(self):
         graph = self._create_graph()
-        self.assertEqual(self.login(3).get(
-            self.url("knowledge_graph_export", gid=graph["id"])).status_code, 403)
 
         def write_package(db, gid, upload_dir, output_path, scope="full"):
             self.assertEqual(gid, graph["id"])
@@ -1841,6 +1846,11 @@ class KGRouteTest(unittest.TestCase):
 
         with mock.patch.object(app_module.kg_transfer, "export_graph",
                                side_effect=write_package) as export:
+            response = self.login(3).get(
+                self.url("knowledge_graph_export", gid=graph["id"]))
+            self.assertEqual(response.status_code, 200)
+            response.close()
+            self.assertEqual(export.call_args.kwargs["scope"], "full")
             response = self.client.get(self.url("knowledge_graph_export", gid=graph["id"]))
             self.assertEqual(response.status_code, 200)
             self.assertTrue(response.data.startswith(b"PK"))
@@ -1852,7 +1862,7 @@ class KGRouteTest(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(export.call_args.kwargs["scope"], "graph")
             response.close()
-        self.assertEqual(export.call_count, 2)
+        self.assertEqual(export.call_count, 3)
 
     def test_import_route_uploads_package_as_current_user(self):
         created = {}

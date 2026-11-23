@@ -14,16 +14,17 @@
     <div class="kg-galaxy-toolbar">
       <div class="kg-galaxy-toolbar-row">
         <div class="kg-galaxy-legend" aria-hidden="true">
-          <span><i class="wp-lit-weak"></i>薄弱</span>
-          <span><i class="wp-lit-reviewed"></i>已复习</span>
-          <span><i class="wp-lit-mastered"></i>已掌握</span>
+          <span><i class="wp-lit-weak"></i>薄弱状态</span>
+          <span><i class="wp-lit-reviewed"></i>已复习状态</span>
+          <span><i class="wp-lit-mastered"></i>已掌握状态</span>
           <span><i class="wp-lit-context"></i>背景知识</span>
+          <span class="wp-error-scale"><b>错误率</b><i></i><span>低 → 高</span></span>
         </div>
         <div class="wp-galaxy-views" role="group" aria-label="显示方式">
           <button type="button" class="wp-galaxy-view is-active" data-view="chart">星图</button>
           <button type="button" class="wp-galaxy-view" data-view="list">列表</button>
         </div>
-        <span class="kg-galaxy-hint">点击亮点可定位到下方卡片 · 滚轮缩放 · 拖拽平移</span>
+        <span class="kg-galaxy-hint">节点大小/颜色反映错误率 · 点击定位到下方卡片 · 滚轮缩放 · 拖拽平移</span>
       </div>
       <div class="wp-galaxy-courses" id="wp-galaxy-courses"></div>
     </div>
@@ -183,7 +184,7 @@
 .wp-status-form input[type=text] { width: auto; flex: 1; }
 .wp-galaxy-card > summary { cursor: pointer; list-style: none; }
 .wp-galaxy-card > summary::-webkit-details-marker { display: none; }
-.wp-galaxy { height: min(56vh, 520px); min-height: 360px; }
+.wp-galaxy { height: min(72vh, 760px); min-height: 480px; }
 .wp-galaxy-courses { display: flex; gap: 8px; flex-wrap: wrap; }
 .wp-galaxy-course { border: 1px solid rgba(125, 211, 252, .35);
                     background: rgba(14, 165, 233, .12); border-radius: 999px;
@@ -197,7 +198,7 @@
                   padding: 3px 12px; font: inherit; font-size: 12px; cursor: pointer; }
 .wp-galaxy-view + .wp-galaxy-view { border-left: 1px solid rgba(125, 211, 252, .3); }
 .wp-galaxy-view.is-active { background: #7dd3fc; color: #082f49; font-weight: 600; }
-.wp-galaxy-list { padding: 8px 12px 14px; max-height: min(56vh, 520px); overflow: auto; }
+.wp-galaxy-list { padding: 8px 12px 14px; max-height: min(72vh, 760px); overflow: auto; }
 .wp-galaxy-list-item { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
                        padding: 8px 10px; border-bottom: 1px solid rgba(148, 163, 184, .16);
                        color: #cbd5e1; font-size: 13px; cursor: pointer; }
@@ -211,10 +212,18 @@
 .kg-galaxy-legend i.wp-lit-reviewed,
 .kg-galaxy-legend i.wp-lit-mastered,
 .kg-galaxy-legend i.wp-lit-context { width: 9px; height: 9px; border: 0; border-radius: 50%; }
-.kg-galaxy-legend i.wp-lit-weak { background: #fb923c; box-shadow: 0 0 10px #fb923c; }
-.kg-galaxy-legend i.wp-lit-reviewed { background: #fbbf24; box-shadow: 0 0 8px #fbbf24; }
-.kg-galaxy-legend i.wp-lit-mastered { background: #34d399; box-shadow: 0 0 8px #34d399; }
+.kg-galaxy-legend i.wp-lit-weak { background: transparent; border: 2px solid #fb923c; box-shadow: 0 0 8px #fb923c; }
+.kg-galaxy-legend i.wp-lit-reviewed { background: transparent; border: 2px solid #fbbf24; box-shadow: 0 0 8px #fbbf24; }
+.kg-galaxy-legend i.wp-lit-mastered { background: transparent; border: 2px solid #34d399; box-shadow: 0 0 8px #34d399; }
 .kg-galaxy-legend i.wp-lit-context { background: #475569; }
+.wp-error-scale { display: inline-flex; align-items: center; gap: 7px; }
+.wp-error-scale i { width: 54px; height: 8px; border: 0; border-radius: 999px;
+  background: linear-gradient(90deg, #34d399, #fbbf24 52%, #ef4444); }
+.wp-error-scale b, .wp-error-scale span { color: #94a3b8; font-weight: 500; }
 .weak-point-card.is-focus { box-shadow: 0 0 0 2px #f59e0b; }
+@media (max-width: 640px) {
+  .wp-galaxy { height: min(68vh, 680px); min-height: 420px; }
+  .wp-galaxy-list { max-height: 65vh; }
+}
 </style>
 {% endblock %}

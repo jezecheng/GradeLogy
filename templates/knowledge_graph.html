@@ -113,17 +113,21 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
 <div class="card-head">
   <h1>{{ graph.name }} <span class="subject-badge">{{ graph.subject }}</span>
     <span class="kg-role-badge">{{ role_label }}</span></h1>
-  {% if can_manage %}
+  {% if can_edit or can_manage %}
   <details class="ui-fold"><summary>更多操作</summary><div class="kg-head-actions">
+    {% if can_export_graph %}
     <a class="ghost small" href="{{ url_for('knowledge_graph_export', gid=graph.id) }}">导出完整迁移包</a>
     <a class="ghost small" href="{{ url_for('knowledge_graph_export', gid=graph.id, scope='graph') }}"
        title="只导出图谱信息、节点和关系，不含原始资料文件">仅导出知识图谱</a>
-    <button class="ghost small" type="button" data-dialog-open="kg-edit">编辑信息</button>
+    {% endif %}
+    {% if can_edit_graph_info %}<button class="ghost small" type="button" data-dialog-open="kg-edit">编辑信息</button>{% endif %}
+    {% if can_manage %}
     <form method="post" action="{{ url_for('knowledge_graph_delete', gid=graph.id) }}"
           onsubmit="return confirm('删除该知识图谱及全部资料？此操作不可恢复。')">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
       <button class="ghost small">删除图谱</button>
     </form>
+    {% endif %}
   </div></details>
   {% endif %}
 </div>
@@ -838,7 +842,7 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
 </script>
 {% endif %}
 
-{% if can_manage %}
+{% if can_edit_graph_info %}
 <dialog id="kg-edit" class="modal">
   <form method="post" action="{{ url_for('knowledge_graph_edit', gid=graph.id) }}" class="stack-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">

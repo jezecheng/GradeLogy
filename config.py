@@ -62,6 +62,11 @@ COOKIE_SECURE = _env("COOKIE_SECURE", "0").lower() in ("1", "true", "yes", "on")
 SESSION_IDLE_TIMEOUT_SECONDS = int(_env("SESSION_IDLE_TIMEOUT_SECONDS", "2700"))
 SESSION_IDLE_WARNING_SECONDS = int(_env("SESSION_IDLE_WARNING_SECONDS", "2400"))
 
+# 临时开放模式：所有教师都可查看/编辑任意课程内容和知识图谱。
+# 部署稳定后设为 0 即恢复课程成员与图谱协作角色限制。
+TEMPORARY_GLOBAL_TEACHER_ACCESS = _env(
+    "TEMPORARY_GLOBAL_TEACHER_ACCESS", "1").lower() not in ("0", "false", "no", "off")
+
 # 密钥：优先环境变量，其次读文件；都没有时由应用生成并写回文件
 SECRET_KEY = _env("SECRET_KEY", "")
 SECRET_KEY_FILE = os.path.abspath(_env("SECRET_KEY_FILE",

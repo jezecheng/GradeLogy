@@ -177,6 +177,24 @@ button.ghost:hover { background: #f4f6f8; }
                                          color: #fff; text-decoration: none; }
 .back-button:focus-visible { outline: 3px solid #a9c3ff; outline-offset: 2px; }
 
+/* 题目难度：五颗星各自可点半格，支持 1~5 星、半星递增 */
+.difficulty-widget { min-width: 126px; }
+.difficulty-stars { display: inline-flex; align-items: center; gap: 1px; white-space: nowrap; }
+.difficulty-star, .difficulty-star:hover { width: 23px; min-height: 30px; padding: 0;
+  border: 0; background: transparent; color: #cbd5e1; font-size: 23px; line-height: 1;
+  text-shadow: 0 1px 1px rgba(15, 23, 42, .12); }
+.difficulty-star.is-full { color: #f5a623; }
+.difficulty-star.is-half { color: transparent;
+  background: linear-gradient(90deg, #f5a623 50%, #cbd5e1 50%);
+  background-clip: text; -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.difficulty-star:focus-visible, .difficulty-reset:focus-visible {
+  outline: 2px solid #1456f0; outline-offset: 1px; border-radius: 3px; }
+.difficulty-rating-label { display: block; color: #64748b; font-size: 11px; min-height: 16px; }
+.difficulty-reset { padding: 2px 6px; border: 1px solid #d0d5dd; border-radius: 4px;
+  background: #fff; color: #475467; font-size: 11px; }
+.difficulty-save-status { display: block; min-height: 15px; color: #64748b; font-size: 10px; }
+.difficulty-save-status.is-error { color: #c93338; }
+
 /* 「帮助」→ 关于：版本与文档入口 */
 dialog.modal.about-modal { width: min(460px, 92vw); }
 .session-idle-dialog { width: min(440px, 92vw); }
@@ -449,6 +467,26 @@ details summary { cursor: pointer; color: #1456f0; }
 .report-body table.report-question-table.report-question-table-compact td:nth-child(1) { width: 20%; }
 .report-body table.report-question-table.report-question-table-compact th:nth-child(2),
 .report-body table.report-question-table.report-question-table-compact td:nth-child(2) { width: 80%; }
+.report-body table.report-question-table-difficulty th:nth-child(1),
+.report-body table.report-question-table-difficulty td:nth-child(1) { width: 10%; }
+.report-body table.report-question-table-difficulty th:nth-child(2),
+.report-body table.report-question-table-difficulty td:nth-child(2) { width: 10%; }
+.report-body table.report-question-table-difficulty th:nth-child(3),
+.report-body table.report-question-table-difficulty td:nth-child(3) { width: 10%; }
+.report-body table.report-question-table-difficulty th:nth-child(4),
+.report-body table.report-question-table-difficulty td:nth-child(4) { width: 70%; overflow-wrap: anywhere; }
+.report-body table.report-question-table.report-kg-question-table.report-question-table-difficulty th:nth-child(1),
+.report-body table.report-question-table.report-kg-question-table.report-question-table-difficulty td:nth-child(1) { width: 8%; }
+.report-body table.report-question-table.report-kg-question-table.report-question-table-difficulty th:nth-child(2),
+.report-body table.report-question-table.report-kg-question-table.report-question-table-difficulty td:nth-child(2) { width: 8%; }
+.report-body table.report-question-table.report-kg-question-table.report-question-table-difficulty th:nth-child(3),
+.report-body table.report-question-table.report-kg-question-table.report-question-table-difficulty td:nth-child(3) { width: 8%; }
+.report-body table.report-question-table.report-kg-question-table.report-question-table-difficulty th:nth-child(4),
+.report-body table.report-question-table.report-kg-question-table.report-question-table-difficulty td:nth-child(4) { width: 27%; }
+.report-body table.report-question-table.report-kg-question-table.report-question-table-difficulty th:nth-child(5),
+.report-body table.report-question-table.report-kg-question-table.report-question-table-difficulty td:nth-child(5) { width: 20%; }
+.report-body table.report-question-table.report-kg-question-table.report-question-table-difficulty th:nth-child(6),
+.report-body table.report-question-table.report-kg-question-table.report-question-table-difficulty td:nth-child(6) { width: 29%; }
 .report-body table.report-question-table.report-kg-question-table th:nth-child(1),
 .report-body table.report-question-table.report-kg-question-table td:nth-child(1) { width: 12%; }
 .report-body table.report-question-table.report-kg-question-table th:nth-child(2),

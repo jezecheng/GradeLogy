@@ -77,6 +77,26 @@ def lecture_tags_by_key(db, lecture_id):
     return out
 
 
+def question_difficulty_map(db, lecture_id):
+    """Return effective per-question ratings indexed by scope key and question number."""
+    rows = db.execute(
+        "SELECT question_key,question_no,difficulty,manual_difficulty "
+        "FROM question_assessments WHERE lecture_id=?", (lecture_id,)).fetchall()
+    by_key, by_no = {}, {}
+    for row in rows:
+        manual = row["manual_difficulty"]
+        ai = row["difficulty"]
+        item = {"rating": manual if manual is not None else ai,
+                "ai": ai, "manual": manual}
+        key = str(row["question_key"] or "").strip()
+        no = str(row["question_no"] or "").strip()
+        if key:
+            by_key[key] = item
+        if no:
+            by_no[no] = item
+    return {"by_key": by_key, "by_no": by_no}
+
+
 def lecture_stats(db, lecture_id):
     """把本讲标签与全班逐题判定聚合，返回按问题严重程度排序的标签列表。"""
     tag_rows = db.execute(
@@ -168,6 +188,10 @@ def lecture_question_stats(db, lecture_id):
             (item["wrong"] + item["partial"]) * 100 / item["total"], 1)
         out.append(item)
     out.sort(key=lambda x: (-x["error_rate"], _no_key(x["no"])))
+    difficulty_by_no = question_difficulty_map(db, lecture_id)["by_no"]
+    for item in out:
+        assessment = difficulty_by_no.get(item["no"])
+        item["difficulty"] = assessment["rating"] if assessment else None
     return out
 
 
@@ -181,6 +205,18 @@ def student_mastery_stats(db, course_id, student_id):
         return []
     titles = {r["id"]: r["title"] for r in db.execute(
         "SELECT id,title FROM lectures WHERE course_id=?", (course_id,)).fetchall()}
+    assessment_rows = db.execute(
+        "SELECT a.lecture_id,a.question_no,a.difficulty,a.manual_difficulty "
+        "FROM question_assessments a JOIN lectures l ON l.id=a.lecture_id "
+        "WHERE l.course_id=?", (course_id,)).fetchall()
+    difficulty_by_lecture = {}
+    for assessment in assessment_rows:
+        rating = (assessment["manual_difficulty"]
+                  if assessment["manual_difficulty"] is not None
+                  else assessment["difficulty"])
+        if rating is not None:
+            difficulty_by_lecture.setdefault(assessment["lecture_id"], {})[
+                str(assessment["question_no"] or "").strip()] = float(rating)
     by_lecture = {}
     for row in tag_rows:
         by_lecture.setdefault(row["lecture_id"], []).append(row)
@@ -203,7 +239,8 @@ def student_mastery_stats(db, course_id, student_id):
             item = stats.setdefault(tag, {
                 "tag": tag, "n_total": 0, "n_right": 0, "n_partial": 0,
                 "n_wrong": 0, "n_unknown": 0, "lecture_ids": set(),
-                "lecture_breakdown": {}, "episodes": [], "comments": []})
+                "lecture_breakdown": {}, "difficulty_sum": 0.0,
+                "difficulty_count": 0, "episodes": [], "comments": []})
             item["n_total"] += 1
             field = _VERDICT_FIELD.get(verdict)
             if field:
@@ -211,8 +248,15 @@ def student_mastery_stats(db, course_id, student_id):
             item["lecture_ids"].add(lid)
             by_lecture = item["lecture_breakdown"].setdefault(lid, {
                 "lecture": titles.get(lid, ""), "total": 0,
-                "right": 0, "partial": 0, "wrong": 0, "unknown": 0})
+                "right": 0, "partial": 0, "wrong": 0, "unknown": 0,
+                "difficulty_sum": 0.0, "difficulty_count": 0})
             by_lecture["total"] += 1
+            difficulty = difficulty_by_lecture.get(lid, {}).get(no)
+            if difficulty is not None:
+                item["difficulty_sum"] += difficulty
+                item["difficulty_count"] += 1
+                by_lecture["difficulty_sum"] += difficulty
+                by_lecture["difficulty_count"] += 1
             if field:
                 by_lecture[field[2:]] += 1
             comment = str(q["ai_comment"] or "").strip()
@@ -236,11 +280,21 @@ def student_mastery_stats(db, course_id, student_id):
         item["n_lectures"] = len(lecture_ids)
         breakdown = item.pop("lecture_breakdown")
         item["lecture_results"] = []
-        for lecture_id in sorted(lecture_ids):
+        for lecture_id in sorted(lecture_ids, key=lambda lid: (titles.get(lid, "").casefold(), lid)):
             result = breakdown[lecture_id]
             result["error_rate"] = round(
                 (result["wrong"] + result["partial"]) * 100 / max(result["total"], 1), 1)
+            result["avg_difficulty"] = (
+                round(result["difficulty_sum"] / result["difficulty_count"], 2)
+                if result["difficulty_count"] else None)
+            result.pop("difficulty_sum")
+            result.pop("difficulty_count")
             item["lecture_results"].append(result)
+        item["avg_difficulty"] = (
+            round(item["difficulty_sum"] / item["difficulty_count"], 2)
+            if item["difficulty_count"] else None)
+        item.pop("difficulty_sum")
+        item.pop("difficulty_count")
         item["mastery"] = round(
             (item["n_right"] + item["n_partial"] * 0.5) * 100
             / max(item["n_total"], 1), 1)
@@ -259,7 +313,7 @@ def student_stats(db, course_id, student_id):
 
 
 def student_trend(db, course_id, student_id):
-    """按讲次给出该生的判定趋势，供纵向提示词比较近期与早期表现。"""
+    """按讲次给出独立作业表现汇总；各讲不视作时间或难度顺序。"""
     rows = db.execute(
         "SELECT l.id,l.title,COUNT(q.id) AS total,"
         "SUM(CASE WHEN TRIM(q.verdict)='对' THEN 1 ELSE 0 END) AS right_n,"
@@ -269,14 +323,27 @@ def student_trend(db, course_id, student_id):
         "FROM questions q JOIN submissions s ON s.id=q.submission_id "
         "JOIN lectures l ON l.id=s.lecture_id "
         "WHERE s.student_id=? AND l.course_id=? AND TRIM(q.verdict)<>'' "
-        "GROUP BY l.id ORDER BY l.id", (student_id, course_id)).fetchall()
+        "GROUP BY l.id ORDER BY l.title COLLATE NOCASE,l.id", (student_id, course_id)).fetchall()
+    difficulty_rows = db.execute(
+        "SELECT l.id AS lecture_id,COALESCE(a.manual_difficulty,a.difficulty) AS difficulty "
+        "FROM question_assessments a JOIN lectures l ON l.id=a.lecture_id "
+        "WHERE l.course_id=? AND COALESCE(a.manual_difficulty,a.difficulty) IS NOT NULL "
+        "AND EXISTS (SELECT 1 FROM questions q JOIN submissions s ON s.id=q.submission_id "
+        "WHERE s.student_id=? AND s.lecture_id=l.id AND q.no=a.question_no "
+        "AND TRIM(q.verdict)<>'')", (course_id, student_id)).fetchall()
+    difficulty_by_lecture = {}
+    for item in difficulty_rows:
+        difficulty_by_lecture.setdefault(item["lecture_id"], []).append(float(item["difficulty"]))
     return [{
         "lecture": row["title"], "total": row["total"],
         "right": row["right_n"], "partial": row["partial_n"],
         "wrong": row["wrong_n"], "unknown": row["unknown_n"],
         "correct_rate": round(row["right_n"] * 100 / max(row["total"], 1), 1),
+        "avg_difficulty": (round(sum(difficulty_by_lecture.get(row["id"], [])) /
+                                   len(difficulty_by_lecture[row["id"]]), 2)
+                           if difficulty_by_lecture.get(row["id"]) else None),
         "error_rate": round((row["wrong_n"] + row["partial_n"]) * 100
-                            / max(row["total"], 1), 1),
+                             / max(row["total"], 1), 1),
     } for row in rows]
 
 
@@ -320,7 +387,7 @@ def latest_analysis(db, kind, lecture_id=0, student_id=0, course_id=0):
 
 
 def render_horizontal_md(result, stats=None):
-    """把横向诊断结果渲染成 Markdown（stats 参数保留用于兼容旧调用）。"""
+    """把横向诊断和题目难度证据渲染成 Markdown。"""
     lines = ["## 整体掌握情况",
              str(result.get("overall_summary") or "—").strip(), "",
              "## 高风险知识点"]
@@ -334,6 +401,19 @@ def render_horizontal_md(result, stats=None):
         pitfall = str(topic.get("common_pitfall") or "").strip()
         if pitfall:
             lines.append(f"  - 共性失分点：{pitfall}")
+        difficulty_note = str(topic.get("difficulty_observation") or "").strip()
+        if difficulty_note:
+            lines.append(f"  - 难度表现：{difficulty_note}")
+    rated = [row for row in (stats or []) if row.get("difficulty") is not None]
+    if rated:
+        lines += ["", "## 题目难度与全班表现",
+                  "| 题号 | 难度 | 对 | 半对 | 错 | 错/半对比例 |",
+                  "|---|---:|---:|---:|---:|---:|"]
+        for row in rated:
+            lines.append(
+                f"| {row.get('no') or '—'} | {row['difficulty']:g} 星 "
+                f"| {row.get('right', 0)} | {row.get('partial', 0)} "
+                f"| {row.get('wrong', 0)} | {row.get('error_rate', 0)}% |")
     suggestions = result.get("teaching_suggestions") or []
     if suggestions:
         lines += ["", "## 讲评课建议"]
@@ -354,19 +434,23 @@ def render_vertical_md(result, stats=None):
                       if isinstance(p, dict)]
 
     lines = ["## 学情画像", profile or "本次分析基于当前课程已批阅且已关联知识点标签的作业记录。"]
-    lines += ["", "## 各讲次表现趋势", "| 讲次 | 已判定题数 | 对 | 半对 | 错 | 无法判定 | 错/半对比例 |",
-              "|---|---:|---:|---:|---:|---:|---:|"]
+    lines += ["", "## 各讲次作业概览（独立样本，不代表时间趋势）",
+              "| 讲次 | 已判定题数 | 平均难度 | 对 | 半对 | 错 | 无法判定 | 错/半对比例 |",
+              "|---|---:|---:|---:|---:|---:|---:|---:|"]
     if trend:
         for row in trend:
             total = int(row.get("total") or 0)
             error_rate = round((int(row.get("wrong") or 0) + int(row.get("partial") or 0))
                                * 100 / max(total, 1), 1)
+            difficulty = (f"{row['avg_difficulty']:g} 星"
+                          if row.get("avg_difficulty") is not None else "—")
             lines.append(
-                f"| {row.get('lecture') or '未命名讲次'} | {total} | {row.get('right', 0)} "
+                f"| {row.get('lecture') or '未命名讲次'} | {total} | {difficulty} "
+                f"| {row.get('right', 0)} "
                 f"| {row.get('partial', 0)} | {row.get('wrong', 0)} | {row.get('unknown', 0)} "
                 f"| {error_rate}% |")
     else:
-        lines.append("| 暂无可比较的讲次数据 | — | — | — | — | — | — |")
+        lines.append("| 暂无已批阅讲次数据 | — | — | — | — | — | — | — |")
 
     lines += ["", "## 值得深挖的跨讲次学习特征"]
     if patterns:
@@ -385,8 +469,8 @@ def render_vertical_md(result, stats=None):
     else:
         lines.append("本次数据暂未支持明确的跨讲次学习特征判断；建议结合后续作业继续观察。")
 
-    lines += ["", "## 知识点掌握与重复失分", "| 知识点 | 掌握度* | 错 | 半对 | 涉及讲次 | 讲次证据 |",
-              "|---|---:|---:|---:|---:|---|"]
+    lines += ["", "## 知识点掌握与重复失分", "| 知识点 | 掌握度* | 平均难度 | 错 | 半对 | 涉及讲次 | 讲次证据 |",
+              "|---|---:|---:|---:|---:|---:|---|"]
     weak_rows = [row for row in mastery if row.get("n_wrong") or row.get("n_partial")]
     weak_rows = sorted(weak_rows, key=lambda row: (-int(row.get("n_wrong") or 0),
                                                     -int(row.get("n_partial") or 0),
@@ -394,15 +478,24 @@ def render_vertical_md(result, stats=None):
     if weak_rows:
         for row in weak_rows[:12]:
             evidence = row.get("lecture_results") or []
-            evidence_text = "；".join(
-                f"{item.get('lecture') or '讲次'}：错{item.get('wrong', 0)}/半对{item.get('partial', 0)}"
-                for item in evidence if item.get("wrong") or item.get("partial"))
+            lecture_evidence = []
+            for item in evidence:
+                if not (item.get("wrong") or item.get("partial")):
+                    continue
+                difficulty = (f"{item['avg_difficulty']:g}星"
+                              if item.get("avg_difficulty") is not None else "难度未评估")
+                lecture_evidence.append(
+                    f"{item.get('lecture') or '讲次'}：{difficulty}，"
+                    f"错{item.get('wrong', 0)}/半对{item.get('partial', 0)}")
+            evidence_text = "；".join(lecture_evidence)
+            avg_difficulty = (f"{row['avg_difficulty']:g} 星"
+                              if row.get("avg_difficulty") is not None else "—")
             lines.append(
-                f"| {row.get('tag') or '未命名'} | {row.get('mastery', 0)}% "
+                f"| {row.get('tag') or '未命名'} | {row.get('mastery', 0)}% | {avg_difficulty} "
                 f"| {row.get('n_wrong', 0)} | {row.get('n_partial', 0)} "
                 f"| {row.get('n_lectures', 0)} | {evidence_text or '—'} |")
     else:
-        lines.append("| 暂未发现明确薄弱知识点 | — | 0 | 0 | 0 | — |")
+        lines.append("| 暂未发现明确薄弱知识点 | — | — | 0 | 0 | 0 | — |")
     lines.append("\n*掌握度按正确题数 + 半对题数的 0.5 权重计算；无法判定题计入题数，不计入掌握得分。")
 
     lines += ["", "## 知识图谱关联与根因诊断"]
@@ -426,7 +519,7 @@ def render_vertical_md(result, stats=None):
         lines.append("暂未发现明确的知识断层；当前图谱/作业数据未形成可核验的前置关系，暂不作因果推断。")
 
     highlights = result.get("progress_highlights") or []
-    lines += ["", "## 进步与亮点"]
+    lines += ["", "## 稳定优势与掌握较好的知识点"]
     lines += [f"- {str(item).strip()}" for item in highlights] or ["- 暂未发现明显进步点。"]
 
     habits = result.get("habit_alerts") or []

@@ -53,7 +53,8 @@ class LecturePreparationTest(unittest.TestCase):
         con = self._db()
         for table in ("ai_usage_events", "ai_operations", "student_question_reviews",
                       "questions", "submissions", "student_weak_points", "tag_analyses",
-                      "question_tags", "lectures", "course_teachers", "courses", "users"):
+                      "question_assessments", "question_tags", "lectures",
+                      "course_teachers", "courses", "users"):
             con.execute(f"DELETE FROM {table}")
         con.execute(
             "INSERT INTO users(id,username,password_hash,display_name,role,active,"
@@ -420,6 +421,28 @@ class LecturePreparationTest(unittest.TestCase):
         # 勾选框通过 form 属性关联，避免在表格里嵌套表单
         self.assertIn('form="scope-form"', page)
         self.assertIn("编辑标签", page)
+        self.assertIn("<th>难度</th>", page)
+        self.assertIn("data-difficulty-widget", page)
+
+    def test_manual_difficulty_can_override_ai_score_and_restore_it(self):
+        con = self._db()
+        con.execute(
+            "INSERT INTO question_assessments(lecture_id,question_key,question_no,difficulty) "
+            "VALUES(20,'q0','3',4.0)")
+        con.commit()
+        con.close()
+
+        response = self._post("lecture_difficulty_save", {
+            "question_key": "q0", "difficulty": "2.5"}, hid=20)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {"ok": True, "rating": 2.5, "manual": True})
+        restored = self._post("lecture_difficulty_save", {
+            "question_key": "q0", "difficulty": ""}, hid=20)
+        self.assertEqual(restored.status_code, 200)
+        self.assertEqual(restored.get_json(), {"ok": True, "rating": 4.0, "manual": False})
+        invalid = self._post("lecture_difficulty_save", {
+            "question_key": "q0", "difficulty": "3.2"}, hid=20)
+        self.assertEqual(invalid.status_code, 400)
 
     def test_manual_tag_save_replaces_and_clears(self):
         response = self._post("lecture_tag_save",
@@ -454,9 +477,15 @@ class LecturePreparationTest(unittest.TestCase):
 
     def test_ai_regenerate_skips_duplicate_of_manual_tag(self):
         self._post("lecture_tag_save", {"question_key": "q0", "tags": "氧化还原反应"}, hid=20)
+        con = self._db()
+        con.execute(
+            "INSERT INTO question_assessments(lecture_id,question_key,question_no,difficulty,manual_difficulty) "
+            "VALUES(20,'q0','3',3.0,2.5)")
+        con.commit()
+        con.close()
         queue = DeferredQueue()
         rows = [{"key": "q0", "no": "3", "category": "化学",
-                 "tags": ["氧化还原反应", "离子方程式"]}]
+                 "tags": ["氧化还原反应", "离子方程式"], "difficulty": 4.5}]
         with mock.patch.object(app_module, "_ai_task_queue", queue), \
                 mock.patch.object(app_module, "_ai_endpoint",
                                   return_value=("http://api", "key", "model", "")), \
@@ -467,9 +496,13 @@ class LecturePreparationTest(unittest.TestCase):
         con = self._db()
         got = con.execute(
             "SELECT tag,source FROM question_tags WHERE lecture_id=20 ORDER BY tag").fetchall()
-        con.close()
         self.assertEqual(sorted((r["tag"], r["source"]) for r in got),
                          sorted([("离子方程式", "ai"), ("氧化还原反应", "manual")]))
+        assessment = con.execute(
+            "SELECT difficulty,manual_difficulty FROM question_assessments "
+            "WHERE lecture_id=20 AND question_key='q0'").fetchone()
+        self.assertEqual(tuple(assessment), (4.5, 2.5))
+        con.close()
 
 
 if __name__ == "__main__":

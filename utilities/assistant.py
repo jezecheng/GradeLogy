@@ -5,7 +5,7 @@
 - mcp_server.py：对外的 MCP（stdio）服务，给外部 AI 客户端调用
 - Flask /assistant/chat：页面右下角折叠面板，由后端跑工具调用循环
 
-所有工具都按 teacher_id 做归属过滤，只返回该老师参与的课程。
+所有工具按当前临时教师全局访问模式或课程成员关系过滤课程。
 """
 import json
 import os
@@ -109,17 +109,25 @@ def _cut(text, n):
     return text if len(text) <= n else text[:n] + "…"
 
 
+def _course_scope_join(teacher_id, alias="c"):
+    """Temporary global mode lets every teacher query any course in read-only tools."""
+    if config.get("TEMPORARY_GLOBAL_TEACHER_ACCESS", True):
+        return "", ()
+    return (f"JOIN course_teachers ct ON ct.course_id={alias}.id AND ct.teacher_id=?",
+            (teacher_id,))
+
+
 def _course(db, teacher_id, key):
-    """按 ID 或名称定位老师参与的课程。"""
-    sql = ("SELECT c.* FROM courses c JOIN course_teachers ct "
-           "ON ct.course_id=c.id AND ct.teacher_id=? WHERE ")
+    """按 ID 或名称定位当前权限范围内的课程。"""
+    join, scope_params = _course_scope_join(teacher_id)
+    sql = f"SELECT c.* FROM courses c {join} WHERE "
     key = str(key or "").strip()
     if key.isdigit():
-        row = db.execute(sql + "c.id=?", (teacher_id, int(key))).fetchone()
+        row = db.execute(sql + "c.id=?", (*scope_params, int(key))).fetchone()
         if row:
             return dict(row)
     row = db.execute(sql + "c.name LIKE ? ORDER BY c.id DESC LIMIT 1",
-                     (teacher_id, f"%{key}%")).fetchone()
+                     (*scope_params, f"%{key}%")).fetchone()
     return dict(row) if row else None
 
 
@@ -212,14 +220,14 @@ def ask_help(question, role="teacher"):
 def list_courses(teacher_id):
     db = _db()
     try:
-        rows = _rows(db.execute("""
+        join, scope_params = _course_scope_join(teacher_id)
+        rows = _rows(db.execute(f"""
             SELECT c.id, c.name, c.description,
               (SELECT COUNT(*) FROM enrollments e WHERE e.course_id=c.id) AS students,
               (SELECT COUNT(*) FROM lectures h WHERE h.course_id=c.id) AS lectures,
               (SELECT COUNT(*) FROM exams x WHERE x.course_id=c.id) AS exams,
               (SELECT COUNT(*) FROM course_teachers t WHERE t.course_id=c.id) AS teachers
-            FROM courses c JOIN course_teachers ct ON ct.course_id=c.id AND ct.teacher_id=?
-            ORDER BY c.id DESC""", (teacher_id,)))
+            FROM courses c {join} ORDER BY c.id DESC""", scope_params))
         return {"courses": rows}
     finally:
         db.close()
@@ -303,17 +311,18 @@ def lecture_status(teacher_id, course, lecture):
 def find_student(teacher_id, name):
     db = _db()
     try:
-        rows = _rows(db.execute("""
+        join, scope_params = _course_scope_join(teacher_id)
+        rows = _rows(db.execute(f"""
             SELECT DISTINCT u.id, u.username, u.display_name,
                    c.id AS course_id, c.name AS course_name,
                    (SELECT COUNT(*) FROM submissions s WHERE s.student_id=u.id) AS submissions
             FROM users u
             JOIN enrollments e ON e.student_id=u.id
             JOIN courses c ON c.id=e.course_id
-            JOIN course_teachers ct ON ct.course_id=c.id AND ct.teacher_id=?
+            {join}
             WHERE u.role='student' AND (u.display_name LIKE ? OR u.username LIKE ?)
             ORDER BY u.display_name""",
-            (teacher_id, f"%{name}%", f"%{name}%")))
+            (*scope_params, f"%{name}%", f"%{name}%")))
         return {"students": [dict(r) for r in rows]}
     finally:
         db.close()
@@ -535,10 +544,10 @@ def pending_work(teacher_id, course=None, lecture=None, limit=50):
                 return {"error": f"没有找到课程「{course}」，可先用 list_courses 查看"}
             targets = [dict(c)]
         else:
-            targets = _rows(db.execute("""
+            join, scope_params = _course_scope_join(teacher_id)
+            targets = _rows(db.execute(f"""
                 SELECT c.id, c.name FROM courses c
-                JOIN course_teachers ct ON ct.course_id=c.id AND ct.teacher_id=?
-                ORDER BY c.id DESC""", (teacher_id,)))
+                {join} ORDER BY c.id DESC""", scope_params))
 
         buckets = {"not_submitted": [], "not_graded": [], "pending_review": []}
         counts = {"not_submitted": 0, "not_graded": 0, "pending_review": 0}
@@ -678,32 +687,33 @@ def search_reports(teacher_id, keyword, course=None, limit=20):
                 return {"error": f"没有找到课程「{course}」，可先用 list_courses 查看"}
             course_id = c["id"]
 
-        sql = """
+        join, scope_params = _course_scope_join(teacher_id)
+        sql = f"""
             SELECT s.id AS submission_id, c.name AS course, h.title AS lecture,
                    u.display_name AS student, s.report_md, s.feedback
             FROM submissions s
             JOIN lectures h ON h.id=s.lecture_id
             JOIN courses c ON c.id=h.course_id
-            JOIN course_teachers ct ON ct.course_id=c.id AND ct.teacher_id=?
+            {join}
             JOIN users u ON u.id=s.student_id
             WHERE (s.report_md LIKE ? OR s.feedback LIKE ?)"""
-        params = [teacher_id, like, like]
+        params = [*scope_params, like, like]
         if course_id:
             sql += " AND c.id=?"
             params.append(course_id)
         rows = _rows(db.execute(sql + " ORDER BY s.id DESC LIMIT ?", params + [limit]))
 
-        sql = """
+        sql = f"""
             SELECT s.id AS submission_id, c.name AS course, h.title AS lecture,
                    u.display_name AS student, q.no AS question_no, q.ai_comment
             FROM questions q
             JOIN submissions s ON s.id=q.submission_id
             JOIN lectures h ON h.id=s.lecture_id
             JOIN courses c ON c.id=h.course_id
-            JOIN course_teachers ct ON ct.course_id=c.id AND ct.teacher_id=?
+            {join}
             JOIN users u ON u.id=s.student_id
             WHERE q.ai_comment LIKE ?"""
-        params = [teacher_id, like]
+        params = [*scope_params, like]
         if course_id:
             sql += " AND c.id=?"
             params.append(course_id)

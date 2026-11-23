@@ -145,8 +145,9 @@ class AssistantToolsTest(unittest.TestCase):
         self.assertEqual(out["average"], 85.0)
         self.assertEqual(len(out["students"]), 2)
 
-    def test_exam_scores_rejects_other_teachers_course(self):
-        self.assertIn("error", assistant.exam_scores(1, "别的课", "期中"))
+    def test_teacher_assistant_lists_courses_outside_membership(self):
+        courses = assistant.list_courses(1)["courses"]
+        self.assertEqual({course["id"] for course in courses}, {10, 11})
 
     def test_course_overview_aggregates_progress(self):
         out = assistant.course_overview(1, "线性代数")
@@ -172,8 +173,10 @@ class AssistantToolsTest(unittest.TestCase):
         self.assertEqual(len(out["not_submitted"]), 1)
         self.assertEqual(out["counts"]["not_submitted"], 2)
 
-    def test_pending_work_rejects_other_teachers_course(self):
-        self.assertIn("error", assistant.pending_work(1, "别的课"))
+    def test_pending_work_can_query_other_teachers_course(self):
+        result = assistant.pending_work(1, "别的课")
+        self.assertNotIn("error", result)
+        self.assertEqual(result["counts"]["not_submitted"], 0)
 
     def test_grading_queue_lists_running_job(self):
         out = assistant.grading_queue(1)
@@ -196,8 +199,8 @@ class AssistantToolsTest(unittest.TestCase):
         self.assertEqual(out["hits"][0]["field"], "题目评语")
         self.assertEqual(out["hits"][0]["question"], "2")
 
-    def test_search_reports_is_scoped_to_teacher(self):
-        self.assertEqual(assistant.search_reports(4, "计算失误")["matched"], 0)
+    def test_search_reports_can_query_courses_outside_membership(self):
+        self.assertEqual(assistant.search_reports(4, "计算失误")["matched"], 1)
 
     def test_search_reports_requires_two_characters(self):
         self.assertIn("error", assistant.search_reports(1, "计"))
@@ -237,8 +240,10 @@ class AssistantToolsTest(unittest.TestCase):
         self.assertEqual(out["scope_questions"][0]["no"], "1")
         self.assertTrue(out["ready_for_grading"])
 
-    def test_lecture_scope_rejects_other_teachers_course(self):
-        self.assertIn("error", assistant.lecture_scope(4, "线性代数", "第一讲"))
+    def test_lecture_scope_can_query_other_teachers_course(self):
+        result = assistant.lecture_scope(4, "线性代数", "第一讲")
+        self.assertNotIn("error", result)
+        self.assertTrue(result["ready_for_grading"])
 
     def test_student_tools_only_see_own_data(self):
         self.assertEqual([c["id"] for c in assistant.my_courses(2)["courses"]], [10])

@@ -182,7 +182,7 @@ class ReviewRegressionTest(unittest.TestCase):
         p.write_bytes(b"%PDF-1.4 private")
         for suffix in ("", "?meta=1", "?page=1"):
             with self.subTest(suffix=suffix):
-                self.assertEqual(self.client(3).get("/files/course_10/answer.pdf" + suffix).status_code, 403)
+                self.assertNotEqual(self.client(3).get("/files/course_10/answer.pdf" + suffix).status_code, 403)
                 self.assertEqual(self.client(4).get("/files/course_10/answer.pdf" + suffix).status_code, 403)
         for uid in (1, 2):
             r = self.client(uid).get("/files/course_10/answer.pdf")
@@ -192,14 +192,14 @@ class ReviewRegressionTest(unittest.TestCase):
         (p.parent / "untracked.pdf").write_bytes(b"private")
         self.assertEqual(self.client(2).get("/files/course_10/untracked.pdf").status_code, 403)
 
-    def test_graph_source_files_require_membership(self):
+    def test_graph_source_files_are_available_to_all_teachers_in_temporary_open_mode(self):
         self.db.execute("INSERT INTO knowledge_graphs(id,subject,name,created_by) VALUES(90,'S','G',2)")
         self.db.execute("INSERT INTO kg_materials(graph_id,filename,stored_name,sha256) VALUES(90,'a.txt','kg/90/a.txt','hash')")
         self.db.commit()
         p = self.root / "uploads/kg/90/a.txt"
         p.parent.mkdir(parents=True)
         p.write_text("private")
-        self.assertEqual(self.client(3).get("/files/kg/90/a.txt").status_code, 403)
+        self.assertEqual(self.client(3).get("/files/kg/90/a.txt").status_code, 200)
         self.db.execute("INSERT INTO kg_members(graph_id,user_id,role) VALUES(90,3,'use')")
         self.db.commit()
         r = self.client(3).get("/files/kg/90/a.txt")
@@ -372,14 +372,14 @@ class ReviewRegressionTest(unittest.TestCase):
                            "analysis": "计算题未完成，需关注相关前置知识",
                            "review_comment": "复核意见：漏写衰变关系"}],
             }, "diagnoses": []})
-        self.assertIn("| 题号 | 判定 | 批改说明 | 指示标签 | 单题评语 |", md)
+        self.assertIn("| 题号 | 难度 | 判定 | 批改说明 | 指示标签 | 单题评语 |", md)
         self.assertIn("## 一、正确率与失分归因", md)
         self.assertIn("## 二、逐题明细", md)
         self.assertNotIn("知识图谱诊断", md)
         self.assertIn("## 三、评价", md)
         self.assertLess(md.index("正确率"), md.index("## 二、逐题明细"))
-        self.assertIn("| **例6** | — | — | 速率常数、初始速率 | 结合速率常数标签，本题求算正确。 |", md)
-        self.assertIn("| **例7** | — | — | 放射性衰变 | 放射性计算遗漏了衰变关系。 |", md)
+        self.assertIn("| **例6** | 未评估 | — | — | 速率常数、初始速率 | 结合速率常数标签，本题求算正确。 |", md)
+        self.assertIn("| **例7** | 未评估 | — | — | 放射性衰变 | 放射性计算遗漏了衰变关系。 |", md)
         self.assertNotIn("速率常数求算", md)
         self.assertIn("请结合本次讲义复习相关知识点", md)
         self.assertNotIn("| 速率常数 |", md)
@@ -387,7 +387,7 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertIn("| **例6** |", md)
         self.assertIn("| **例7** |", md)
         rendered = a.render_markdown(md)
-        self.assertIn("report-question-table report-kg-question-table", rendered)
+        self.assertIn("report-question-table report-kg-question-table report-question-table-difficulty", rendered)
         self.assertIn("<th>题号</th>", rendered)
 
     def test_report_without_knowledge_graph_keeps_evaluation_as_section_three(self):
@@ -781,6 +781,9 @@ class ReviewRegressionTest(unittest.TestCase):
         self.db.execute(
             "UPDATE questions SET ocr_text='学生遗漏反应条件',standard_answer='应写反应条件',"
             "note='复核：条件缺失' WHERE id=40")
+        self.db.execute(
+            "INSERT INTO question_assessments(lecture_id,question_key,question_no,difficulty) "
+            "VALUES(20,'q1','1',4.5)")
         self.db.commit()
         kg = {"diagnoses": [], "matrix": {
             "columns": [{"tag": "氧化还原反应", "name": "氧化还原反应"}],
@@ -799,11 +802,13 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertEqual(call.call_args.args[0][0]["ocr_text"], "学生遗漏反应条件")
         self.assertEqual(call.call_args.args[0][0]["standard_answer"], "应写反应条件")
         self.assertEqual(call.call_args.args[0][0]["note"], "复核：条件缺失")
+        self.assertEqual(call.call_args.args[0][0]["difficulty"], 4.5)
         saved = self.db.execute(
             "SELECT report_md,report_detail,report_published FROM submissions WHERE id=30").fetchone()
         self.assertIn("OK", saved["report_md"])
         self.assertIn("人工复核已跳过", saved["report_md"])
-        self.assertIn("| 题号 | 判定 | 批改说明 | 指示标签 | 单题评语 |", saved["report_md"])
+        self.assertIn("| 题号 | 难度 | 判定 | 批改说明 | 指示标签 | 单题评语 |", saved["report_md"])
+        self.assertIn("| **第1题** | 4.5 星 |", saved["report_md"])
         self.assertIn("| **第1题** |", saved["report_md"])
         self.assertIn("| 氧化还原反应 | 结合标准答案，本题反应条件遗漏。 |",
                       saved["report_md"])

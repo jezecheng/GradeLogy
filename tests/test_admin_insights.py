@@ -569,7 +569,9 @@ class CourseExportTest(unittest.TestCase):
 
     def test_permissions(self):
         url = f"/course/{self.signed(30)}/export"
-        self.assertEqual(self.login(3).post(url, data={"_csrf": "test-token"}).status_code, 403)
+        teacher_export = self.login(3).post(url, data={"_csrf": "test-token"})
+        self.assertEqual(teacher_export.status_code, 200)
+        teacher_export.close()
         self.assertEqual(self.login(4).post(url, data={"_csrf": "test-token"}).status_code, 403)
         # 匿名请求没有会话，会被全局 CSRF 校验先拦下
         self.assertEqual(app_module.app.test_client().post(
@@ -582,7 +584,7 @@ class CourseExportTest(unittest.TestCase):
         base = f"/course/{self.signed(30)}/export/"
         self.assertEqual(self.login(2).get(base + foreign).status_code, 404)
         self.assertEqual(self.login(2).get(base + "%2E%2E%2Fdata.sqlite").status_code, 404)
-        self.assertEqual(self.login(3).get(base + foreign).status_code, 403)
+        self.assertEqual(self.login(3).get(base + foreign).status_code, 404)
 
     def test_one_day_retention_and_unsafe_files(self):
         resp = self.post_export()

@@ -116,26 +116,35 @@ def can_read_file(db, user, filename):
     if user["role"] != "teacher":
         return False
     uid = user["id"]
-    scope = ("SELECT c.id FROM courses c WHERE c.teacher_id=? OR EXISTS "
-             "(SELECT 1 FROM course_teachers ct WHERE ct.course_id=c.id AND ct.teacher_id=?)")
+    if cfg.get("TEMPORARY_GLOBAL_TEACHER_ACCESS", True):
+        scope = "SELECT id FROM courses"
+        scope_params = ()
+        graph_scope = "SELECT id FROM knowledge_graphs"
+        graph_params = ()
+    else:
+        scope = ("SELECT c.id FROM courses c WHERE c.teacher_id=? OR EXISTS "
+                 "(SELECT 1 FROM course_teachers ct WHERE ct.course_id=c.id AND ct.teacher_id=?)")
+        scope_params = (uid, uid)
+        graph_scope = ("SELECT k.id FROM knowledge_graphs k WHERE k.created_by=? OR EXISTS "
+                       "(SELECT 1 FROM kg_members km WHERE km.graph_id=k.id AND km.user_id=?)")
+        graph_params = (uid, uid)
     paths = set()
     for row in db.execute(
             f"SELECT student_pdf,answer_pdf FROM lectures WHERE course_id IN ({scope})",
-            (uid, uid)):
+            scope_params):
         paths.update(p for p in row if p)
     for row in db.execute(
             f"SELECT s.file_path FROM submissions s JOIN lectures l ON l.id=s.lecture_id "
-            f"WHERE l.course_id IN ({scope})", (uid, uid)):
+            f"WHERE l.course_id IN ({scope})", scope_params):
         paths.update(file_list(row["file_path"]))
     for row in db.execute(
             f"SELECT q.image_path FROM questions q JOIN submissions s ON s.id=q.submission_id "
             f"JOIN lectures l ON l.id=s.lecture_id WHERE l.course_id IN ({scope})",
-            (uid, uid)):
+            scope_params):
         if row["image_path"]:
             paths.add(row["image_path"])
     for row in db.execute(
             "SELECT m.stored_name FROM kg_materials m JOIN knowledge_graphs k ON k.id=m.graph_id "
-            "WHERE k.created_by=? OR EXISTS (SELECT 1 FROM kg_members km "
-            "WHERE km.graph_id=k.id AND km.user_id=?)", (uid, uid)):
+            f"WHERE k.id IN ({graph_scope})", graph_params):
         paths.add(row["stored_name"])
     return wanted in {os.path.normpath(p).replace("\\", "/") for p in paths}

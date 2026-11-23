@@ -70,6 +70,10 @@ def _table_column_widths(rows):
         return [15, 12, 73]
     if headers[:2] == ["题号", "判定"] and count == 5:
         return [12, 12, 26, 22, 28]
+    if headers[:3] == ["题号", "难度", "判定"] and count == 4:
+        return [10, 10, 10, 70]
+    if headers[:3] == ["题号", "难度", "判定"] and count == 6:
+        return [8, 8, 8, 26, 20, 30]
     if headers[:2] == ["题号", "指示标签"] and count == 3:
         return [14, 31, 55]
     if headers[:2] == ["#", "判定"] and count == 3:
@@ -130,6 +134,16 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
     if unknown:
         stat.append(f"{VERDICT_ICON['无法判定']} {len(unknown)}（{_nos(unknown)}）")
     stat.append(f"未作答 {len(skipped)}")
+    rated = []
+    for question in qs:
+        try:
+            value = float(question.get("difficulty"))
+        except (TypeError, ValueError):
+            continue
+        if 1 <= value <= 5:
+            rated.append(value)
+    if rated:
+        stat.append(f"题目平均难度 {sum(rated) / len(rated):.1f} 星（已评估 {len(rated)}/{n_total} 题）")
     out += [" | ".join(stat), ""]
 
     weak = (summary or {}).get("weak_points") or []
@@ -163,7 +177,7 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
         kg_by_no[no] = (tags_text, comment)
 
     has_kg_rows = bool(kg_by_no)
-    headers = ["题号", "判定", "批改说明"]
+    headers = ["题号", "难度", "判定", "批改说明"]
     if has_kg_rows:
         headers += ["指示标签", "单题评语"]
     out += ["", f"## 二、逐题明细（{n_total} 个独立批改项）", "",
@@ -173,7 +187,7 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
     for q in qs:
         parent_no = str(q.get("parent_no") or "").strip()
         if parent_no and parent_no != last_parent:
-            parent = [_question_number_md(parent_no), "—", "母题（以下小问独立判定）"]
+            parent = [_question_number_md(parent_no), "—", "—", "母题（以下小问独立判定）"]
             if has_kg_rows:
                 parent += ["—", "—"]
             out.append("| " + " | ".join(_md_cell(value) for value in parent) + " |")
@@ -181,7 +195,12 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
         icon = VERDICT_ICON.get(q.get("verdict") or "", q.get("verdict") or "—")
         # 优先用老师复核后的评语（note），为空时回退到 AI 原始评语
         comment = (q.get("note") or "").strip() or (q.get("ai_comment") or "").strip()
-        row = [_question_number_md(q.get("no")), icon, _md_cell(comment)]
+        difficulty = q.get("difficulty")
+        try:
+            difficulty_text = f"{float(difficulty):g} 星" if difficulty is not None else "未评估"
+        except (TypeError, ValueError):
+            difficulty_text = "未评估"
+        row = [_question_number_md(q.get("no")), difficulty_text, icon, _md_cell(comment)]
         graph = kg_by_no.pop(str(q.get("no") or ""), None)
         if has_kg_rows:
             row += list(graph) if graph else ["—", "—"]
@@ -191,7 +210,7 @@ def build_report_md(student_name, lecture_title, date_label, questions, summary,
     for no, (tags_text, graph_comment) in kg_by_no.items():
         label = _question_number_md(no)
         out.append("| " + " | ".join(_md_cell(value) for value in
-                                      (label, "—", "—", tags_text, graph_comment)) + " |")
+                                      (label, "—", "—", "—", tags_text, graph_comment)) + " |")
     out += ["", "> **复习提示：** 请结合本次讲义复习相关知识点，并完成对应例题巩固。", "",
             "## 三、评价", ""]
     good = (detail or {}).get("good") or (summary or {}).get("evaluation", "")
@@ -347,14 +366,15 @@ def render_markdown(md, *, server_mathml=True):
                             row[0] = _question_number_md(row[0])
 
             table_class = "report-table"
-            if (rows and len(rows[0]) in (2, 3, 5)
-                    and rows[0][:2] == ["题号", "判定"]):
+            if (rows and rows[0][0] == "题号" and "判定" in rows[0]):
                 table_class += " report-question-table"
-                if len(rows[0]) == 5:
+                if len(rows[0]) in (5, 6):
                     table_class += " report-kg-question-table"
+                if len(rows[0]) in (4, 6):
+                    table_class += " report-question-table-difficulty"
                 elif len(rows[0]) == 2:
                     table_class += " report-question-table-compact"
-            elif rows and rows[0][:2] == ["#", "判定"]:
+            elif rows and rows[0][0] == "#" and "判定" in rows[0]:
                 table_class += " report-question-table"
                 if len(rows[0]) == 2:
                     table_class += " report-question-table-compact"

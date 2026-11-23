@@ -439,14 +439,18 @@ TAG_PROMPT = (
 
 TAG_RULES = (
     "\n请只输出 JSON，不要输出解释或代码块标记：\n"
-    '{"questions":[{"no":"题号","category":"主要考查类型","tags":["知识点1","知识点2"]}]}\n'
+    '{"questions":[{"no":"题号","category":"主要考查类型",'
+    '"difficulty":3.5,"tags":["知识点1","知识点2"]}]}\n'
     "规则：\n"
     "1. tags 用教材/考纲里的通用知识点术语（如 氧化还原反应、离子方程式、化学平衡常数），"
     "每题 1~6 个，按主要程度排序；只输出与本题直接相关、可区分的知识点。\n"
-    "2. 不要输出题号、分数、难度（如「基础题」「综合题」）这类非知识点标签。\n"
-    "3. 只输出清单里的独立批改项编号，不要补题；子题 stem 已包含母题公共条件和本小问题干，"
+    "2. difficulty 是题目本身的预估难度，不是学生作答表现：范围 1~5，步长 0.5；"
+    "1 星为直接回忆/单步基础题，3 星为常规多步应用，5 星为高阶综合/陌生迁移；"
+    "结合知识跨度、推理步骤和迁移要求判断，不因标准答案篇幅或学生答错而提高难度。\n"
+    "3. 不要把题号、分数、难度描述（如「基础题」「综合题」）当作知识点标签。\n"
+    "4. 只输出清单里的独立批改项编号，不要补题；子题 stem 已包含母题公共条件和本小问题干，"
     "每个小问单独标注，不要把同一大题的各小问合并。\n"
-    "4. 标准答案看不清时，可结合题目本身与清单里的说明推断；仍无法判断就把 tags 留空。"
+    "5. 标准答案看不清时，可结合题目本身与清单里的说明推断；仍无法判断就把 tags 留空、difficulty 留空。"
 )
 
 MAX_TAGS_PER_QUESTION = 6
@@ -465,6 +469,26 @@ def _clean_tags(raw):
             continue
         out.append(text)
     return out[:MAX_TAGS_PER_QUESTION]
+
+
+def _difficulty_score(raw):
+    """Return a valid 1..5 half-star score; absent/invalid model output stays None."""
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        value = float(raw)
+    else:
+        match = re.search(r"(?<![\d.])(\d+(?:\.\d+)?)(?![\d.])", str(raw))
+        if not match:
+            return None
+        try:
+            value = float(match.group(1))
+        except ValueError:
+            return None
+    if not 1 <= value <= 5:
+        return None
+    # Round halves upward rather than Python's ties-to-even behavior.
+    return math.floor(value * 2 + 0.5) / 2
 
 
 def _no_token(value):
@@ -548,14 +572,22 @@ def analyze_question_tags(answer_path, questions, api_url, api_key, model,
             if not no:
                 continue
             tags = _clean_tags(item.get("tags"))
-            if not tags:
+            difficulty = _difficulty_score(item.get("difficulty"))
+            if not tags and difficulty is None:
                 continue
-            by_no[_no_token(no)] = (tags, str(item.get("category", "")).strip())
+            by_no[_no_token(no)] = {
+                "tags": tags,
+                "category": str(item.get("category", "")).strip(),
+                "difficulty": difficulty,
+            }
 
     rows = []
     for q in listing:
-        tags, category = by_no.get(_no_token(q["no"]), ([], ""))
-        rows.append({"key": q["key"], "no": q["no"], "category": category, "tags": tags})
+        result = by_no.get(_no_token(q["no"]), {})
+        rows.append({"key": q["key"], "no": q["no"],
+                     "category": result.get("category", ""),
+                     "tags": result.get("tags", []),
+                     "difficulty": result.get("difficulty")})
     if not any(r["tags"] for r in rows):
         if truncated:
             return None, "AI 输出被截断，未能得到知识点标签，请减少勾选题目后重试。"
@@ -645,15 +677,18 @@ def grade_pdf_submission(student_path, answer_path, api_url, api_key, model,
 
 
 DEFAULT_REPORT_PROMPT = (
-    "你是阅卷老师。下面给出某位学生一次作业的逐题判定、失分点与总评。\n"
+    "你是阅卷老师。下面给出某位学生一次作业的逐题判定、题目难度星数、失分点与总评。\n"
     "请为学生写一段批改评语。\n"
     "要求：只依据给定的判定，不要编造学生没写的内容；语气客观、以鼓励为主；"
+    "结合题目难度解释表现，区分高难题挑战与低难度基础题失分；难度缺失时不要推断。"
     "improve 最多 3 条，按严重程度排序；没有失分点就给空数组。\n"
     "化学式、离子式、数学式请用轻量 LaTeX，用一对 $ 包裹，"
     "例如 $\\mathrm{CO_3^{2-}}$、$\\mathrm{SO_4^{2-}}$、$2e^-$；纯文字不要加 $。"
 )
 
 REPORT_OUTPUT_CONTRACT = (
+    "评语分析规则：difficulty 为题目本身难度星数（1~5 星、半星递增），不是学生表现；"
+    "结合难度评价学生作答，区分高难题挑战与基础题失分；没有难度时不得推断。\n"
     "输出格式（必须严格遵守）：只输出 JSON，不要解释或代码块标记：\n"
     '{"good":"做得好的地方（80~160 字，要具体点出哪几题做得好）",'
     '"improve":["需要改的第 1 处","第 2 处","第 3 处"],'
@@ -690,6 +725,7 @@ def ai_report_comment(questions, weak_points, evaluation, api_url, api_key, mode
         return ""
 
     brief = [{"no": _field(q, "no"), "verdict": _field(q, "verdict"),
+              "difficulty": _field(q, "difficulty"),
               "comment": (_field(q, "note") or _field(q, "ai_comment", "comment")),
               "note": _field(q, "note"),
               "student_answer": _field(q, "ocr_text", "ocr"),
@@ -746,14 +782,15 @@ def ai_report_comment(questions, weak_points, evaluation, api_url, api_key, mode
 
 LECTURE_SUMMARY_PROMPT = (
     "你是教研组组长。下面给出一次作业中全班学生的逐题判定统计，"
-    "以及每道题的代表性评语（取多份作业的 ai_comment）。\n"
+    "每题难度星数，以及每道题的代表性评语（取多份作业的 ai_comment）。\n"
     "请输出两段内容：\n"
     "1) 每题要点（每题一行短句，5~25 字）：这道题全班主要的错在哪里、或者大家普遍做得好的地方。\n"
     "2) 整体总结（3~6 句，150~300 字）：这次作业全班整体情况、最普遍的几类问题、值得肯定的地方、对下次教学的建议。\n"
     "只输出 JSON：\n"
     '{"per_question":{"题号":"要点",...},'
     '"overall":"整体总结内容"}\n'
-    "要求：只依据给定数据，不要编造；每题要点简洁，重点突出；整体总结客观、有教学参考价值。"
+    "要求：只依据给定数据，不要编造；分析错误率时结合题目难度，区分高难题挑战与基础题失分；"
+    "难度缺失时不猜测。每题要点简洁，整体总结客观、有教学参考价值。"
     "若提供了知识图谱前置依赖，整体总结中应指出全班共性失分的底层前置知识漏洞，"
     "并建议讲评课先补对应前置基础；若未提供，则仅依据题目统计总结。\n"
     "化学式、离子式、数学式请用轻量 LaTeX，用一对 $ 包裹，"
@@ -779,6 +816,7 @@ def ai_lecture_summary(qstats, api_url, api_key, model, max_tokens=32768,
             "partial": row["n_partial"],
             "wrong": row["n_wrong"],
             "unknown": row["n_unknown"],
+            "difficulty": row.get("difficulty"),
             "sample_comments": comments,
         })
     text = LECTURE_SUMMARY_PROMPT + "\n\n数据：\n" + json.dumps(payload, ensure_ascii=False)
@@ -809,7 +847,7 @@ DEFAULT_TAG_HORIZONTAL_PROMPT = (
     "- 学科与课程：{subject_and_course}\n"
     "- 作业/讲次名称：{lecture_name}\n"
     "- 参与批改总人数：{total_students}\n"
-    "- 题目与知识点统计列表（含题号、关联知识点、全班错误率、典型错误 comment 摘录）：\n"
+    "- 题目与知识点统计列表（含题号、AI/老师评定的难度星数、关联知识点、全班错误率、典型错误 comment 摘录）：\n"
     "{aggregated_question_stats}\n"
     "- 知识图谱前置依赖（来自本课程挂载的知识图谱，列出薄弱知识点的前置知识链）：\n"
     "{kg_weakness_chains}\n\n"
@@ -818,7 +856,7 @@ DEFAULT_TAG_HORIZONTAL_PROMPT = (
     "严禁编造未出现的错误类型或主观臆测原因。\n"
     "2. **聚焦共性痛点**：重点剖析错误率较高的题目（如错误率 ≥ 40%），"
     "从“核心概念/原理理解偏差”、“解题思路/逻辑断层”、“审题与作答规范性问题”三个维度"
-    "归纳全班共性盲区。\n"
+    "归纳全班共性盲区；结合题目难度区分高难挑战与基础题失分，不把难题错误率直接等同于基础薄弱。\n"
     "3. **知识图谱归因**：若“知识图谱前置依赖”中给出了薄弱知识点的前置知识链，"
     "必须指出高频错题共同指向的底层核心知识模块，并判断全班失分是源于前置基础不牢还是当前概念理解偏差；"
     "若该数据提示未挂载图谱，则仅依据题目统计推断，不要编造依赖关系。\n"
@@ -828,6 +866,8 @@ DEFAULT_TAG_HORIZONTAL_PROMPT = (
 )
 
 TAG_HORIZONTAL_OUTPUT_CONTRACT = (
+    "分析时必须结合每题 difficulty（1~5 星、半星递增）校准全班错误率；"
+    "高难题失分与基础题失分的教学风险不同，缺少难度时不得推断。\n"
     "### 输出格式（严格输出合法 JSON）\n"
     "{\n"
     '  "overall_summary": "一句话客观概括本讲次全班整体掌握情况与核心问题（100字以内）",\n'
@@ -835,7 +875,8 @@ TAG_HORIZONTAL_OUTPUT_CONTRACT = (
     "    {\n"
     '      "topic_name": "薄弱知识点或题号范围",\n'
     '      "error_rate": "错误率百分比",\n'
-    '      "common_pitfall": "全班共性错误模式与典型失分点剖析（80字以内）"\n'
+    '      "common_pitfall": "全班共性错误模式与典型失分点剖析（80字以内）",\n'
+    '      "difficulty_observation": "结合题目难度说明错误率代表的教学风险；数据不足可留空"\n'
     "    }\n"
     "  ],\n"
     '  "teaching_suggestions": [\n'
@@ -847,36 +888,44 @@ TAG_HORIZONTAL_OUTPUT_CONTRACT = (
 TAG_HORIZONTAL_PROMPT = DEFAULT_TAG_HORIZONTAL_PROMPT + "\n\n" + TAG_HORIZONTAL_OUTPUT_CONTRACT
 
 DEFAULT_TAG_VERTICAL_PROMPT = (
-    "你是资深的个性化学习规划师与学情诊断专家。请基于某位学生近 {lecture_count} 讲的"
+    "你是资深的个性化学习规划师与学情诊断专家。请基于某位学生在本课程 {lecture_count} 个已批阅讲次中的"
     "作业表现，为其生成一份有证据、可复核的《纵向学习特征与阶段诊断》。\n\n"
     "### 输入数据\n"
     "- 学科与课程：{subject_and_course}\n"
     "- 学生姓名：{student_name}\n"
-    "- 覆盖讲次范围：{lecture_range}\n"
-    "- 各知识模块累计掌握度、逐讲次表现及错题摘录：{module_mastery_stats}\n"
+    "- 涉及讲次（各讲是独立作业样本，不代表时间或难度顺序）：{lecture_range}\n"
+    "- 各知识模块累计掌握度、逐讲次表现、平均题目难度及错题摘录：{module_mastery_stats}\n"
     "- 知识图谱诊断出的“跨讲次关联薄弱链”（含实际错题讲次证据、图谱前置/后续节点及节点间关系）："
     "{kg_weakness_chains}\n"
     "- 高频错误类型与作答习惯统计：{error_habit_stats}\n"
-    "- 近期表现与早期表现对比趋势：{trend_data}\n\n"
+    "- 各讲独立作业表现概览（含题目平均难度；按讲次分组，不是时间趋势）：{trend_data}\n\n"
     "### 红线与要求\n"
     "1. **数据支撑，严禁空谈**：所有判断必须引用具体讲次、错/半对次数或知识点；区分数据事实与推测，"
     "数据不足就明确写‘暂不能判断’，不能编造学习心理、能力或因果。\n"
-    "2. **深挖跨讲次学习特征**：比较早期与近期趋势、同一知识点是否反复失分、基础题与综合应用是否分化、"
-    "掌握后是否迁移、是否出现波动或稳定进步。提出值得继续追踪的问题，不把一次失误概括成稳定特征。\n"
-    "3. **真正使用知识图谱**：把图谱关系与重复错题的讲次证据逐项对齐，说明‘前置知识 → 后续薄弱点’"
-    "的关系、分别在哪些讲次出现及可能影响；图谱链只表示课程知识依赖，不足以单独证明学生的因果。"
-    "若无可匹配节点或关系，明确说明，禁止虚构关联。\n"
-    "4. **区分知识漏洞与作答习惯**：分开分析原理/方法掌握、跨题迁移、审题、单位格式、计算、空白等，"
+    "2. **使用难度校准表现**：结合每题/每知识点的难度星数判断表现；高难题失分与低难度基础题反复失分的含义不同，"
+    "难度缺失时不要猜测。\n"
+    "3. **按知识点挖掘，不做时间趋势推断**：不同讲次可能考查彼此独立、难度不同的知识点；"
+    "不要根据讲次先后声称成绩下降、进步或题目越来越难。重点看同一/相关知识点是否反复失分、"
+    "不同知识点上的错误方式、知识迁移与难度校准后的掌握差异。\n"
+    "4. **真正使用知识图谱**：把图谱关系与对应知识点的错题证据逐项对齐，说明‘前置知识 → 后续知识点’"
+    "在课程结构上的关联、学生分别在哪些独立作业样本中答错及错误方式；图谱链只表示知识依赖，"
+    "不表示授课时间顺序，也不足以单独证明学生因果。若无可匹配节点或关系，明确说明，禁止虚构关联。\n"
+    "5. **区分知识漏洞与作答习惯**：分开分析原理/方法掌握、跨题迁移、审题、单位格式、计算、空白等，"
     "习惯判断必须有多次评语或作业证据。\n"
-    "5. **建议可验证**：给出按先基础后迁移的下一步练习，并说明用什么表现判断补救有效。语气客观、鼓励。\n"
-    "6. **化学式/数学式**：涉及化学式、离子式、数学式时用轻量 LaTeX，"
+    "6. **建议可验证**：基于图谱先修关系安排补习顺序（这不等于推断原讲次的先后难度），"
+    "并说明用什么题目表现判断补救有效。语气客观、鼓励。\n"
+    "7. **化学式/数学式**：涉及化学式、离子式、数学式时用轻量 LaTeX，"
     "用一对 $ 包裹，例如 $\\mathrm{CO_3^{2-}}$、$\\mathrm{SO_4^{2-}}$、$2e^-$；纯文字不要加 $。"
 )
 
 TAG_VERTICAL_OUTPUT_CONTRACT = (
     "### 必须执行的分析规则\n"
-    "- 必须识别具体的跨讲次表现模式（趋势、波动、重复失分、知识迁移、基础与综合题表现差异），并提供讲次/题目数据证据；"
+    "- 各讲是相互独立的作业样本；不得按讲次先后推断成绩上升/下降或题目越来越难。\n"
+    "- 必须识别具体的跨讲次表现模式（相关知识点重复失分、错误方式差异、知识迁移、难度校准后的表现），"
+    "并提供讲次/题目数据证据；"
     "数据不足时明确写不足，不把单次错误定性为稳定特征。\n"
+    "- 必须结合 1~5 星半星档的题目难度解释表现：同样的失分率在高难题和基础题上代表的学习风险不同；"
+    "没有难度评估时不得猜测。\n"
     "- 必须逐项核对知识图谱中的真实前置/后续关系与学生在对应知识点上的讲次证据；"
     "图谱依赖只能作为解释线索，不能直接断言因果；无匹配关系时不得编造。\n"
     "- 结论中区分已观察事实、可能解释与待核查问题；建议应能用后续作业表现验证。\n"
@@ -899,7 +948,7 @@ TAG_VERTICAL_OUTPUT_CONTRACT = (
     "    }\n"
     "  ],\n"
     '  "progress_highlights": [\n'
-    '    "肯定学生近期掌握较好或进步明显的知识模块/作答习惯（1-2条，每条不超过60字）"\n'
+    '    "指出多个独立作业样本中可证实的稳定优势或掌握较好的知识点（1-2条，每条不超过60字；不声称时间进步）"\n'
     "  ],\n"
     '  "root_cause_diagnosis": [\n'
     "    {\n"

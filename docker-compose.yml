@@ -24,6 +24,8 @@ services:
       AI_API_KEY: ${AI_API_KEY:-}
       AI_MODEL: ${AI_MODEL:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # 临时开放教师课程/讲次/图谱编辑权限；恢复原协作权限时设为 0
+      TEMPORARY_GLOBAL_TEACHER_ACCESS: ${TEMPORARY_GLOBAL_TEACHER_ACCESS:-1}
     volumes:
       # 数据库、附件、日志全部落在 /data，备份时整目录拷走即可
       - ./data:/data

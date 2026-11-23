@@ -89,6 +89,28 @@ class TagStatsTest(unittest.TestCase):
         self.assertEqual(sub["error_rate"], 0.0)
         self.assertIn("化学平衡", sub["tags"])
 
+    def test_difficulty_flows_into_horizontal_and_vertical_stats(self):
+        self.con.executemany(
+            "INSERT INTO question_assessments(lecture_id,question_key,question_no,difficulty,"
+            "manual_difficulty) VALUES(?,?,?,?,?)",
+            [(20, "q0", "3", 4.5, 3.5), (21, "q0", "3", 2.5, None)])
+        horizontal = tags.lecture_question_stats(self.con, 20)
+        third = next(row for row in horizontal if row["no"] == "3")
+        self.assertEqual(third["difficulty"], 3.5)
+        md = tags.render_horizontal_md(
+            {"overall_summary": "综合分析", "high_risk_topics": [],
+             "teaching_suggestions": []}, horizontal)
+        self.assertIn("题目难度与全班表现", md)
+        self.assertIn("3.5 星", md)
+
+        mastery = tags.student_mastery_stats(self.con, 10, 2)
+        redox = next(row for row in mastery if row["tag"] == "氧化还原反应")
+        self.assertEqual(redox["avg_difficulty"], 3.0)
+        self.assertEqual([row["avg_difficulty"] for row in redox["lecture_results"]],
+                         [3.5, 2.5])
+        trend = tags.student_trend(self.con, 10, 2)
+        self.assertEqual([row["avg_difficulty"] for row in trend], [3.5, 2.5])
+
     def test_lecture_question_stats_empty(self):
         self.assertEqual(tags.lecture_question_stats(self.con, 999), [])
 
@@ -144,7 +166,7 @@ class TagStatsTest(unittest.TestCase):
         self.assertIn("电子守恒没掌握", vertical)
         self.assertIn("漏写单位", vertical)
         self.assertIn("复习电子守恒", vertical)
-        self.assertIn("各讲次表现趋势", vertical)
+        self.assertIn("各讲次作业概览", vertical)
         self.assertIn("值得深挖的跨讲次学习特征", vertical)
 
     def test_lecture_stats_empty_when_no_tags(self):
@@ -326,8 +348,9 @@ class TagAITest(unittest.TestCase):
 
     def test_analyze_question_tags_normalizes_and_matches_numbers(self):
         reply = json.dumps({"questions": [
-            {"no": "3.", "category": "化学计算", "tags": ["氧化还原反应", "电子守恒"]},
-            {"no": "9", "tags": ["化学平衡"]},
+            {"no": "3.", "category": "化学计算", "difficulty": 3.25,
+             "tags": ["氧化还原反应", "电子守恒"]},
+            {"no": "9", "difficulty": "4.5 星", "tags": ["化学平衡"]},
             {"no": "99", "tags": ["不存在的题"]},
         ]}, ensure_ascii=False)
         with mock.patch.object(pdfgrade, "_file_parts", return_value=([], "")), \
@@ -342,8 +365,18 @@ class TagAITest(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertEqual([r["key"] for r in rows], ["q0", "q1", "q2"])
         self.assertEqual(rows[0]["tags"], ["氧化还原反应", "电子守恒"])
+        self.assertEqual(rows[0]["difficulty"], 3.5)
         self.assertEqual(rows[1]["tags"], ["化学平衡"])
+        self.assertEqual(rows[1]["difficulty"], 4.5)
         self.assertEqual(rows[2]["tags"], [])
+        self.assertIsNone(rows[2]["difficulty"])
+
+    def test_difficulty_rating_is_limited_to_half_star_steps(self):
+        self.assertEqual(pdfgrade._difficulty_score(1), 1.0)
+        self.assertEqual(pdfgrade._difficulty_score(2.25), 2.5)
+        self.assertEqual(pdfgrade._difficulty_score("5星"), 5.0)
+        self.assertIsNone(pdfgrade._difficulty_score(0.5))
+        self.assertIsNone(pdfgrade._difficulty_score(5.5))
 
     def test_analyze_question_tags_injects_kg_node_candidates(self):
         captured = {}
@@ -395,7 +428,7 @@ class TagAITest(unittest.TestCase):
 
     def test_vertical_analysis_parses_diagnosis(self):
         reply = json.dumps({
-            "learning_profile": "近期计算稳定，但前置概念应用仍反复失分。",
+            "learning_profile": "计算正确性稳定，但前置概念应用仍反复失分。",
             "cross_lecture_patterns": [{"pattern": "前置概念迁移不稳",
                                         "evidence": "第一讲与第二讲均有半对",
                                         "interpretation": "可能是迁移不熟",
@@ -412,9 +445,12 @@ class TagAITest(unittest.TestCase):
         context = {"student_name": "李一", "subject_and_course": "化学",
                    "lecture_count": 2, "module_mastery_stats": []}
         with mock.patch.object(pdfgrade.llm, "chat",
-                               return_value=(reply, "stop", "")):
+                               return_value=(reply, "stop", "")) as call:
             result = pdfgrade.ai_vertical_analysis(context, "u", "k", "m")
-        self.assertIn("近期计算稳定", result["learning_profile"])
+        prompt = call.call_args.args[3][0]["text"]
+        self.assertIn("不得根据讲次先后声称成绩下降", prompt)
+        self.assertIn("不代表时间或难度顺序", prompt)
+        self.assertIn("计算正确性稳定", result["learning_profile"])
         self.assertEqual(result["cross_lecture_patterns"][0]["pattern"], "前置概念迁移不稳")
         self.assertEqual(result["knowledge_graph_insights"][0]["relation"], "氧化还原 -> 电化学")
         self.assertEqual(result["progress_highlights"], ["计算较稳定"])

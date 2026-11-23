@@ -1302,12 +1302,14 @@ def admin_user_delete(uid):
 
 # ---------- 老师：课程 ----------
 def own_course(cid):
-    """课程归属校验：创建者与共同管理老师都能进入，管理员不受限。"""
+    """课程归属校验；临时全局开放时任何老师可访问所有课程。"""
     db = get_db()
     course = db.execute("SELECT * FROM courses WHERE id=?", (cid,)).fetchone()
     if not course:
         abort(404)
-    if g.user["role"] != "admin":
+    if (g.user["role"] != "admin"
+            and not (g.user["role"] == "teacher"
+                     and cfg.get("TEMPORARY_GLOBAL_TEACHER_ACCESS", True))):
         member = db.execute("SELECT 1 FROM course_teachers WHERE course_id=? AND teacher_id=?",
                             (cid, g.user["id"])).fetchone()
         if not member:
@@ -1323,7 +1325,10 @@ def is_course_owner(course):
 @_routes.route("/courses")
 @role_required("teacher")
 def courses():
-    rows = get_db().execute("""
+    scope = "" if cfg.get("TEMPORARY_GLOBAL_TEACHER_ACCESS", True) else (
+        "JOIN course_teachers ct ON ct.course_id=c.id AND ct.teacher_id=?")
+    params = () if not scope else (g.user["id"],)
+    rows = get_db().execute(f"""
         SELECT c.*,
           (SELECT COUNT(*) FROM enrollments e JOIN users u ON u.id=e.student_id
             WHERE e.course_id=c.id AND u.active=1) AS n_students,
@@ -1331,9 +1336,8 @@ def courses():
           (SELECT COUNT(*) FROM exams x WHERE x.course_id=c.id) AS n_exams,
           (SELECT COUNT(*) FROM course_teachers t WHERE t.course_id=c.id) AS n_teachers,
           (c.teacher_id=?) AS is_owner
-        FROM courses c
-        JOIN course_teachers ct ON ct.course_id=c.id AND ct.teacher_id=?
-        ORDER BY c.id DESC""", (g.user["id"], g.user["id"])).fetchall()
+        FROM courses c {scope}
+        ORDER BY c.id DESC""", (g.user["id"], *params)).fetchall()
     work = workload(get_db(), [row["id"] for row in rows])
     return render_template("courses.html", courses=rows, work=work)
 
@@ -1357,7 +1361,8 @@ def course_create():
 @role_required("teacher", "admin")
 def course_edit(cid):
     course = own_course(cid)
-    if not is_course_owner(course):
+    if (not is_course_owner(course)
+            and not cfg.get("TEMPORARY_GLOBAL_TEACHER_ACCESS", True)):
         abort(403)
     name = request.form.get("name", "").strip()
     if not name:
@@ -1489,8 +1494,10 @@ def course_detail(cid):
                            report_prompts=_prompt_options(cid, "report"),
                            tag_horizontal_prompts=_prompt_options(cid, "tag_horizontal"),
                            tag_vertical_prompts=_prompt_options(cid, "tag_vertical"),
-                           exports=_course_exports(cid),
-                           can_manage_teachers=is_course_owner(course))
+                            exports=_course_exports(cid),
+                            can_edit_course=(is_course_owner(course) or cfg.get(
+                                "TEMPORARY_GLOBAL_TEACHER_ACCESS", True)),
+                            can_manage_teachers=is_course_owner(course))
 
 
 @_routes.route("/course/<oid:cid>/export", methods=["POST"])
@@ -1772,6 +1779,9 @@ def lecture_detail(hid):
         GROUP BY q.no
     """, (hid, hid)).fetchall()
     qstats.sort(key=lambda row: _question_no_key(row["no"]))
+    difficulty_by_no = tag_utils.question_difficulty_map(db, hid)["by_no"]
+    qstats = [{**dict(row), "difficulty": (difficulty_by_no.get(str(row["no"] or "")) or {}).get("rating")}
+              for row in qstats]
 
     # 顶层汇总
     n_subs = len(subs)
@@ -1789,6 +1799,7 @@ def lecture_detail(hid):
         "WHERE operation_type='grade' GROUP BY submission_id) m ON m.max_id=o.id "
         "JOIN submissions s ON s.id=o.submission_id WHERE s.lecture_id=?", (hid,))}
     tag_by_key = tag_utils.lecture_tags_by_key(db, hid)
+    difficulty_by_key = tag_utils.question_difficulty_map(db, hid)["by_key"]
     tag_stats = tag_utils.lecture_stats(db, hid)
     ai_tag_count = db.execute(
         "SELECT COUNT(*) FROM question_tags WHERE lecture_id=? AND source='ai'", (hid,)).fetchone()[0]
@@ -1807,6 +1818,7 @@ def lecture_detail(hid):
         grading_active=any(j["status"] in ("queued", "running")
                            for j in grade_jobs.values()),
         acc_by=acc_by, tag_by_key=tag_by_key, tag_stats=tag_stats,
+        difficulty_by_key=difficulty_by_key,
         ai_tag_count=ai_tag_count,
         lecture_kg_chains=lecture_kg_chains,
         tag_analysis=tag_utils.latest_analysis(db, "horizontal", lecture_id=hid),
@@ -2093,6 +2105,7 @@ def _invalidate_lecture_scope_results(db, lecture_id, course_id):
 
     # 问题编号/结构改变后，旧的 AI 和手动题目标签、讲次/全班分析都不再可靠。
     db.execute("DELETE FROM question_tags WHERE lecture_id=?", (lecture_id,))
+    db.execute("DELETE FROM question_assessments WHERE lecture_id=?", (lecture_id,))
     db.execute("DELETE FROM tag_analyses WHERE lecture_id=?", (lecture_id,))
     if student_ids:
         marks = ",".join("?" for _ in student_ids)
@@ -2234,6 +2247,13 @@ def _generate_question_tags(hw, keys):
                 return
             database.execute("DELETE FROM question_tags WHERE lecture_id=? AND source='ai'",
                              (lecture_id,))
+            # Refresh AI estimates after a successful run, but preserve any
+            # teacher-set manual override in manual_difficulty.
+            database.execute("UPDATE question_assessments SET difficulty=NULL "
+                             "WHERE lecture_id=?", (lecture_id,))
+            database.execute("DELETE FROM question_assessments WHERE lecture_id=? "
+                             "AND difficulty IS NULL AND manual_difficulty IS NULL",
+                             (lecture_id,))
             # 老师手动维护的标签优先：重新标注时不再重复写入同名标签。
             # 手动标签按题号保存（题目清单重建后 q0/q1 可能指向别的题），所以按题号比对。
             manual = {(str(r["question_no"]), r["tag"]) for r in database.execute(
@@ -2241,6 +2261,13 @@ def _generate_question_tags(hw, keys):
                 " WHERE lecture_id=? AND source='manual'", (lecture_id,))}
             count = 0
             for row in rows:
+                if row.get("difficulty") is not None:
+                    database.execute(
+                        "INSERT INTO question_assessments(lecture_id,question_key,question_no,difficulty) "
+                        "VALUES(?,?,?,?) ON CONFLICT(lecture_id,question_key) DO UPDATE SET "
+                        "question_no=excluded.question_no,difficulty=excluded.difficulty,"
+                        "updated_at=CURRENT_TIMESTAMP",
+                        (lecture_id, row["key"], row["no"], row["difficulty"]))
                 seen = set()
                 for tag in row["tags"]:
                     if tag in seen or (str(row["no"]), tag) in manual:
@@ -2514,6 +2541,55 @@ def lecture_tag_save(hid):
     return redirect(url_for("lecture_detail", hid=hid) + "#scope")
 
 
+@_routes.route("/lecture/<oid:hid>/difficulty/save", methods=["POST"])
+@role_required("teacher")
+def lecture_difficulty_save(hid):
+    """Manually override/restore a question's AI difficulty assessment."""
+    db = get_db()
+    hw = db.execute("SELECT * FROM lectures WHERE id=?", (hid,)).fetchone()
+    if not hw:
+        abort(404)
+    own_course(hw["course_id"])
+    try:
+        candidates = json.loads(hw["scope_candidates"] or "[]")
+    except (TypeError, ValueError):
+        candidates = []
+    valid = {str(item["key"]): str(item["no"])
+             for item in _scope_items(candidates)}
+    key = (request.form.get("question_key") or "").strip()
+    if key not in valid:
+        abort(404)
+    raw = (request.form.get("difficulty") or "").strip()
+    manual_difficulty = None
+    if raw:
+        try:
+            manual_difficulty = float(raw)
+        except (TypeError, ValueError):
+            return jsonify(ok=False, error="难度必须为 1 至 5 星，每半星一个档位。"), 400
+        if (not 1 <= manual_difficulty <= 5
+                or abs(manual_difficulty * 2 - round(manual_difficulty * 2)) > 1e-8):
+            return jsonify(ok=False, error="难度必须为 1 至 5 星，每半星一个档位。"), 400
+    with _scope_analysis_lock:
+        db.execute(
+            "INSERT INTO question_assessments(lecture_id,question_key,question_no,manual_difficulty) "
+            "VALUES(?,?,?,?) ON CONFLICT(lecture_id,question_key) DO UPDATE SET "
+            "question_no=excluded.question_no,manual_difficulty=excluded.manual_difficulty,"
+            "updated_at=CURRENT_TIMESTAMP",
+            (hid, key, valid[key], manual_difficulty))
+        db.execute("DELETE FROM question_assessments WHERE lecture_id=? AND question_key=? "
+                   "AND difficulty IS NULL AND manual_difficulty IS NULL", (hid, key))
+        db.commit()
+        row = db.execute(
+            "SELECT difficulty,manual_difficulty FROM question_assessments "
+            "WHERE lecture_id=? AND question_key=?", (hid, key)).fetchone()
+    rating = (row["manual_difficulty"] if row and row["manual_difficulty"] is not None
+              else row["difficulty"] if row else None)
+    response = jsonify(ok=True, rating=rating,
+                       manual=bool(row and row["manual_difficulty"] is not None))
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @_routes.route("/lecture/<oid:hid>/tags/generate", methods=["POST"])
 @role_required("teacher")
 def lecture_tags_generate(hid):
@@ -2617,7 +2693,7 @@ def lecture_tag_analysis(hid):
         if not result:
             _finish_ai_operation(operation, "failed", error)
             return
-        md = tag_utils.render_horizontal_md(result)
+        md = tag_utils.render_horizontal_md(result, question_stats)
         database.execute("DELETE FROM tag_analyses WHERE kind='horizontal' AND lecture_id=?",
                          (hid,))
         database.execute("INSERT INTO tag_analyses(teacher_id,course_id,lecture_id,kind,"
@@ -2664,8 +2740,11 @@ def lecture_summary_generate(hid):
         FROM questions q
         JOIN submissions s ON s.id=q.submission_id
         WHERE s.lecture_id=?
-        GROUP BY q.no""", (hid,)).fetchall()
+         GROUP BY q.no""", (hid,)).fetchall()
     qstats.sort(key=lambda row: _question_no_key(row["no"]))
+    difficulty_by_no = tag_utils.question_difficulty_map(db, hid)["by_no"]
+    qstats = [{**dict(row), "difficulty": (difficulty_by_no.get(str(row["no"] or "")) or {}).get("rating")}
+              for row in qstats]
     # 序列化成普通 dict 列表，供后台线程使用
     qstats_plain = [dict(r) for r in qstats]
 
@@ -2832,8 +2911,8 @@ def student_tag_analysis(cid, sid):
     weak = [row for row in mastery if row["n_wrong"] or row["n_partial"]]
     trend = tag_utils.student_trend(db, cid, sid)
     titles = [row["lecture"] for row in trend]
-    lecture_range = (f"{titles[0]} ~ {titles[-1]}（共 {len(titles)} 讲）"
-                     if len(titles) > 1 else (titles[0] if titles else ""))
+    lecture_range = (f"涉及讲次：{'、'.join(titles)}（共 {len(titles)} 讲；各讲是独立作业样本，不表示时间或难度顺序）"
+                     if titles else "暂无已批阅讲次")
     kg_chains = _student_kg_longitudinal_context(db, cid, weak)
     habit_stats = tag_utils.habit_stats(db, cid, sid)
     context = {
@@ -3635,8 +3714,12 @@ def prompts_page():
     mine = db.execute("SELECT * FROM prompts WHERE teacher_id=? ORDER BY kind, id DESC",
                       (g.user["id"],)).fetchall()
     usage = {}
-    for course in db.execute("SELECT c.* FROM courses c JOIN course_teachers ct "
-                             "ON ct.course_id=c.id WHERE ct.teacher_id=?", (g.user["id"],)):
+    course_sql = ("SELECT c.* FROM courses c" if cfg.get(
+        "TEMPORARY_GLOBAL_TEACHER_ACCESS", True) else
+        "SELECT c.* FROM courses c JOIN course_teachers ct "
+        "ON ct.course_id=c.id WHERE ct.teacher_id=?")
+    course_params = () if cfg.get("TEMPORARY_GLOBAL_TEACHER_ACCESS", True) else (g.user["id"],)
+    for course in db.execute(course_sql, course_params):
         for column in ("grade_prompt_id", "report_prompt_id", "tag_horizontal_prompt_id", "tag_vertical_prompt_id"):
             if course[column]:
                 usage.setdefault(course[column], []).append({"id": course["id"], "name": course["name"]})
@@ -3909,6 +3992,9 @@ def _kg_role(graph):
     """当前用户在该图谱上的最高协作角色；创建者与管理员始终是管理。"""
     if g.user["role"] == "admin" or graph["created_by"] == g.user["id"]:
         return "manage"
+    if (g.user["role"] == "teacher"
+            and cfg.get("TEMPORARY_GLOBAL_TEACHER_ACCESS", True)):
+        return "edit"
     row = get_db().execute(
         "SELECT role FROM kg_members WHERE graph_id=? AND user_id=?",
         (graph["id"], g.user["id"])).fetchone()
@@ -4165,7 +4251,10 @@ def knowledge_graph_create():
 @role_required("teacher", "admin")
 def knowledge_graph_export(gid):
     """导出迁移包；scope=graph 时仅导出图谱结构，不含原始资料文件。"""
-    graph = _kg_graph(gid, manage=True)
+    if cfg.get("TEMPORARY_GLOBAL_TEACHER_ACCESS", True):
+        graph = _kg_graph(gid, edit=True)
+    else:
+        graph = _kg_graph(gid, manage=True)
     scope = "graph" if request.args.get("scope") == "graph" else "full"
     os.makedirs(cfg.get("EXPORT_DIR"), exist_ok=True)
     fd, path = tempfile.mkstemp(prefix=f"kg_{gid}_", suffix=".zip", dir=cfg.get("EXPORT_DIR"))
@@ -4444,7 +4533,11 @@ def knowledge_graph_detail(gid):
         role_labels=KG_ROLE_LABEL,
         max_upload_mb=cfg.get("KG_MAX_UPLOAD_MB"),
         can_edit=role in ("manage", "edit"),
-        can_manage=role == "manage")
+        can_manage=role == "manage",
+        can_edit_graph_info=(role == "manage" or cfg.get(
+            "TEMPORARY_GLOBAL_TEACHER_ACCESS", True)),
+        can_export_graph=(role == "manage" or cfg.get(
+            "TEMPORARY_GLOBAL_TEACHER_ACCESS", True)))
 
 
 @_routes.route("/knowledge-graphs/<oid:gid>/graph.json")
@@ -4721,7 +4814,10 @@ def knowledge_graph_material_delete(mid):
 @role_required("teacher", "admin")
 def knowledge_graph_edit(gid):
     """修改图谱名称与说明；学科与资料范围保持不变。"""
-    _kg_graph(gid, manage=True)
+    if cfg.get("TEMPORARY_GLOBAL_TEACHER_ACCESS", True):
+        _kg_graph(gid, edit=True)
+    else:
+        _kg_graph(gid, manage=True)
     name = request.form.get("name", "").strip()[:80]
     if not name:
         flash("图谱名称不能为空")
@@ -5606,6 +5702,8 @@ def generate_report(db, sub_id, teacher_id, reuse=False, operation=None):
     except (TypeError, ValueError):
         report_scope_items = []
     report_scope_by_no = {str(item["no"]): item for item in report_scope_items}
+    difficulty_by_no = tag_utils.question_difficulty_map(
+        db, sub["lecture_id"])["by_no"]
     report_questions = []
     for question in questions:
         item = report_scope_by_no.get(str(question["no"] or ""), {})
@@ -5613,6 +5711,8 @@ def generate_report(db, sub_id, teacher_id, reuse=False, operation=None):
         report_question["parent_no"] = item.get("parent_no", "")
         report_question["parent_stem"] = item.get("parent_stem", "")
         report_question["stem"] = item.get("stem", "")
+        assessment = difficulty_by_no.get(str(question["no"] or ""))
+        report_question["difficulty"] = assessment["rating"] if assessment else None
         report_questions.append(report_question)
     kg_diag = _kg_diagnosis(db, sub) if questions else None
     kg_context = _kg_diagnosis_text(kg_diag) if kg_diag else ""
@@ -5637,7 +5737,7 @@ def generate_report(db, sub_id, teacher_id, reuse=False, operation=None):
                         lecture_id=sub["lecture_id"], submission_id=sub_id)
                 try:
                     detail = ai_report_comment(
-                        questions, summary.get("weak_points") or [],
+                        report_questions, summary.get("weak_points") or [],
                         summary.get("evaluation", ""), api_url, api_key, model,
                         prompt=_prompt_content("report", course["report_prompt_id"] if course else 0),
                         usage_hook=operation["usage_hook"],

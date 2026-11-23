@@ -1,6 +1,30 @@
 {% extends "base.html" %}
 {% block title %}{{ hw.title }}{% endblock %}
 {% block content %}
+{% macro difficulty_widget(question_key, question_no) %}
+{% set assessment = difficulty_by_key.get(question_key) %}
+{% set rating = assessment.rating if assessment else none %}
+{% set manual_rating = assessment.manual if assessment else none %}
+<div class="difficulty-widget" data-difficulty-widget
+     data-save-url="{{ url_for('lecture_difficulty_save', hid=hw.id) }}"
+     data-csrf="{{ csrf_token() }}" data-question-key="{{ question_key }}"
+     data-question-no="{{ question_no }}" data-rating="{{ rating if rating is not none else '' }}"
+     data-manual="{{ '1' if manual_rating is not none else '0' }}">
+  <div class="difficulty-stars" role="group" aria-label="第 {{ question_no }} 题难度评分">
+    {% for star in range(1, 6) %}
+    <button type="button" class="difficulty-star" data-star="{{ star }}"
+            aria-label="点击设置 {{ star }} 星或半星">★</button>
+    {% endfor %}
+  </div>
+  <span class="difficulty-rating-label" data-rating-label aria-live="polite">
+    {% if rating is not none %}{{ '手动' if manual_rating is not none else 'AI' }} · {{ '%g'|format(rating|float) }} 星
+    {% else %}未评估{% endif %}
+  </span>
+  <button type="button" class="difficulty-reset" data-reset-difficulty
+          {% if manual_rating is none %}hidden{% endif %}>恢复 AI 评分</button>
+  <span class="difficulty-save-status" data-save-status role="status" aria-live="polite"></span>
+</div>
+{% endmacro %}
 {% set cands = hw.scope_candidates|fromjson or [] %}
 {% set chosen = hw.scope_selected|fromjson or [] %}
 {% set grade_ready = hw.answer_pdf and cands and chosen %}
@@ -321,8 +345,8 @@
 
   {% if cands %}
   <table class="scope-table">
-    <colgroup><col style="width:4%"><col style="width:6%"><col style="width:8%"><col style="width:42%"><col style="width:16%"><col style="width:24%"></colgroup>
-    <tr><th>#</th><th>选中</th><th>题号</th><th>题干/小问</th><th>说明</th><th>知识点标签</th></tr>
+    <colgroup><col style="width:4%"><col style="width:5%"><col style="width:7%"><col style="width:35%"><col style="width:12%"><col style="width:21%"><col style="width:16%"></colgroup>
+    <tr><th>#</th><th>选中</th><th>题号</th><th>题干/小问</th><th>说明</th><th>知识点标签</th><th title="AI 根据题目本身估值；点击星星左半格可设半星，手动评分可恢复 AI 评分">难度 · 可手动改</th></tr>
     {% for q in cands %}
     {% set qkey = q.key or q.no %}
     {% set parts = q.subquestions or [] %}
@@ -373,6 +397,10 @@
         </details>
         {% endif %}
       </td>
+      <td>
+        {% if parts %}<span class="muted small">按小问评估</span>
+        {% else %}{{ difficulty_widget(qkey, q.no) }}{% endif %}
+      </td>
     </tr>
     {% for part in parts %}
     {% set part_key = part.key or (qkey ~ '.' ~ loop.index) %}
@@ -404,6 +432,7 @@
           <span class="muted small">标签按小问独立保存；AI 标注会结合母题题干和本小问内容。</span>
         </details>
       </td>
+      <td>{{ difficulty_widget(part_key, part.no) }}</td>
     </tr>
     {% endfor %}
     {% endfor %}
@@ -443,7 +472,7 @@
       {% if tag_operation and tag_operation.status == 'failed' %}
       <span class="danger-text small" role="status">上次生成失败：{{ tag_operation.error or '请重试。' }}</span>
       {% endif %}
-      <span class="muted small">保存作业范围不会调用 AI；答案或范围变化后，旧 AI 标签不会自动更新。重新生成会在成功后替换旧 AI 标签，手工标签保留。自动批阅会等待当前范围的标签生成成功，完成后等待中的提交自动入队；老师仍可不依赖标签手动批阅。</span>
+      <span class="muted small">保存作业范围不会调用 AI；生成标签时也会评估题目难度（1–5 星、半星递增）。可在题目行点击星星手动覆盖，重新生成会更新 AI 难度但保留手动评分。答案或范围变化后，旧标签不会自动更新；自动批阅会等待当前范围的标签生成成功。</span>
     </form>
   </div>
   {% else %}
@@ -1006,6 +1035,76 @@
         }).catch(function () {});
     }, 4000);
   }
+})();
+</script>
+<script>
+// 每题难度：点击星星左半格设半星、右半格设整星，直接保存教师覆盖。
+(function () {
+  function draw(widget, rating, manual) {
+    widget.dataset.rating = rating == null ? '' : String(rating);
+    widget.dataset.manual = manual ? '1' : '0';
+    widget.querySelectorAll('[data-star]').forEach(function (button) {
+      var star = Number(button.dataset.star);
+      button.classList.toggle('is-full', rating != null && rating >= star);
+      button.classList.toggle('is-half', rating != null && rating === star - 0.5);
+      button.setAttribute('aria-pressed', rating != null && rating >= star - 0.5 ? 'true' : 'false');
+    });
+    var label = widget.querySelector('[data-rating-label]');
+    if (label) label.textContent = rating == null ? '未评估'
+      : (manual ? '手动' : 'AI') + ' · ' + rating + ' 星';
+    var reset = widget.querySelector('[data-reset-difficulty]');
+    if (reset) reset.hidden = !manual;
+  }
+
+  function save(widget, rating) {
+    if (widget.dataset.saving === '1') return;
+    var oldRating = widget.dataset.rating === '' ? null : Number(widget.dataset.rating);
+    var oldManual = widget.dataset.manual === '1';
+    var status = widget.querySelector('[data-save-status]');
+    var controls = Array.prototype.slice.call(widget.querySelectorAll('button'));
+    widget.dataset.saving = '1';
+    controls.forEach(function (button) { button.disabled = true; });
+    if (status) { status.textContent = '保存中…'; status.classList.remove('is-error'); }
+    fetch(widget.dataset.saveUrl, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json'},
+      body: new URLSearchParams({
+        _csrf: widget.dataset.csrf,
+        question_key: widget.dataset.questionKey,
+        difficulty: rating == null ? '' : String(rating)
+      }).toString()
+    }).then(function (response) {
+      return response.json().then(function (data) {
+        if (!response.ok || !data.ok) throw new Error(data.error || '保存失败');
+        draw(widget, data.rating == null ? null : Number(data.rating), !!data.manual);
+        if (status) status.textContent = data.manual ? '已保存手动评分' : '已恢复 AI 评分';
+      });
+    }).catch(function (error) {
+      draw(widget, oldRating, oldManual);
+      if (status) {
+        status.textContent = error.message || '保存失败，请重试';
+        status.classList.add('is-error');
+      }
+    }).finally(function () {
+      delete widget.dataset.saving;
+      controls.forEach(function (button) { button.disabled = false; });
+    });
+  }
+
+  document.querySelectorAll('[data-difficulty-widget]').forEach(function (widget) {
+    draw(widget, widget.dataset.rating === '' ? null : Number(widget.dataset.rating),
+         widget.dataset.manual === '1');
+    widget.querySelectorAll('[data-star]').forEach(function (button) {
+      button.addEventListener('click', function (event) {
+        var star = Number(button.dataset.star);
+        var leftHalf = event.clientX < button.getBoundingClientRect().left
+          + button.getBoundingClientRect().width / 2;
+        save(widget, star > 1 && leftHalf ? star - 0.5 : star);
+      });
+    });
+    var reset = widget.querySelector('[data-reset-difficulty]');
+    if (reset) reset.addEventListener('click', function () { save(widget, null); });
+  });
 })();
 </script>
 {% endblock %}

@@ -147,9 +147,16 @@
   }
 
   function rateColor(rate) {
-    if (rate >= 60) return '#f87171';
-    if (rate >= 30) return '#fbbf24';
-    return '#34d399';
+    var value = Math.max(0, Math.min(100, Number(rate) || 0));
+    var from = value <= 50 ? [52, 211, 153] : [251, 191, 36];
+    var to = value <= 50 ? [251, 191, 36] : [239, 68, 68];
+    var amount = value <= 50 ? value / 50 : (value - 50) / 50;
+    var rgb = from.map(function (channel, index) {
+      return Math.round(channel + (to[index] - channel) * amount);
+    });
+    return '#' + rgb.map(function (channel) {
+      return channel.toString(16).padStart(2, '0');
+    }).join('');
   }
 
   function renderList(course) {
@@ -224,6 +231,8 @@
       }
       var status = STATUS[node.status] || STATUS.weak;
       var weight = node.wrong_count + node.partial_count * 0.6;
+      var errorRate = Math.max(0, Math.min(100, Number(node.error_rate) || 0));
+      var severityColor = rateColor(errorRate);
       return {
         id: String(node.id),
         name: node.name,
@@ -240,13 +249,14 @@
         errorRate: node.error_rate || 0,
         trend: node.trend || [],
         tags: node.tags || [],
-        symbolSize: Math.min(30, 15 + Math.sqrt(weight + 1) * 5),
+        // Error rate drives visual severity; raw miss count adds modest emphasis.
+        symbolSize: Math.min(42, 14 + Math.sqrt(weight + 1) * 3.5 + errorRate * 0.13),
         itemStyle: {
-          color: status.color,
-          borderColor: 'rgba(255,255,255,.9)',
-          borderWidth: 1.4,
-          shadowColor: status.color,
-          shadowBlur: node.status === 'weak' ? 28 : 14
+          color: severityColor,
+          borderColor: status.color,
+          borderWidth: node.status === 'weak' ? 3 : 2,
+          shadowColor: severityColor,
+          shadowBlur: node.status === 'weak' ? 24 : 12
         },
         label: {
           show: true,
@@ -407,7 +417,7 @@
     var width = Math.max(1, maxX - minX);
     var height = Math.max(1, maxY - minY);
     if (width > 20000 || height > 20000) return;
-    var zoom = Math.min(chart.getWidth() / width, chart.getHeight() / height) * 0.78;
+    var zoom = Math.min(chart.getWidth() / width, chart.getHeight() / height) * 0.86;
     chart.setOption({
       series: [{
         center: [(minX + maxX) / 2, (minY + maxY) / 2],
