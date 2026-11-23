@@ -104,7 +104,7 @@
         {% if s.report_md %}
         <a class="submission-action" href="{{ url_for('submission_report', sid=s.id) }}">打开评阅报告</a>
         {% elif s.report_job_status in ('queued', 'running') %}
-        <button type="button" class="submission-action" disabled>报告生成中…</button>
+        <button type="button" class="submission-action" disabled aria-busy="true"><span class="spinner" aria-hidden="true"></span>报告生成中…</button>
         {% elif s.n_questions and job_status in ('', 'success') %}
         <form method="post" action="{{ url_for('submission_review_skip_and_report', sid=s.id) }}"
               class="skip-review-form">
@@ -127,9 +127,10 @@
             data-has-result="{{ '1' if (s.n_questions or s.status == '已批改') else '0' }}">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
         <button class="small" data-grade-btn="{{ s.id }}"
-                {% if not grade_ready or job_status in ('queued', 'running') %}disabled title="{% if job_status in ('queued', 'running') %}这份作业正在后台批阅{% else %}请先上传教师版答案并划定作业范围{% endif %}"{% endif %}>
-          {% if job_status == 'queued' %}排队中…
-          {% elif job_status == 'running' %}批阅中…
+                {% if not grade_ready or job_status in ('queued', 'running') %}disabled title="{% if job_status in ('queued', 'running') %}这份作业正在后台批阅{% else %}请先上传教师版答案并划定作业范围{% endif %}"{% endif %}
+                {% if job_status in ('queued', 'running') %}aria-busy="true" class="is-busy"{% endif %}>
+          {% if job_status == 'queued' %}<span class="spinner" aria-hidden="true"></span>排队中…
+          {% elif job_status == 'running' %}<span class="spinner" aria-hidden="true"></span>批阅中…
           {% elif job_status == 'failed' %}重试批阅
           {% else %}{{ '重新批阅' if s.status == '待批改' or s.feedback else 'AI 批阅' }}{% endif %}
         </button>
@@ -274,9 +275,8 @@
     </div>
     {% if answer_total == 0 %}
     <p class="muted small" style="color:#c0392b; background:#fdf0ef; padding:10px 12px; border-radius:6px">
-      服务器端 PDFium 无法读取这份 PDF 的页数，因此无法生成缩略图和题目清单。浏览器预览使用不同的 PDF 阅读器，能预览不代表服务器可以解析。
-      请先确认服务环境已安装 requirements 中的 PDFium 版本；仍失败时再用其他工具重新导出/打印为 PDF，或到「管理后台 → 日志」查看
-      <code>pdf_page_count</code> 错误详情。
+      服务器暂时无法读取这份 PDF 的页数，因此当前不能生成缩略图和题目清单。浏览器预览使用不同的 PDF 阅读器，能预览不代表服务器端解析成功。
+      请刷新页面重试；若持续失败，再确认文件可由服务器读取，并到「管理后台 → 日志」查看 <code>pdf_page_count</code> 错误详情。
     </p>
     {% endif %}
     <p class="muted small">学生交的是哪几页，这里就只勾哪几页；未勾选任何页码时使用整份答案。
@@ -426,6 +426,10 @@
     {% set tag_busy = tag_operation and tag_operation.status in ('queued', 'running') %}
     <form method="post" action="{{ url_for('lecture_tags_generate', hid=hw.id) }}" class="tag-form"
           data-tag-busy="{{ '1' if tag_busy else '0' }}"
+          data-ai-queue-form data-ai-busy-label="标注中…"
+          data-ai-tag-count="{{ ai_tag_count }}"
+          data-ai-operation-id="{{ tag_operation.id if tag_busy else '' }}"
+          data-ai-status-url="{{ url_for('ai_operation_status', operation_id=tag_operation.id) if tag_busy else '' }}"
           data-operation-id="{{ tag_operation.id if tag_operation else '' }}"
           data-status-url="{{ url_for('lecture_tags_status', hid=hw.id) }}">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
@@ -437,7 +441,7 @@
       {% if tag_operation and tag_operation.status == 'failed' %}
       <span class="danger-text small" role="status">上次生成失败：{{ tag_operation.error or '请重试。' }}</span>
       {% endif %}
-      <span class="muted small">保存作业范围不会调用 AI；答案或范围变化后，旧 AI 标签不会自动更新。自动批阅会等待当前范围的标签生成成功，完成后等待中的提交自动入队；老师仍可不依赖标签手动批阅。</span>
+      <span class="muted small">保存作业范围不会调用 AI；答案或范围变化后，旧 AI 标签不会自动更新。重新生成会在成功后替换旧 AI 标签，手工标签保留。自动批阅会等待当前范围的标签生成成功，完成后等待中的提交自动入队；老师仍可不依赖标签手动批阅。</span>
     </form>
   </div>
   {% else %}
@@ -467,14 +471,24 @@
 <div class="card" id="lecture-stats">
   <div class="card-head">
     <h2>讲次汇总</h2>
+    {% set summary_busy = summary_operation and summary_operation.status in ('queued', 'running') %}
     <form method="post" action="{{ url_for('lecture_summary_generate', hid=hw.id) }}"
-          class="summary-form" data-has-result="{{ '1' if hw.summary_md else '0' }}">
+          class="summary-form" data-ai-queue-form data-ai-busy-label="生成中…"
+          data-has-result="{{ '1' if hw.summary_md else '0' }}"
+          data-ai-operation-id="{{ summary_operation.id if summary_busy else '' }}"
+          data-ai-status-url="{{ url_for('ai_operation_status', operation_id=summary_operation.id) if summary_busy else '' }}">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-      <button type="submit" class="small ghost">
+      <button type="submit" class="small ghost{% if summary_busy %} is-busy{% endif %}"
+              {% if summary_busy %}disabled aria-busy="true"{% endif %}>
+        {% if summary_busy %}<span class="spinner" aria-hidden="true"></span>生成中…
+        {% else %}
         {{ '重新生成讲次汇总' if hw.summary_md else '生成讲次汇总' }}
+        {% endif %}
       </button>
     </form>
   </div>
+  {% if summary_busy %}<p class="muted small" role="status">讲次汇总已{{ '排队' if summary_operation.status == 'queued' else '开始生成' }}；完成前不能重复提交，本页会自动更新。</p>
+  {% elif summary_operation and summary_operation.status == 'failed' %}<p class="danger-text small" role="status">上次讲次汇总生成失败：{{ summary_operation.error or '请重试。' }}</p>{% endif %}
 
   {% if hw.summary_md %}
   <div class="lecture-summary-body">{{ hw.summary_md|markdown_safe }}</div>
@@ -493,14 +507,24 @@
 <div class="card" id="tag-analysis">
   <div class="card-head">
     <h2>知识点分析（全班）</h2>
+    {% set horizontal_busy = horizontal_operation and horizontal_operation.status in ('queued', 'running') %}
     <form method="post" action="{{ url_for('lecture_tag_analysis', hid=hw.id) }}"
-          class="tag-analysis-form" data-has-result="{{ '1' if tag_analysis else '0' }}">
+          class="tag-analysis-form" data-ai-queue-form data-ai-busy-label="分析中…"
+          data-has-result="{{ '1' if tag_analysis else '0' }}"
+          data-ai-operation-id="{{ horizontal_operation.id if horizontal_busy else '' }}"
+          data-ai-status-url="{{ url_for('ai_operation_status', operation_id=horizontal_operation.id) if horizontal_busy else '' }}">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-      <button type="submit" class="small ghost">
+      <button type="submit" class="small ghost{% if horizontal_busy %} is-busy{% endif %}"
+              {% if horizontal_busy %}disabled aria-busy="true"{% endif %}>
+        {% if horizontal_busy %}<span class="spinner" aria-hidden="true"></span>分析中…
+        {% else %}
         {{ '重新分析知识点' if tag_analysis else '分析知识点' }}
+        {% endif %}
       </button>
     </form>
   </div>
+  {% if horizontal_busy %}<p class="muted small" role="status">全班知识点分析已{{ '排队' if horizontal_operation.status == 'queued' else '开始生成' }}；完成前不能重复提交，本页会自动更新。</p>
+  {% elif horizontal_operation and horizontal_operation.status == 'failed' %}<p class="danger-text small" role="status">上次全班知识点分析失败：{{ horizontal_operation.error or '请重试。' }}</p>{% endif %}
   <p class="muted small">基于作业范围题目的知识点标签与已有全班逐题判定，横向找出同学们普遍薄弱的知识点并给出教学建议。
     需要先保存作业范围、生成标签，并至少有一道题已有判定。</p>
   <p class="muted small">标签后的数字为「需关注判定数 / 已判定记录数」：分子是错 + 半对，分母是对、半对、错、无法判定之和；空白判定不计。
@@ -816,8 +840,20 @@
 (function () {
   var form = document.querySelector('.tag-form');
   if (!form) return;
-  form.addEventListener('submit', function () {
-    busyOn(form.querySelector('button'), '标注中…');
+  form.addEventListener('submit', function (e) {
+    var btn = form.querySelector('button');
+    if (Number(form.dataset.aiTagCount || 0) > 0 && form.dataset.confirmed !== '1') {
+      e.preventDefault();
+      confirmDialog('重新生成会替换本讲现有的 AI 知识点标签；手工标签会保留。确定继续吗？',
+                    '覆盖并重新生成').then(function (ok) {
+        if (!ok) return;
+        form.dataset.confirmed = '1';
+        busyOn(btn, '标注中…');
+        form.submit();
+      });
+      return;
+    }
+    busyOn(btn, '标注中…');
   });
 })();
 // 从讲次页直接生成 AI-only 报告时，明确告知会跳过全部人工复核；不自动发布。
@@ -918,15 +954,19 @@
         }
         return r.json();
       }).then(function (data) {
-        busyOff(btn);
-        if (data.ok) {
-          showFlash('讲次汇总已更新。' + (data.usage || ''));
-          setTimeout(function () { location.reload(); }, 800);
+        if (data.ok && data.queued) {
+          showFlash('讲次汇总已加入后台队列，生成完成前按钮会保持禁用。');
+          setTimeout(function () { location.reload(); }, 250);
         } else {
+          busyOff(btn);
           // 弹窗显示具体错误原因和参数建议
           var msg = data.error || '生成失败';
           if (data.error_type === 'truncated') {
             msg += '\n\n💡 解决方法：到「AI 设置」页面，将「讲次汇总」的 max_tokens 调大（如 8192 或 16384），然后重新生成。';
+          }
+          if ((data.error || '').indexOf('已在后台队列') >= 0) {
+            location.reload();
+            return;
           }
           alert(msg);
         }

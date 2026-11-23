@@ -2,11 +2,13 @@
 import io
 import json
 import sqlite3
+import threading
 import tempfile
 import os
 import subprocess
 import sys
 import unittest
+from contextlib import nullcontext
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote
@@ -19,6 +21,8 @@ except ImportError:
 
 import app as a
 from utilities import pdfgrade
+from utilities.ai_task_queue import AiTaskQueue
+from grading_service import GradingQueue
 
 
 class ReviewRegressionTest(unittest.TestCase):
@@ -773,7 +777,7 @@ class ReviewRegressionTest(unittest.TestCase):
                             [(100, 2, "A", "PROMPT_A"), (101, 3, "B", "PROMPT_B")])
         self.db.execute("UPDATE courses SET report_prompt_id=100 WHERE id=10")
         self.db.execute("INSERT INTO courses(id,name,teacher_id,report_prompt_id) VALUES(20,'Other',3,101)")
-        self.db.execute("UPDATE submissions SET review_skipped=1 WHERE id=30")
+        self.db.execute("UPDATE submissions SET review_skipped=1,report_published=1 WHERE id=30")
         self.db.execute(
             "UPDATE questions SET ocr_text='学生遗漏反应条件',standard_answer='应写反应条件',"
             "note='复核：条件缺失' WHERE id=40")
@@ -796,7 +800,7 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertEqual(call.call_args.args[0][0]["standard_answer"], "应写反应条件")
         self.assertEqual(call.call_args.args[0][0]["note"], "复核：条件缺失")
         saved = self.db.execute(
-            "SELECT report_md,report_detail FROM submissions WHERE id=30").fetchone()
+            "SELECT report_md,report_detail,report_published FROM submissions WHERE id=30").fetchone()
         self.assertIn("OK", saved["report_md"])
         self.assertIn("人工复核已跳过", saved["report_md"])
         self.assertIn("| 题号 | 判定 | 批改说明 | 指示标签 | 单题评语 |", saved["report_md"])
@@ -805,6 +809,7 @@ class ReviewRegressionTest(unittest.TestCase):
                       saved["report_md"])
         self.assertEqual(json.loads(saved["report_detail"]), {
             "good": "OK", "question_comments": {"1": "结合标准答案，本题反应条件遗漏。"}})
+        self.assertEqual(saved["report_published"], 0)
         operation = self.db.execute(
             "SELECT status FROM ai_operations WHERE submission_id=30 "
             "AND operation_type='report_generate' ORDER BY id DESC LIMIT 1").fetchone()
@@ -933,6 +938,72 @@ class ReviewRegressionTest(unittest.TestCase):
         success_page = self.client(2).get(self.url("lecture_detail", hid=20)).get_data(as_text=True)
         self.assertNotIn("打开评阅报告", success_page)
         self.assertIn('class="skip-review-form"', success_page)
+
+    def test_background_ai_and_grading_runners_share_one_execution_slot(self):
+        class FakeDB:
+            def execute(self, *_args, **_kwargs):
+                return self
+
+            def commit(self):
+                pass
+
+            def rollback(self):
+                pass
+
+        db = FakeDB()
+        ai_queue = AiTaskQueue(
+            get_db=lambda: db, close_db=lambda: None,
+            start_operation=lambda *_args, **_kwargs: {},
+            finish_operation=lambda *_args, **_kwargs: None,
+            app_context=nullcontext, concurrency=1)
+        grading_queue = GradingQueue(
+            get_db=lambda: db, get_setting=lambda *_args: "",
+            start_operation=lambda *_args, **_kwargs: {},
+            finish_operation=lambda *_args, **_kwargs: None,
+            run_job=lambda *_args: None, app_context=nullcontext, concurrency=1)
+        self.addCleanup(ai_queue._pool.shutdown, wait=True)
+        self.addCleanup(grading_queue._pool.shutdown, wait=True)
+
+        first_started = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+        state_lock = threading.Lock()
+        active = {"count": 0, "maximum": 0}
+
+        def enter_and_wait(event, wait=False):
+            with state_lock:
+                active["count"] += 1
+                active["maximum"] = max(active["maximum"], active["count"])
+            event.set()
+            if wait:
+                release_first.wait(3)
+            with state_lock:
+                active["count"] -= 1
+
+        first = threading.Thread(
+            target=ai_queue._execute,
+            args=((1, "first"), lambda _db, _op: enter_and_wait(first_started, True),
+                  {"id": 1, "operation_type": "fixture"}))
+        second = threading.Thread(
+            target=grading_queue._execute,
+            args=(1, 2, {"id": 2}),
+            kwargs={})
+        # Replace the grading callback before starting; it must wait for the
+        # same gate held by the first general AI operation.
+        grading_queue._run_job = lambda *_args: enter_and_wait(second_started)
+        first.start()
+        self.assertTrue(first_started.wait(2))
+        second.start()
+        try:
+            self.assertFalse(second_started.wait(0.15))
+        finally:
+            release_first.set()
+        first.join(2)
+        second.join(2)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertTrue(second_started.is_set())
+        self.assertEqual(active["maximum"], 1)
 
     def test_import_does_not_create_database_or_start_workers(self):
         root = self.root / "import-only"

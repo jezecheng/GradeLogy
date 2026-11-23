@@ -56,6 +56,7 @@ from model_catalog import (EST_TOKENS_INPUT, EST_TOKENS_OUTPUT, MODEL_CATALOG,
 from model_catalog import sync_models_for_teacher as _sync_models_for_teacher
 from utilities import assistant, course_export, deletion, llm, logview, roster, storage
 from utilities import ai_task_queue
+from utilities.ai_task_runtime import AI_EXECUTION_LOCK
 from utilities import knowledge_graph as kg_utils
 from utilities import kg_text
 from utilities import kg_transfer
@@ -1730,6 +1731,12 @@ def lecture_detail(hid):
     tag_operation = db.execute(
         "SELECT id,status,error FROM ai_operations WHERE lecture_id=? "
         "AND operation_type='question_tagging' ORDER BY id DESC LIMIT 1", (hid,)).fetchone()
+    summary_operation = db.execute(
+        "SELECT id,status,error FROM ai_operations WHERE lecture_id=? "
+        "AND operation_type='lecture_summary' ORDER BY id DESC LIMIT 1", (hid,)).fetchone()
+    horizontal_operation = db.execute(
+        "SELECT id,status,error FROM ai_operations WHERE lecture_id=? "
+        "AND operation_type='tag_horizontal' ORDER BY id DESC LIMIT 1", (hid,)).fetchone()
     subs = db.execute("""
         SELECT s.*, u.display_name, u.username,
           (SELECT COUNT(*) FROM questions q WHERE q.submission_id=s.id) AS n_questions,
@@ -1783,6 +1790,8 @@ def lecture_detail(hid):
         "JOIN submissions s ON s.id=o.submission_id WHERE s.lecture_id=?", (hid,))}
     tag_by_key = tag_utils.lecture_tags_by_key(db, hid)
     tag_stats = tag_utils.lecture_stats(db, hid)
+    ai_tag_count = db.execute(
+        "SELECT COUNT(*) FROM question_tags WHERE lecture_id=? AND source='ai'", (hid,)).fetchone()[0]
     lecture_weak_tags = [s["tag"] for s in tag_stats
                          if s.get("n_wrong", 0) > 0 or s.get("n_partial", 0) > 0]
     lecture_kg_chains = _kg_weakness_chains(db, course["id"], lecture_weak_tags)
@@ -1792,10 +1801,13 @@ def lecture_detail(hid):
         answer_total=answer_total, answer_picked=answer_picked,
         scope_item_count=scope_item_count, scope_reset_impact=scope_reset_impact,
         scope_operation=scope_operation, tag_operation=tag_operation,
+        summary_operation=summary_operation,
+        horizontal_operation=horizontal_operation,
         grade_jobs=grade_jobs,
         grading_active=any(j["status"] in ("queued", "running")
                            for j in grade_jobs.values()),
         acc_by=acc_by, tag_by_key=tag_by_key, tag_stats=tag_stats,
+        ai_tag_count=ai_tag_count,
         lecture_kg_chains=lecture_kg_chains,
         tag_analysis=tag_utils.latest_analysis(db, "horizontal", lecture_id=hid),
         ai_operations=_ai_operation_history(lecture_id=hid, limit=8))
@@ -2266,7 +2278,7 @@ def lecture_answer_pages(hid):
     own_course(hw["course_id"])
     total = pdf_page_count(os.path.join(_upload_dir(), hw["answer_pdf"])) if hw["answer_pdf"] else 0
     if not total:
-        flash("请先上传教师版标准答案 PDF，再选择页码。")
+        flash("暂时无法读取教师版 PDF 页数，请刷新页面后重试；若持续失败，请联系管理员查看服务日志。")
         return redirect(url_for("lecture_detail", hid=hid))
     picked = sorted({int(v) for v in request.form.getlist("page")
                      if v.isdigit() and 1 <= int(v) <= total})
@@ -2606,6 +2618,8 @@ def lecture_tag_analysis(hid):
             _finish_ai_operation(operation, "failed", error)
             return
         md = tag_utils.render_horizontal_md(result)
+        database.execute("DELETE FROM tag_analyses WHERE kind='horizontal' AND lecture_id=?",
+                         (hid,))
         database.execute("INSERT INTO tag_analyses(teacher_id,course_id,lecture_id,kind,"
                          "content_md,stats_json) VALUES(?,?,?,'horizontal',?,?)",
                          (teacher_id, course_id, hid, md, question_stats_json))
@@ -2773,13 +2787,17 @@ def student_detail(cid, sid):
         WHERE x.course_id=? ORDER BY x.id DESC""", (sid, cid)).fetchall()
     acc_by = _accuracy_by_submission(db, [h["last_sub_id"] for h in lectures])
     weak_stats = tag_utils.student_stats(db, cid, sid)
-    vertical_kg_chains = _kg_weakness_chains(db, cid, [r["tag"] for r in weak_stats])
+    vertical_kg_chains = _student_kg_longitudinal_context(db, cid, weak_stats)
+    vertical_operation = db.execute(
+        "SELECT id,status,error FROM ai_operations WHERE course_id=? AND operation_type='tag_vertical' "
+        "AND resource_key=? ORDER BY id DESC LIMIT 1", (cid, f"student:{sid}")).fetchone()
     return render_template(
         "student_detail.html", course=course, student=student,
         lectures=lectures, exams=exams, acc_by=acc_by,
         weak_stats=weak_stats,
         vertical_kg_chains=vertical_kg_chains,
-        tag_analysis=tag_utils.latest_analysis(db, "vertical", student_id=sid, course_id=cid))
+        tag_analysis=tag_utils.latest_analysis(db, "vertical", student_id=sid, course_id=cid),
+        vertical_operation=vertical_operation)
 
 
 @_routes.route("/course/<oid:cid>/student/<oid:sid>/tag-analysis", methods=["POST"])
@@ -2798,11 +2816,7 @@ def student_tag_analysis(cid, sid):
     titles = [row["lecture"] for row in trend]
     lecture_range = (f"{titles[0]} ~ {titles[-1]}（共 {len(titles)} 讲）"
                      if len(titles) > 1 else (titles[0] if titles else ""))
-    kg_chains = _kg_weakness_chains(db, cid, [row["tag"] for row in weak])
-    if not kg_chains:
-        kg_chains = ("本课程未挂载知识图谱，或薄弱标签未能匹配图谱节点；"
-                     "请仅依据同一或相近标签在不同讲次的重复出错推断前置基础，"
-                     "不要编造数据中不存在的依赖关系。")
+    kg_chains = _student_kg_longitudinal_context(db, cid, weak)
     habit_stats = tag_utils.habit_stats(db, cid, sid)
     context = {
         "lecture_count": len(trend),
@@ -2821,7 +2835,8 @@ def student_tag_analysis(cid, sid):
         return redirect(url_for("student_detail", cid=cid, sid=sid))
     max_tokens = _get_max_tokens(g.user["id"], "max_tokens_vertical")
     teacher_id = g.user["id"]
-    stats_json = json.dumps({"mastery": mastery, "trend": trend, "habits": habit_stats},
+    stats_json = json.dumps({"mastery": mastery, "trend": trend, "habits": habit_stats,
+                             "kg_weakness_chains": kg_chains},
                             ensure_ascii=False)
 
     def runner(database, operation):
@@ -2838,7 +2853,11 @@ def student_tag_analysis(cid, sid):
         if not result:
             _finish_ai_operation(operation, "failed", error)
             return
-        md = tag_utils.render_vertical_md(result)
+        md = tag_utils.render_vertical_md(result, context)
+        # Keep one current report per student/course. The previous report stays
+        # visible while this task runs and is replaced only after success.
+        database.execute("DELETE FROM tag_analyses WHERE kind='vertical' AND course_id=? "
+                         "AND student_id=?", (cid, sid))
         database.execute("INSERT INTO tag_analyses(teacher_id,course_id,lecture_id,student_id,"
                          "kind,content_md,stats_json) VALUES(?,?,0,?,'vertical',?,?)",
                          (teacher_id, cid, sid, md, stats_json))
@@ -2848,7 +2867,8 @@ def student_tag_analysis(cid, sid):
 
     operation, queue_err = _ai_task_queue.submit(
         g.user["id"], "tag_vertical", model=model, runner=runner,
-        course_id=cid, dedup_key=f"tag_vertical|{cid}|{sid}")
+        course_id=cid, resource_key=f"student:{sid}",
+        dedup_key=f"tag_vertical|{cid}|{sid}")
     if queue_err:
         flash(queue_err)
     else:
@@ -3200,6 +3220,32 @@ def submission_grading_status(sid):
         "error": (row["error"] if row else "") or "",
         "active": status in ("queued", "running"),
     })
+
+
+@_routes.route("/ai-operations/<int:operation_id>/status")
+@role_required("teacher", "admin")
+def ai_operation_status(operation_id):
+    """Generic no-cache status endpoint for queued AI forms that poll in place."""
+    db = get_db()
+    operation = db.execute(
+        "SELECT id,teacher_id,operation_type,course_id,resource_key,status,error "
+        "FROM ai_operations WHERE id=?", (operation_id,)).fetchone()
+    if not operation:
+        abort(404)
+    if operation["teacher_id"] != g.user["id"] and g.user["role"] != "admin":
+        if operation["operation_type"] in ("kg_audit", "kg_category"):
+            prefix = "knowledge_graph:"
+            resource_key = operation["resource_key"] or ""
+            if not resource_key.startswith(prefix) or not resource_key[len(prefix):].isdigit():
+                abort(403)
+            _kg_graph(int(resource_key[len(prefix):]))
+        elif operation["course_id"]:
+            own_course(operation["course_id"])
+        else:
+            abort(403)
+    response = jsonify(ok=True, status=operation["status"], error=operation["error"] or "")
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @_routes.route("/ai-queue")
@@ -3998,46 +4044,49 @@ def _kg_build_worker(graph_id, material_id, teacher_id, application=None):
 
 def _kg_build_worker_in_context(graph_id, material_id, teacher_id):
     try:
-        with _kg_build_lock:
-            with _service_app_context():
-                db = get_db()
-                try:
-                    material = db.execute(
-                        "SELECT status FROM kg_materials WHERE id=? AND graph_id=?",
-                        (material_id, graph_id)).fetchone()
-                    if not material or material["status"] not in (
-                            kg_utils.STATUS_PENDING, kg_utils.STATUS_BUILDING):
-                        return
-                    api_url, api_key, model, err = _ai_endpoint(teacher_id)
-                    if err:
-                        db.execute("UPDATE kg_materials SET status=?, error=?,"
-                                   "finished_at=CURRENT_TIMESTAMP WHERE id=?",
-                                   (kg_utils.STATUS_FAILED, err, material_id))
-                        db.commit()
-                        return
-                    operation = _start_ai_operation(
-                        teacher_id, "kg_build", model, material_id=material_id)
+        # Graph building also uses PDFium and the AI API; serialize it with
+        # grading and all other queued AI operations, not just other graph builds.
+        with AI_EXECUTION_LOCK:
+            with _kg_build_lock:
+                with _service_app_context():
+                    db = get_db()
                     try:
-                        result = kg_utils.build_material(
-                            db, material_id, api_url, api_key, model,
-                            usage_hook=operation["usage_hook"],
-                            max_tokens=_get_max_tokens(teacher_id, "max_tokens_kg_build"))
-                    except Exception as e:  # noqa: BLE001 后台任务失败写入资料状态
-                        _finish_ai_operation(operation, "failed", str(e))
-                        db.execute("UPDATE kg_materials SET status=?, error=?,"
-                                   "finished_at=CURRENT_TIMESTAMP WHERE id=?",
-                                   (kg_utils.STATUS_FAILED, str(e)[:500], material_id))
-                        db.commit()
-                        kg_log.exception("知识图谱构建失败 material=%s", material_id)
-                        return
-                    if result:
-                        _finish_ai_operation(operation, "success", "")
-                    else:
-                        row = db.execute("SELECT error FROM kg_materials WHERE id=?",
-                                         (material_id,)).fetchone()
-                        _finish_ai_operation(operation, "failed", row["error"] if row else "")
-                finally:
-                    close_db()
+                        material = db.execute(
+                            "SELECT status FROM kg_materials WHERE id=? AND graph_id=?",
+                            (material_id, graph_id)).fetchone()
+                        if not material or material["status"] not in (
+                                kg_utils.STATUS_PENDING, kg_utils.STATUS_BUILDING):
+                            return
+                        api_url, api_key, model, err = _ai_endpoint(teacher_id)
+                        if err:
+                            db.execute("UPDATE kg_materials SET status=?, error=?,"
+                                       "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                                       (kg_utils.STATUS_FAILED, err, material_id))
+                            db.commit()
+                            return
+                        operation = _start_ai_operation(
+                            teacher_id, "kg_build", model, material_id=material_id)
+                        try:
+                            result = kg_utils.build_material(
+                                db, material_id, api_url, api_key, model,
+                                usage_hook=operation["usage_hook"],
+                                max_tokens=_get_max_tokens(teacher_id, "max_tokens_kg_build"))
+                        except Exception as e:  # noqa: BLE001 后台任务失败写入资料状态
+                            _finish_ai_operation(operation, "failed", str(e))
+                            db.execute("UPDATE kg_materials SET status=?, error=?,"
+                                       "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                                       (kg_utils.STATUS_FAILED, str(e)[:500], material_id))
+                            db.commit()
+                            kg_log.exception("知识图谱构建失败 material=%s", material_id)
+                            return
+                        if result:
+                            _finish_ai_operation(operation, "success", "")
+                        else:
+                            row = db.execute("SELECT error FROM kg_materials WHERE id=?",
+                                             (material_id,)).fetchone()
+                            _finish_ai_operation(operation, "failed", row["error"] if row else "")
+                    finally:
+                        close_db()
     finally:
         with _kg_schedule_lock:
             _kg_enqueued.discard(material_id)
@@ -4343,6 +4392,12 @@ def knowledge_graph_detail(gid):
     cat_maps = [_kg_category_map_view(row) for row in db.execute(
         "SELECT * FROM kg_category_maps WHERE graph_id=? ORDER BY id DESC LIMIT 10",
         (gid,)).fetchall()]
+    graph_audit_operation = db.execute(
+        "SELECT id,status,error FROM ai_operations WHERE operation_type='kg_audit' "
+        "AND resource_key=? ORDER BY id DESC LIMIT 1", (f"knowledge_graph:{gid}",)).fetchone()
+    graph_category_operation = db.execute(
+        "SELECT id,status,error FROM ai_operations WHERE operation_type='kg_category' "
+        "AND resource_key=? ORDER BY id DESC LIMIT 1", (f"knowledge_graph:{gid}",)).fetchone()
     role = _kg_role(graph)
     members = db.execute(
         "SELECT m.user_id, m.role, u.username, u.display_name FROM kg_members m"
@@ -4363,6 +4418,8 @@ def knowledge_graph_detail(gid):
         cycles=kg_utils.prerequisite_cycles(db, gid),
         audits=audits,
         cat_maps=cat_maps,
+        graph_audit_operation=graph_audit_operation,
+        graph_category_operation=graph_category_operation,
         metrics=_kg_metrics(db, gid),
         members=members, teacher_candidates=teacher_candidates,
         role=role, role_label=KG_ROLE_LABEL.get(role, "只读"),
@@ -4769,7 +4826,8 @@ def knowledge_graph_audit_run(gid):
 
     operation, queue_err = _ai_task_queue.submit(
         g.user["id"], "kg_audit", model=model, runner=runner,
-        material_id=None, dedup_key=f"kg_audit|{gid}")
+        resource_key=f"knowledge_graph:{gid}",
+        dedup_key=f"kg_audit|{gid}")
     if queue_err:
         flash(queue_err)
     else:
@@ -4912,7 +4970,8 @@ def knowledge_graph_category_run(gid):
 
     operation, queue_err = _ai_task_queue.submit(
         g.user["id"], "kg_category", model=model, runner=runner,
-        material_id=None, dedup_key=f"kg_category|{gid}")
+        resource_key=f"knowledge_graph:{gid}",
+        dedup_key=f"kg_category|{gid}")
     if queue_err:
         flash(queue_err)
     else:
@@ -5592,9 +5651,18 @@ def generate_report(db, sub_id, teacher_id, reuse=False, operation=None):
         # AI 评价请求失败时保留旧报告；没有旧报告时保持空值，供界面显示“生成”。
         _finish_ai_operation(operation, "failed", completion_error)
     else:
-        db.execute("UPDATE submissions SET report_md=?, report_detail=? WHERE id=?",
+        was_published = bool(sub["report_published"])
+        db.execute("UPDATE submissions SET report_md=?, report_detail=?, report_published=0 WHERE id=?",
                    (md, json.dumps(detail, ensure_ascii=False) if detail else "", sub_id))
         db.commit()
+        if was_published:
+            # A newly generated report is a draft, and its old public weak-point
+            # contribution must disappear until a teacher explicitly republishes.
+            current_sub = db.execute("SELECT * FROM submissions WHERE id=?", (sub_id,)).fetchone()
+            try:
+                _update_student_weak_points(db, current_sub)
+            except Exception:
+                log.exception("撤回旧报告发布后的薄弱点同步失败 submission=%s", sub_id)
         if operation:
             _finish_ai_operation(operation, "success")
     return md
@@ -5888,6 +5956,80 @@ def _kg_weakness_chains(db, course_id, weak_tag_names):
             lines.append(f"- {tag}（图谱节点：{node['name']}）：前置依赖 {pre_names}")
         else:
             lines.append(f"- {tag}（图谱节点：{node['name']}）：图谱中无前置依赖，属基础概念")
+    return "\n".join(lines)
+
+
+def _student_kg_longitudinal_context(db, course_id, weak_stats):
+    """Align one student's repeated weak topics and lecture evidence to real KG edges."""
+    weak_stats = [row for row in (weak_stats or [])
+                  if row.get("n_wrong") or row.get("n_partial")]
+    if not weak_stats:
+        return "没有跨讲次重复错/半对知识点可供图谱关联。"
+    graph_rows = db.execute(
+        "SELECT graph_id FROM course_knowledge_graphs WHERE course_id=?",
+        (course_id,)).fetchall()
+    if not graph_rows:
+        return "本课程未挂载知识图谱；以下重复失分只依据作业数据，不推断知识依赖。"
+    graph_ids = [row["graph_id"] for row in graph_rows]
+    marks = ",".join("?" * len(graph_ids))
+    nodes = db.execute(
+        f"SELECT id,graph_id,name,definition FROM kg_nodes WHERE graph_id IN ({marks})",
+        graph_ids).fetchall()
+    if not nodes:
+        return "课程已挂载图谱，但图谱没有可匹配节点；仅依据作业数据分析重复失分。"
+    name_to_node = {row["name"]: row for row in nodes}
+    node_by_id = {row["id"]: row for row in nodes}
+    links = _course_tag_links(db, course_id)
+    mapped = []
+    for row in weak_stats:
+        node, match_type = _resolve_tag_node(
+            db, course_id, nodes, name_to_node, row.get("tag", ""),
+            links=links, node_by_id=node_by_id)
+        if node:
+            mapped.append((row, node, match_type))
+    if not mapped:
+        return "课程图谱中没有可匹配的重复薄弱点；不对标签与图谱关系作推断。"
+
+    weak_nodes = {(node["graph_id"], node["id"]): row for row, node, _ in mapped}
+    lines = ["以下仅列真实匹配到的图谱节点和直接前置/后续关系；图谱依赖不等同于已证实的学生因果。"]
+    for row, node, match_type in mapped[:20]:
+        evidence = [item for item in row.get("lecture_results", [])
+                    if item.get("wrong") or item.get("partial")]
+        episodes = "; ".join(
+            f"{item.get('lecture') or '讲次'}（错{item.get('wrong', 0)}、半对{item.get('partial', 0)}"
+            f"/{item.get('total', 0)}，错/半对比例{item.get('error_rate', 0)}%）"
+            for item in evidence)
+        lines.append(
+            f"- 重复薄弱点「{row.get('tag')}」→ 图谱节点「{node['name']}」（匹配:{match_type}）；"
+            f"作业证据：{episodes or '见累计统计'}；累计错{row.get('n_wrong', 0)}、"
+            f"半对{row.get('n_partial', 0)}、涉及{row.get('n_lectures', 0)}讲。")
+        neighbors = kg_utils.concept_neighbors(db, node["graph_id"], node["id"]) or {}
+        prereqs = neighbors.get("prerequisites", [])
+        dependents = neighbors.get("dependents", [])
+        relations = []
+        for direction, related_nodes in (("前置", prereqs), ("后续", dependents)):
+            for related in related_nodes[:8]:
+                related_row = weak_nodes.get((node["graph_id"], related.get("id")))
+                if related_row:
+                    related_evidence = "; ".join(
+                        f"{item.get('lecture')}（错{item.get('wrong', 0)}/半对{item.get('partial', 0)}）"
+                        for item in related_row.get("lecture_results", [])
+                        if item.get("wrong") or item.get("partial"))
+                    if direction == "前置":
+                        relations.append(
+                            f"「{related.get('name')}」→「{node['name']}」"
+                            f"（该前置点也在{related_evidence or '其他讲次'}反复失分）")
+                    else:
+                        relations.append(
+                            f"「{node['name']}」→「{related.get('name')}」"
+                            f"（该后续薄弱点在{related_evidence or '其他讲次'}反复失分）")
+        if relations:
+            lines.append("  图谱关联的其他重复薄弱点：" + "；".join(relations) + "。")
+        elif prereqs:
+            lines.append("  图谱前置节点：" + "、".join(
+                item.get("name", "") for item in prereqs[:5]) + "；未发现其他已观测到的重复薄弱节点直接相连。")
+        else:
+            lines.append("  图谱中无直接前置关系，不能据此推断更深层原因。")
     return "\n".join(lines)
 
 

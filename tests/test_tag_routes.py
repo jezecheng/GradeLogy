@@ -237,6 +237,12 @@ class TagRouteTest(unittest.TestCase):
         self.assertEqual(row["verdict"], "")  # 非法值被归一化为空
 
     def test_horizontal_analysis_saves_markdown(self):
+        con = self._db()
+        con.execute(
+            "INSERT INTO tag_analyses(teacher_id,course_id,lecture_id,kind,content_md) "
+            "VALUES(2,10,20,'horizontal','旧分析')")
+        con.commit()
+        con.close()
         result = {"overall_summary": "整体判断",
                   "high_risk_topics": [{"topic_name": "氧化还原反应",
                                         "error_rate": "100%",
@@ -254,7 +260,11 @@ class TagRouteTest(unittest.TestCase):
         row = con.execute(
             "SELECT * FROM tag_analyses WHERE kind='horizontal' AND lecture_id=20"
         ).fetchone()
+        count = con.execute(
+            "SELECT COUNT(*) FROM tag_analyses WHERE kind='horizontal' AND lecture_id=20"
+        ).fetchone()[0]
         con.close()
+        self.assertEqual(count, 1)
         self.assertIsNotNone(row)
         self.assertIn("整体判断", row["content_md"])
         self.assertIn("配平错误多", row["content_md"])
@@ -303,18 +313,33 @@ class TagRouteTest(unittest.TestCase):
                       without_tags.get_data(as_text=True))
 
     def test_horizontal_analysis_keeps_previous_on_ai_failure(self):
+        con = self._db()
+        con.execute(
+            "INSERT INTO tag_analyses(teacher_id,course_id,lecture_id,kind,content_md) "
+            "VALUES(2,10,20,'horizontal','旧分析')")
+        con.commit()
+        con.close()
         with mock.patch.object(app_module, "_ai_endpoint",
                                return_value=("http://api", "key", "model", "")), \
                 mock.patch.object(app_module, "ai_horizontal_analysis", return_value={}):
             resp = self._post("lecture_tag_analysis", hid=20)
         self.assertEqual(resp.status_code, 302)
         con = self._db()
-        count = con.execute(
-            "SELECT COUNT(*) FROM tag_analyses WHERE kind='horizontal'").fetchone()[0]
+        row = con.execute(
+            "SELECT content_md FROM tag_analyses WHERE kind='horizontal' AND lecture_id=20"
+        ).fetchone()
+        count = con.execute("SELECT COUNT(*) FROM tag_analyses WHERE kind='horizontal'").fetchone()[0]
         con.close()
-        self.assertEqual(count, 0)
+        self.assertEqual(count, 1)
+        self.assertEqual(row["content_md"], "旧分析")
 
     def test_vertical_analysis_saves_markdown(self):
+        con = self._db()
+        con.execute(
+            "INSERT INTO tag_analyses(teacher_id,course_id,student_id,kind,content_md) "
+            "VALUES(2,10,4,'vertical','旧报告')")
+        con.commit()
+        con.close()
         result = {"progress_highlights": ["计算稳定"],
                   "root_cause_diagnosis": [{"weakness_chain": "氧化还原 -> 电化学",
                                             "analysis": "电子守恒未掌握"}],
@@ -334,7 +359,10 @@ class TagRouteTest(unittest.TestCase):
         row = con.execute(
             "SELECT * FROM tag_analyses WHERE kind='vertical' AND student_id=4"
         ).fetchone()
+        count = con.execute(
+            "SELECT COUNT(*) FROM tag_analyses WHERE kind='vertical' AND student_id=4").fetchone()[0]
         con.close()
+        self.assertEqual(count, 1)
         self.assertIsNotNone(row)
         self.assertIn("计算稳定", row["content_md"])
         self.assertIn("电子守恒未掌握", row["content_md"])
@@ -356,6 +384,25 @@ class TagRouteTest(unittest.TestCase):
             "SELECT COUNT(*) FROM tag_analyses WHERE kind='vertical'").fetchone()[0]
         con.close()
         self.assertEqual(count, 0)
+
+    def test_vertical_analysis_shows_queued_and_disables_duplicate_submit(self):
+        con = self._db()
+        cur = con.execute(
+            "INSERT INTO ai_operations(teacher_id,operation_type,course_id,resource_key,"
+            "model,status,started_at) VALUES(2,'tag_vertical',10,'student:4','mock','queued',"
+            "CURRENT_TIMESTAMP)")
+        operation_id = cur.lastrowid
+        con.commit()
+        con.close()
+        page = self.client.get(self.url("student_detail", cid=10, sid=4))
+        self.assertEqual(page.status_code, 200)
+        html = page.get_data(as_text=True)
+        self.assertIn('disabled aria-busy="true"', html)
+        self.assertIn("分析中…", html)
+        self.assertIn(f'data-ai-operation-id="{operation_id}"', html)
+        status = self.client.get(self.url("ai_operation_status", operation_id=operation_id))
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(status.get_json()["status"], "queued")
 
     def test_prompts_page_lists_all_kinds_and_placeholders(self):
         resp = self.client.get(self.url("prompts_page"))

@@ -24,11 +24,11 @@ class DeferredQueue:
 
     def submit(self, teacher_id, operation_type, *, model, runner,
                course_id=None, lecture_id=None, submission_id=None,
-               material_id=None, dedup_key=None):
+               material_id=None, resource_key="", dedup_key=None):
         operation = app_module._start_ai_operation(
             teacher_id, operation_type, model, course_id=course_id,
             lecture_id=lecture_id, submission_id=submission_id,
-            material_id=material_id, status="queued")
+            material_id=material_id, resource_key=resource_key, status="queued")
         db = app_module.get_db()
         db.execute("UPDATE ai_operations SET status='running' WHERE id=?",
                    (operation["id"],))

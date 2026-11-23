@@ -36,14 +36,24 @@
 <div class="card">
   <div class="card-head">
     <h2>纵向知识点分析</h2>
+    {% set vertical_busy = vertical_operation and vertical_operation.status in ('queued', 'running') %}
     <form method="post" action="{{ url_for('student_tag_analysis', cid=course.id, sid=student.id) }}"
-          class="tag-analysis-form" data-has-result="{{ '1' if tag_analysis else '0' }}">
+          class="tag-analysis-form" data-ai-queue-form data-ai-busy-label="分析中…"
+          data-has-result="{{ '1' if tag_analysis else '0' }}"
+          data-ai-operation-id="{{ vertical_operation.id if vertical_busy else '' }}"
+          data-ai-status-url="{{ url_for('ai_operation_status', operation_id=vertical_operation.id) if vertical_busy else '' }}">
       <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-      <button type="submit" class="small ghost">
+      <button type="submit" class="small ghost{% if vertical_busy %} is-busy{% endif %}"
+              {% if vertical_busy %}disabled aria-busy="true"{% endif %}>
+        {% if vertical_busy %}<span class="spinner" aria-hidden="true"></span>分析中…
+        {% else %}
         {{ '重新分析薄弱点' if tag_analysis else '分析薄弱点' }}
+        {% endif %}
       </button>
     </form>
   </div>
+  {% if vertical_busy %}<p class="muted small" role="status">纵向分析已{{ '排队' if vertical_operation.status == 'queued' else '开始生成' }}；完成前不能重复提交，完成后本页会自动更新。</p>
+  {% elif vertical_operation and vertical_operation.status == 'failed' %}<p class="danger-text small" role="status">上次纵向分析失败：{{ vertical_operation.error or '请重试。' }}</p>{% endif %}
   <p class="muted small">汇总该生在本课程多讲作业中出错或半对的题目，按知识点标签找出在不同讲次中反复出现的薄弱点；
     需要各讲次已生成知识点标签并完成 AI 批阅。</p>
   {% if weak_stats %}
@@ -106,7 +116,7 @@
   <p class="muted small">学生主数据与登录密码由管理员统一维护，如需修改请联系管理员。</p>
 </div>
 <script>
-// 纵向分析会调用 AI：按钮进入处理中状态；已有结果时覆盖先确认
+// 纵向分析会调用 AI：已有结果时覆盖先确认，提交后显示排队状态
 (function () {
   var form = document.querySelector('.tag-analysis-form');
   if (!form) return;

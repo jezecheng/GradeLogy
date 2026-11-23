@@ -398,13 +398,19 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
          {% if audits and audits[0].status == '待确认' %}open{% endif %}>
   <summary class="card-head"><h2>图谱体检 <span class="muted small">（AI 只给建议，确认后才改图）</span></h2></summary>
   {% if can_edit %}
-  <form class="kg-audit-run" method="post"
-        action="{{ url_for('knowledge_graph_audit_run', gid=graph.id) }}"
-        onsubmit="this.querySelector('button').disabled = true; this.querySelector('button').textContent = '体检中…';">
+  {% set audit_busy = graph_audit_operation and graph_audit_operation.status in ('queued', 'running') %}
+  <form class="kg-audit-run" method="post" data-ai-queue-form data-ai-busy-label="体检中…"
+        data-ai-operation-id="{{ graph_audit_operation.id if audit_busy else '' }}"
+        data-ai-status-url="{{ url_for('ai_operation_status', operation_id=graph_audit_operation.id) if audit_busy else '' }}"
+        action="{{ url_for('knowledge_graph_audit_run', gid=graph.id) }}">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <button class="ghost small">开始体检</button>
+    <button class="ghost small{% if audit_busy %} is-busy{% endif %}"
+            {% if audit_busy %}disabled aria-busy="true"{% endif %}>
+      {% if audit_busy %}<span class="spinner" aria-hidden="true"></span>体检中…{% else %}开始体检{% endif %}
+    </button>
     <span class="muted small">检查同义重复、方向错误与孤立概念；结果先预览，后续未建图或编辑时可回滚。</span>
   </form>
+  {% if graph_audit_operation and graph_audit_operation.status == 'failed' %}<p class="danger-text small" role="status">上次图谱体检失败：{{ graph_audit_operation.error or '请重试。' }}</p>{% endif %}
   {% endif %}
   {% if not audits %}
   <p class="muted small">还没有体检记录。</p>
@@ -472,13 +478,19 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
          {% if cat_maps and cat_maps[0].status == '待确认' %}open{% endif %}>
   <summary class="card-head"><h2>分类重构 <span class="muted small">（AI 把扁平分类整理成分层学科树，确认后才改图）</span></h2></summary>
   {% if can_edit %}
-  <form class="kg-audit-run" method="post"
-        action="{{ url_for('knowledge_graph_category_run', gid=graph.id) }}"
-        onsubmit="this.querySelector('button').disabled = true; this.querySelector('button').textContent = '整理中…';">
+  {% set category_busy = graph_category_operation and graph_category_operation.status in ('queued', 'running') %}
+  <form class="kg-audit-run" method="post" data-ai-queue-form data-ai-busy-label="整理中…"
+        data-ai-operation-id="{{ graph_category_operation.id if category_busy else '' }}"
+        data-ai-status-url="{{ url_for('ai_operation_status', operation_id=graph_category_operation.id) if category_busy else '' }}"
+        action="{{ url_for('knowledge_graph_category_run', gid=graph.id) }}">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-    <button class="ghost small">用 AI 重整分类</button>
+    <button class="ghost small{% if category_busy %} is-busy{% endif %}"
+            {% if category_busy %}disabled aria-busy="true"{% endif %}>
+      {% if category_busy %}<span class="spinner" aria-hidden="true"></span>整理中…{% else %}用 AI 重整分类{% endif %}
+    </button>
     <span class="muted small">把「方法」「公式」等自由标签归并到 2~3 层学科路径；结果先预览，后续未建图或编辑时可回滚。</span>
   </form>
+  {% if graph_category_operation and graph_category_operation.status == 'failed' %}<p class="danger-text small" role="status">上次分类重构失败：{{ graph_category_operation.error or '请重试。' }}</p>{% endif %}
   {% endif %}
   {% if not cat_maps %}
   <p class="muted small">还没有分类重构记录。</p>

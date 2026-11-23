@@ -156,6 +156,7 @@ CREATE TABLE IF NOT EXISTS ai_operations(
   lecture_id INTEGER,
   submission_id INTEGER,
   material_id INTEGER,
+  resource_key TEXT DEFAULT '',
   model TEXT DEFAULT '',
   status TEXT NOT NULL DEFAULT 'running',
   started_at TEXT NOT NULL,
@@ -630,6 +631,8 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=(), reco
     operation_cols = {r[1] for r in con.execute("PRAGMA table_info(ai_operations)")}
     if "material_id" not in operation_cols:
         con.execute("ALTER TABLE ai_operations ADD COLUMN material_id INTEGER")
+    if "resource_key" not in operation_cols:
+        con.execute("ALTER TABLE ai_operations ADD COLUMN resource_key TEXT DEFAULT ''")
     event_cols = {r[1] for r in con.execute("PRAGMA table_info(ai_usage_events)")}
     if "chunk_id" not in event_cols:
         con.execute("ALTER TABLE ai_usage_events ADD COLUMN chunk_id INTEGER")

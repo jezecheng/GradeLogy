@@ -63,7 +63,7 @@ def _now_in_peak():
 
 def _start_ai_operation(teacher_id, operation_type, model, course_id=None,
                         lecture_id=None, submission_id=None, status="running",
-                        material_id=None):
+                        material_id=None, resource_key=""):
     """创建一次用户操作；每次点击/重试都使用新的 operation_id。"""
     preset = next((m for m in MODEL_PRESETS if m["model"] == model), None)
     price_in = preset["price_in"] if preset else None
@@ -90,15 +90,17 @@ def _start_ai_operation(teacher_id, operation_type, model, course_id=None,
     db = get_db()
     cur = db.execute(
         "INSERT INTO ai_operations(teacher_id,operation_type,course_id,lecture_id,"
-        "submission_id,material_id,model,status,started_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        "submission_id,material_id,resource_key,model,status,started_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?)",
         (teacher_id, operation_type, course_id, lecture_id, submission_id, material_id,
-         model, status, started_at))
+         resource_key or "", model, status, started_at))
     db.commit()
     operation = {
         "id": cur.lastrowid, "pricing": pricing, "finished": False,
         "teacher": f"#{teacher_id}", "operation_type": operation_type, "model": model,
         "course_id": course_id, "lecture_id": lecture_id,
         "submission_id": submission_id, "material_id": material_id,
+        "resource_key": resource_key or "",
     }
     _log.info(
         "AI 操作发起 operation=%s teacher=%s scene=%s model=%s course=%s "

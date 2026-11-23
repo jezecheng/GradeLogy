@@ -113,7 +113,7 @@
           {% else %}<span class="muted small">未启用</span>{% endif %}
         </div><div class="api-key-actions">
           <form method="post" action="{{ url_for('settings_api_key_test', key_id=k.id) }}"
-                style="display:inline">
+                style="display:inline" data-ai-submit-form data-ai-busy-label="测试中…">
             <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
             <button type="submit" class="ghost small">测试连接</button>
           </form>
@@ -266,7 +266,7 @@
       <div class="sync-row">
         <button class="ghost small" formmethod="post"
                 formaction="{{ url_for('settings_models_sync') }}"
-                formnovalidate>立即同步模型清单</button>
+                formnovalidate data-ai-busy-label="同步中…">立即同步模型清单</button>
         <span class="muted small">每天自动同步一次；仅保留适合图片批改的视觉/多模态模型，纯文本、语音、生成类模型会自动过滤，价格同步自腾讯云 TokenHub 公开价目</span>
       </div>
       {% endif %}
@@ -318,7 +318,8 @@
 
     </details><button type="submit">保存设置</button>
   </form>
-  <form method="post" action="{{ url_for('settings_test') }}" style="margin-top:10px">
+  <form method="post" action="{{ url_for('settings_test') }}" style="margin-top:10px"
+        data-ai-submit-form data-ai-busy-label="测试中…">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <button class="small">测试连接</button>
     <span class="muted small">保存后点这里，确认 Key 是否可用</span>
@@ -335,7 +336,8 @@
     你核对无误后再保存。保存后对所有老师生效，并用于成本估算。
   </p>
   <form method="post" action="{{ url_for('settings_prices_extract') }}"
-        enctype="multipart/form-data" class="stack-form">
+        enctype="multipart/form-data" class="stack-form"
+        data-ai-submit-form data-ai-busy-label="识别中…">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <label>价目截图（PNG / JPG / WebP，≤8MB）
       <input type="file" name="price_image" accept="image/png,image/jpeg,image/webp">

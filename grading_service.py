@@ -12,6 +12,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from utilities.ai_task_runtime import AI_EXECUTION_LOCK
+
 log = logging.getLogger("gradelogy.grading")
 
 ACTIVE_STATUSES = ("queued", "running")
@@ -99,7 +101,9 @@ class GradingQueue:
 
     def _execute(self, teacher_id, sid, operation):
         try:
-            self._run_job(teacher_id, sid, operation)
+            # Keep the operation queued until it owns the process-wide AI slot.
+            with AI_EXECUTION_LOCK:
+                self._run_job(teacher_id, sid, operation)
         finally:
             self._discard(sid)
 

@@ -3,7 +3,8 @@
 
 与 grading_service.GradingQueue 平级，但不限定 operation_type：所有非批阅的
 长耗时 AI 操作（讲次汇总、知识点分析、图谱体检、总评生成等）都通过这里入队，
-状态统一落在 ai_operations 表，前端 /ai-queue 统一展示。
+状态统一落在 ai_operations 表，前端 /ai-queue 统一展示。实际执行还受进程级
+AI_EXECUTION_LOCK 控制，与批阅和知识图谱建图共享单一执行槽。
 
 设计原则：
 - 不导入 app / Flask，只通过构造参数注入数据库、操作记录、应用上下文。
@@ -16,6 +17,8 @@ import logging
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
+
+from .ai_task_runtime import AI_EXECUTION_LOCK
 
 log = logging.getLogger("gradelogy.ai")
 
@@ -45,7 +48,7 @@ class AiTaskQueue:
 
     def submit(self, teacher_id, operation_type, *, model, runner,
                course_id=None, lecture_id=None, submission_id=None,
-               material_id=None, dedup_key=None):
+               material_id=None, resource_key="", dedup_key=None):
         """入队一个 AI 任务，返回 (operation, error)。
 
         dedup_key 缺省时用 operation_type 拼接各业务 id，保证同对象同类操作只排一份。
@@ -65,7 +68,7 @@ class AiTaskQueue:
                 teacher_id, operation_type, model,
                 course_id=course_id, lecture_id=lecture_id,
                 submission_id=submission_id, material_id=material_id,
-                status="queued")
+                resource_key=resource_key, status="queued")
             self._pool.submit(self._execute, key, runner, operation)
         except Exception as e:
             log.exception("入队 AI 任务失败 type=%s teacher=%s", operation_type, teacher_id)
@@ -83,23 +86,26 @@ class AiTaskQueue:
 
     def _execute(self, key, runner, operation):
         try:
-            with self._app_context():
-                db = self._get_db()
-                try:
-                    db.execute("UPDATE ai_operations SET status='running' WHERE id=?",
-                               (operation["id"],))
-                    db.commit()
-                    runner(db, operation)
-                except Exception as e:  # noqa: BLE001 兜底：绝不让线程静默崩溃
-                    db.rollback()
-                    log.exception("AI 后台任务异常 operation=%s type=%s",
-                                  operation["id"], operation.get("operation_type"))
+            # The task remains 'queued' while waiting here. Only one background
+            # AI runner across all schedulers may execute at a time.
+            with AI_EXECUTION_LOCK:
+                with self._app_context():
+                    db = self._get_db()
                     try:
-                        self._finish_operation(operation, "failed", str(e))
-                    except Exception:
-                        log.exception("标记 AI 任务失败时再次出错 operation=%s", operation["id"])
-                finally:
-                    self._close_db()
+                        db.execute("UPDATE ai_operations SET status='running' WHERE id=?",
+                                   (operation["id"],))
+                        db.commit()
+                        runner(db, operation)
+                    except Exception as e:  # noqa: BLE001 兜底：绝不让线程静默崩溃
+                        db.rollback()
+                        log.exception("AI 后台任务异常 operation=%s type=%s",
+                                      operation["id"], operation.get("operation_type"))
+                        try:
+                            self._finish_operation(operation, "failed", str(e))
+                        except Exception:
+                            log.exception("标记 AI 任务失败时再次出错 operation=%s", operation["id"])
+                    finally:
+                        self._close_db()
         finally:
             self._discard(key)
 

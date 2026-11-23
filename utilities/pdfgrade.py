@@ -12,10 +12,12 @@ import logging
 import math
 import os
 import re
+import time
 
 import pypdfium2 as pdfium
 
 from . import llm
+from .pdfium_runtime import PDFIUM_LOCK, close_pdfium_resource
 
 log = logging.getLogger("gradelogy.pdfgrade")
 
@@ -127,55 +129,79 @@ def _render_pdf_pages(path, label, pages=None):
     减少发给模型的图片数量与 token 消耗。
     """
     parts = []
-    try:
-        doc = pdfium.PdfDocument(path)
-    except Exception as e:
-        log.exception("_render_pdf_pages: pdfium 打开失败 path=%s label=%s", path, label)
-        return None, f"{label}PDF 读取失败：{e}"
-    try:
-        total = len(doc)
-        if pages:
-            picked = sorted({p for p in pages if 1 <= p <= total})
-            if not picked:
-                return None, f"{label}未选择有效页码（共 {total} 页）"
-        else:
-            picked = list(range(1, total + 1))
-        if len(picked) > MAX_PAGES:
-            return None, f"{label}选中的 {len(picked)} 页超过 {MAX_PAGES} 页上限，请减少页数后再批阅"
-        for n in picked:
-            bitmap = doc[n - 1].render(scale=RENDER_SCALE)
-            img = bitmap.to_pil().convert("RGB")
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=JPEG_QUALITY)
-            parts.append(_image_part("image/jpeg", buf.getvalue()))
-            bitmap.close()
-    except Exception as e:
-        log.exception("_render_pdf_pages: 渲染失败 path=%s label=%s", path, label)
-        return None, f"{label}PDF 渲染失败：{e}"
-    finally:
-        doc.close()
+    # PDFium is native code and these paths can be entered concurrently by web
+    # requests and AI/background workers. Lock the complete document lifetime,
+    # not just PdfDocument construction.
+    with PDFIUM_LOCK:
+        try:
+            doc = pdfium.PdfDocument(path)
+        except Exception:
+            log.exception("_render_pdf_pages: pdfium 打开失败 path=%s label=%s", path, label)
+            return None, f"{label}PDF 暂时无法读取，请稍后重试；若持续失败请联系管理员。"
+        try:
+            total = len(doc)
+            if pages:
+                picked = sorted({p for p in pages if 1 <= p <= total})
+                if not picked:
+                    return None, f"{label}未选择有效页码（共 {total} 页）"
+            else:
+                picked = list(range(1, total + 1))
+            if len(picked) > MAX_PAGES:
+                return None, f"{label}选中的 {len(picked)} 页超过 {MAX_PAGES} 页上限，请减少页数后再批阅"
+            for n in picked:
+                bitmap = None
+                try:
+                    bitmap = doc[n - 1].render(scale=RENDER_SCALE)
+                    img = bitmap.to_pil().convert("RGB")
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG", quality=JPEG_QUALITY)
+                    parts.append(_image_part("image/jpeg", buf.getvalue()))
+                finally:
+                    close_pdfium_resource(bitmap, "bitmap", path)
+        except Exception:
+            log.exception("_render_pdf_pages: 渲染失败 path=%s label=%s", path, label)
+            return None, f"{label}PDF 页面暂时无法渲染，请稍后重试；若持续失败请联系管理员。"
+        finally:
+            close_pdfium_resource(doc, "document", path)
     log.info("_render_pdf_pages: 渲染完成 path=%s label=%s 页数=%d", path, label, len(parts))
     return parts, ""
 
 
 def pdf_page_count(path):
-    """返回 PDF 页数；非 PDF 或读取失败返回 0。"""
+    """返回 PDF 页数；非 PDF 或连续读取失败返回 0。
+
+    PDFium 偶发的底层打开失败会在串行化后短暂重试一次；完整异常仅写入
+    服务日志，避免把原生库错误直接作为用户提示。
+    """
     if not path or not os.path.exists(path):
         log.warning("pdf_page_count: 文件不存在 path=%s", path)
         return 0
     if os.path.splitext(path)[1].lower() != ".pdf":
         log.warning("pdf_page_count: 非 PDF 文件 path=%s", path)
         return 0
-    try:
-        doc = pdfium.PdfDocument(path)
+    last_error = None
+    for attempt in range(2):
         try:
-            return len(doc)
-        finally:
-            doc.close()
-    except Exception:
-        log.exception("pdf_page_count: pdfium 读取失败 path=%s size=%d",
-                      path, os.path.getsize(path))
-        return 0
+            with PDFIUM_LOCK:
+                doc = pdfium.PdfDocument(path)
+                try:
+                    return len(doc)
+                finally:
+                    close_pdfium_resource(doc, "document", path)
+        except Exception as exc:
+            last_error = exc
+            if attempt == 0:
+                log.warning("pdf_page_count: PDFium 打开失败，短暂重试 path=%s error=%s",
+                            path, exc)
+                time.sleep(0.05)
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        size = -1
+    log.error("pdf_page_count: PDFium 重试后仍读取失败 path=%s size=%d error=%s",
+              path, size, last_error, exc_info=(type(last_error), last_error,
+                                                last_error.__traceback__))
+    return 0
 
 
 def render_page_jpeg(path, page_no, scale=0.9, quality=65, box=None):
@@ -187,37 +213,39 @@ def render_page_jpeg(path, page_no, scale=0.9, quality=65, box=None):
     if not path or not os.path.exists(path) or page_no < 1:
         log.warning("render_page_jpeg: 文件不存在或页码非法 path=%s page=%s", path, page_no)
         return None
-    try:
-        doc = pdfium.PdfDocument(path)
-    except Exception:
-        log.exception("render_page_jpeg: pdfium 打开失败 path=%s", path)
-        return None
-    try:
-        if page_no > len(doc):
+    with PDFIUM_LOCK:
+        try:
+            doc = pdfium.PdfDocument(path)
+        except Exception:
+            log.exception("render_page_jpeg: pdfium 打开失败 path=%s page=%s", path, page_no)
             return None
-        bitmap = doc[page_no - 1].render(scale=scale)
-        img = bitmap.to_pil().convert("RGB")
-        if box and isinstance(box, (list, tuple)) and len(box) == 4:
-            try:
-                x, y, w, h = [float(v) for v in box]
-                W, H = img.size
-                left = max(0, int(round(x * W)))
-                top = max(0, int(round(y * H)))
-                right = min(W, int(round((x + w) * W)))
-                bottom = min(H, int(round((y + h) * H)))
-                if right > left and bottom > top:
-                    img = img.crop((left, top, right, bottom))
-            except (TypeError, ValueError):
-                pass
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=quality)
-        bitmap.close()
-        return buf.getvalue()
-    except Exception:
-        log.exception("render_page_jpeg: 渲染失败 path=%s page=%s", path, page_no)
-        return None
-    finally:
-        doc.close()
+        bitmap = None
+        try:
+            if page_no > len(doc):
+                return None
+            bitmap = doc[page_no - 1].render(scale=scale)
+            img = bitmap.to_pil().convert("RGB")
+            if box and isinstance(box, (list, tuple)) and len(box) == 4:
+                try:
+                    x, y, w, h = [float(v) for v in box]
+                    W, H = img.size
+                    left = max(0, int(round(x * W)))
+                    top = max(0, int(round(y * H)))
+                    right = min(W, int(round((x + w) * W)))
+                    bottom = min(H, int(round((y + h) * H)))
+                    if right > left and bottom > top:
+                        img = img.crop((left, top, right, bottom))
+                except (TypeError, ValueError):
+                    pass
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=quality)
+            return buf.getvalue()
+        except Exception:
+            log.exception("render_page_jpeg: 渲染失败 path=%s page=%s", path, page_no)
+            return None
+        finally:
+            close_pdfium_resource(bitmap, "bitmap", path)
+            close_pdfium_resource(doc, "document", path)
 
 
 def _file_parts(path, label, pages=None):
@@ -819,39 +847,65 @@ TAG_HORIZONTAL_OUTPUT_CONTRACT = (
 TAG_HORIZONTAL_PROMPT = DEFAULT_TAG_HORIZONTAL_PROMPT + "\n\n" + TAG_HORIZONTAL_OUTPUT_CONTRACT
 
 DEFAULT_TAG_VERTICAL_PROMPT = (
-    "你是资深的个性化学习规划师与学情诊断专家。现在需要结合某位学生近 {lecture_count} 讲的"
-    "累计作业表现及知识图谱关联数据，为其生成一份《阶段性学情诊断与提分方案》。\n\n"
+    "你是资深的个性化学习规划师与学情诊断专家。请基于某位学生近 {lecture_count} 讲的"
+    "作业表现，为其生成一份有证据、可复核的《纵向学习特征与阶段诊断》。\n\n"
     "### 输入数据\n"
     "- 学科与课程：{subject_and_course}\n"
     "- 学生姓名：{student_name}\n"
     "- 覆盖讲次范围：{lecture_range}\n"
-    "- 各知识模块累计掌握度统计：{module_mastery_stats}\n"
-    "- 知识图谱诊断出的“跨讲次关联薄弱链”（前置基础知识点 -> 衍生错题知识点）："
+    "- 各知识模块累计掌握度、逐讲次表现及错题摘录：{module_mastery_stats}\n"
+    "- 知识图谱诊断出的“跨讲次关联薄弱链”（含实际错题讲次证据、图谱前置/后续节点及节点间关系）："
     "{kg_weakness_chains}\n"
     "- 高频错误类型与作答习惯统计：{error_habit_stats}\n"
     "- 近期表现与早期表现对比趋势：{trend_data}\n\n"
     "### 红线与要求\n"
-    "1. **数据支撑，严禁空谈**：所有诊断结论必须有输入数据、知识模块名称或具体讲次题号作为支撑，"
-    "严禁脱离事实写泛泛而谈的套话。\n"
-    "2. **穿透表象找根因**：不要只罗列学生做错了哪些题。必须结合“跨讲次关联薄弱链”，"
-    "向学生解释清楚后续综合题卡壳的底层前置知识漏洞。\n"
-    "3. **区分“知识漏洞”与“作答习惯”**：明确剥离“核心原理/方法未掌握”导致的硬性失分，"
-    "与“审题遗漏、格式不规范、计算粗心、未作答”导致的习惯性失分。\n"
-    "4. **语气与激励**：保持客观、专业且富有建设性的鼓励语气，保护学生学习信心。\n"
-    "5. **化学式/数学式**：涉及化学式、离子式、数学式时用轻量 LaTeX，"
+    "1. **数据支撑，严禁空谈**：所有判断必须引用具体讲次、错/半对次数或知识点；区分数据事实与推测，"
+    "数据不足就明确写‘暂不能判断’，不能编造学习心理、能力或因果。\n"
+    "2. **深挖跨讲次学习特征**：比较早期与近期趋势、同一知识点是否反复失分、基础题与综合应用是否分化、"
+    "掌握后是否迁移、是否出现波动或稳定进步。提出值得继续追踪的问题，不把一次失误概括成稳定特征。\n"
+    "3. **真正使用知识图谱**：把图谱关系与重复错题的讲次证据逐项对齐，说明‘前置知识 → 后续薄弱点’"
+    "的关系、分别在哪些讲次出现及可能影响；图谱链只表示课程知识依赖，不足以单独证明学生的因果。"
+    "若无可匹配节点或关系，明确说明，禁止虚构关联。\n"
+    "4. **区分知识漏洞与作答习惯**：分开分析原理/方法掌握、跨题迁移、审题、单位格式、计算、空白等，"
+    "习惯判断必须有多次评语或作业证据。\n"
+    "5. **建议可验证**：给出按先基础后迁移的下一步练习，并说明用什么表现判断补救有效。语气客观、鼓励。\n"
+    "6. **化学式/数学式**：涉及化学式、离子式、数学式时用轻量 LaTeX，"
     "用一对 $ 包裹，例如 $\\mathrm{CO_3^{2-}}$、$\\mathrm{SO_4^{2-}}$、$2e^-$；纯文字不要加 $。"
 )
 
 TAG_VERTICAL_OUTPUT_CONTRACT = (
+    "### 必须执行的分析规则\n"
+    "- 必须识别具体的跨讲次表现模式（趋势、波动、重复失分、知识迁移、基础与综合题表现差异），并提供讲次/题目数据证据；"
+    "数据不足时明确写不足，不把单次错误定性为稳定特征。\n"
+    "- 必须逐项核对知识图谱中的真实前置/后续关系与学生在对应知识点上的讲次证据；"
+    "图谱依赖只能作为解释线索，不能直接断言因果；无匹配关系时不得编造。\n"
+    "- 结论中区分已观察事实、可能解释与待核查问题；建议应能用后续作业表现验证。\n"
     "### 输出格式（严格输出合法 JSON）\n"
     "{\n"
+    '  "learning_profile": "基于证据的总体学习画像（不超过100字；没有证据时明确说明）",\n'
+    '  "cross_lecture_patterns": [\n'
+    "    {\n"
+    '      "pattern": "可观察的跨讲次学习特征",\n'
+    '      "evidence": "具体讲次、知识点及错/半对/正确数据",\n'
+    '      "interpretation": "谨慎解释该模式可能反映什么；区分事实与推测",\n'
+    '      "follow_up": "值得继续核查的问题或下一次作业观察点"\n'
+    "    }\n"
+    "  ],\n"
+    '  "knowledge_graph_insights": [\n'
+    "    {\n"
+    '      "relation": "前置知识 -> 重复薄弱知识点（图谱关系）",\n'
+    '      "evidence": "两端知识点分别在哪些讲次出现错/半对",\n'
+    '      "interpretation": "这条关系如何帮助解释重复失分；不能把图谱依赖直接写成因果"\n'
+    "    }\n"
+    "  ],\n"
     '  "progress_highlights": [\n'
     '    "肯定学生近期掌握较好或进步明显的知识模块/作答习惯（1-2条，每条不超过60字）"\n'
     "  ],\n"
     '  "root_cause_diagnosis": [\n'
     "    {\n"
     '      "weakness_chain": "前置知识点 -> 关联薄弱知识点",\n'
-    '      "analysis": "结合具体错题表现，剖析知识断层的根本原因（不超过100字）"\n'
+    '      "analysis": "结合具体错题表现，剖析可能的知识断层（不超过100字）",\n'
+    '      "evidence": "具体讲次与错题证据"\n'
     "    }\n"
     "  ],\n"
     '  "habit_alerts": [\n'
@@ -957,11 +1011,19 @@ def ai_vertical_analysis(context, api_url, api_key, model,
     highlights = _str_list(data.get("progress_highlights"), 2)
     root_cause = [r for r in (data.get("root_cause_diagnosis") or [])
                   if isinstance(r, dict)][:6]
+    patterns = [r for r in (data.get("cross_lecture_patterns") or [])
+                if isinstance(r, dict)][:6]
+    graph_insights = [r for r in (data.get("knowledge_graph_insights") or [])
+                      if isinstance(r, dict)][:8]
     habits = _str_list(data.get("habit_alerts"), 5)
     plan = _str_list(data.get("action_plan"), 3)
-    if not highlights and not root_cause and not habits and not plan:
+    profile = str(data.get("learning_profile") or "").strip()
+    if not profile and not highlights and not root_cause and not patterns and not habits and not plan:
         return {}
-    return {"progress_highlights": highlights, "root_cause_diagnosis": root_cause,
+    return {"learning_profile": profile,
+            "cross_lecture_patterns": patterns,
+            "knowledge_graph_insights": graph_insights,
+            "progress_highlights": highlights, "root_cause_diagnosis": root_cause,
             "habit_alerts": habits, "action_plan": plan}
 
 

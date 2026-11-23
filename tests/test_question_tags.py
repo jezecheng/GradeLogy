@@ -99,6 +99,8 @@ class TagStatsTest(unittest.TestCase):
         self.assertEqual(redox["n_wrong"], 2)
         self.assertEqual(redox["mastery"], 0.0)
         self.assertEqual(redox["n_lectures"], 2)
+        self.assertEqual([e["lecture"] for e in redox["lecture_results"]],
+                         ["第一讲", "第二讲"])
         self.assertEqual([e["lecture"] for e in redox["episodes"]],
                          ["第一讲", "第二讲"])
 
@@ -142,6 +144,8 @@ class TagStatsTest(unittest.TestCase):
         self.assertIn("电子守恒没掌握", vertical)
         self.assertIn("漏写单位", vertical)
         self.assertIn("复习电子守恒", vertical)
+        self.assertIn("各讲次表现趋势", vertical)
+        self.assertIn("值得深挖的跨讲次学习特征", vertical)
 
     def test_lecture_stats_empty_when_no_tags(self):
         self.assertEqual(tags.lecture_stats(self.con, 999), [])
@@ -391,6 +395,14 @@ class TagAITest(unittest.TestCase):
 
     def test_vertical_analysis_parses_diagnosis(self):
         reply = json.dumps({
+            "learning_profile": "近期计算稳定，但前置概念应用仍反复失分。",
+            "cross_lecture_patterns": [{"pattern": "前置概念迁移不稳",
+                                        "evidence": "第一讲与第二讲均有半对",
+                                        "interpretation": "可能是迁移不熟",
+                                        "follow_up": "观察新情境题"}],
+            "knowledge_graph_insights": [{"relation": "氧化还原 -> 电化学",
+                                           "evidence": "两讲均有错题",
+                                           "interpretation": "图谱关系不是因果证明"}],
             "progress_highlights": ["计算较稳定"],
             "root_cause_diagnosis": [{"weakness_chain": "氧化还原 -> 电化学",
                                       "analysis": "电子守恒未掌握"}],
@@ -402,6 +414,9 @@ class TagAITest(unittest.TestCase):
         with mock.patch.object(pdfgrade.llm, "chat",
                                return_value=(reply, "stop", "")):
             result = pdfgrade.ai_vertical_analysis(context, "u", "k", "m")
+        self.assertIn("近期计算稳定", result["learning_profile"])
+        self.assertEqual(result["cross_lecture_patterns"][0]["pattern"], "前置概念迁移不稳")
+        self.assertEqual(result["knowledge_graph_insights"][0]["relation"], "氧化还原 -> 电化学")
         self.assertEqual(result["progress_highlights"], ["计算较稳定"])
         self.assertEqual(result["root_cause_diagnosis"][0]["weakness_chain"],
                          "氧化还原 -> 电化学")

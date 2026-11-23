@@ -754,9 +754,18 @@ button.btn-link:hover { text-decoration: underline; }
 .log-note { margin: 10px 0 0; }
 
 .lecture-summary-body h1, .lecture-summary-body h2 { font-size: 16px; margin: 10px 0 4px; }
+.lecture-summary-body h3 { font-size: 14px; margin: 10px 0 4px; }
 .lecture-summary-body p, .lecture-summary-body li { font-size: 14px; line-height: 1.65; }
 .lecture-summary-body ul { margin-left: 20px; margin-bottom: 8px; }
 .lecture-summary-body ul li { margin-bottom: 2px; }
+.lecture-summary-body table.report-table { width: 100%; margin: 8px 0 12px; table-layout: fixed; }
+.lecture-summary-body table.report-table th, .lecture-summary-body table.report-table td {
+  min-width: 0; padding: 5px 6px; font-size: 12px; vertical-align: top;
+  overflow-wrap: anywhere; word-break: normal;
+}
+@media (max-width: 640px) {
+  .lecture-summary-body table.report-table { display: block; overflow-x: auto; white-space: nowrap; }
+}
 
 /* 数字助手（管理员/老师/学生共用）：右下角悬浮按钮 + 折叠面板 */
 .assistant-fab { position: fixed; right: 24px; bottom: 24px; width: 54px; height: 54px;

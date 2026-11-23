@@ -60,7 +60,7 @@ EXPOSE 5000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/healthz').status==200 else 1)"
 
-# 单进程多线程：SQLite 写入不跨进程，长批改也不会被 worker 超时杀掉
+# 单进程多线程：后台 AI/PDF 任务共用执行锁，同一进程同一时刻只执行一个后台 AI 任务；SQLite 写入不跨进程
 # 批阅单次上限 300 秒，worker 超时留一倍余量即可
 CMD ["gunicorn", "-w", "1", "--threads", "8", "--timeout", "600", \
      "-b", "0.0.0.0:5000", "--access-logfile", "-", "wsgi:app"]

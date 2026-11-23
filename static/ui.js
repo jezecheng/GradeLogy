@@ -6,6 +6,7 @@
     btn.dataset.busy = '1';
     btn.dataset.label = btn.textContent;
     btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
     btn.classList.add('is-busy');
     btn.innerHTML = '<span class="spinner" aria-hidden="true"></span>' + (label || '处理中…');
   };
@@ -13,11 +14,61 @@
   window.busyOff = function (btn) {
     if (!btn || btn.dataset.busy !== '1') return;
     btn.disabled = false;
+    btn.removeAttribute('aria-busy');
     btn.classList.remove('is-busy');
     btn.textContent = btn.dataset.label || '';
     delete btn.dataset.busy;
     delete btn.dataset.label;
   };
+
+  // Queue-backed AI forms enter the same visible busy state whether the task
+  // starts immediately or waits behind another background job.
+  document.addEventListener('submit', function (event) {
+    var form = event.target;
+    var btn = event.submitter || form.querySelector('button[type="submit"],button:not([type])');
+    if (event.defaultPrevented || !form || !form.matches ||
+        (!form.matches('[data-ai-queue-form], [data-ai-submit-form]') &&
+         !(btn && btn.dataset.aiBusyLabel))) return;
+    window.busyOn(btn, (btn && btn.dataset.aiBusyLabel) || form.dataset.aiBusyLabel || '生成中…');
+  });
+
+  var reloadScheduled = false;
+  function pollQueuedForm(form) {
+    var operationId = form.dataset.aiOperationId;
+    var statusUrl = form.dataset.aiStatusUrl;
+    if (!operationId || !statusUrl) return;
+    var stopped = false;
+    var busy = false;
+    function poll() {
+      if (stopped || busy || !document.documentElement.contains(form)) return;
+      if (document.hidden) {
+        window.setTimeout(poll, 1800);
+        return;
+      }
+      busy = true;
+      fetch(statusUrl, { headers: { 'Accept': 'application/json' }, cache: 'no-store' })
+        .then(function (response) {
+          if (!response.ok) throw new Error('状态查询失败');
+          return response.json();
+        })
+        .then(function (data) {
+          if (data.status === 'queued' || data.status === 'running') {
+            window.setTimeout(poll, 1800);
+            return;
+          }
+          stopped = true;
+          if (!reloadScheduled) {
+            reloadScheduled = true;
+            window.location.reload();
+          }
+        })
+        .catch(function () { window.setTimeout(poll, 2500); })
+        .finally(function () { busy = false; });
+    }
+    poll();
+  }
+  document.querySelectorAll('[data-ai-operation-id][data-ai-status-url]')
+    .forEach(pollQueuedForm);
 
   // 确认弹窗：返回 Promise<boolean>，确认才继续
   window.confirmDialog = function (message, okText, title) {

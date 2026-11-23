@@ -4,6 +4,8 @@ import re
 
 import pypdfium2 as pdfium
 
+from .pdfium_runtime import PDFIUM_LOCK, close_pdfium_resource
+
 KG_EXTENSIONS = (".pdf", ".md", ".markdown", ".txt")
 # 单份资料最多送入模型的正文字数，避免整本教材一次耗尽额度
 MAX_MATERIAL_CHARS = 120000
@@ -25,18 +27,21 @@ def extract_pages(path):
 
 def _extract_pdf_pages(path):
     pages = []
-    doc = pdfium.PdfDocument(path)
-    try:
-        for index in range(len(doc)):
-            page = doc[index]
-            textpage = page.get_textpage()
-            try:
-                text = textpage.get_text_range() or ""
-            finally:
-                textpage.close()
-            pages.append((index + 1, text))
-    finally:
-        doc.close()
+    # Text extraction can run in a background worker while teachers are
+    # rendering/counting PDFs in request threads; share the same PDFium lock.
+    with PDFIUM_LOCK:
+        doc = pdfium.PdfDocument(path)
+        try:
+            for index in range(len(doc)):
+                page = doc[index]
+                textpage = page.get_textpage()
+                try:
+                    text = textpage.get_text_range() or ""
+                finally:
+                    close_pdfium_resource(textpage, "textpage", path)
+                pages.append((index + 1, text))
+        finally:
+            close_pdfium_resource(doc, "document", path)
     return pages
 
 
