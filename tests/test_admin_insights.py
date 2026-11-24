@@ -827,8 +827,63 @@ class ApiKeyManagementTest(unittest.TestCase):
         self.assertNotIn("sk-secret-abcdef", html)
         self.assertGreater(html.find("AI API 配置"), -1)
         self.assertLess(html.find("AI API 配置"), html.find("常用批阅设置"))
+        self.assertIn("编辑配置", html)
+        self.assertIn('name="api_key" type="password" autocomplete="new-password"', html)
+        self.assertIn("留空则保留当前 Key", html)
+        self.assertNotIn('name="api_key" type="password" value=', html)
         # 模型改为在每套 API 配置里单独指定，页面不再保留全局模型选择器
         self.assertNotIn('name="ai_model_select"', html)
+
+    def test_edit_config_preserves_key_and_syncs_active_settings(self):
+        self.post("/settings/api-keys/add", name="原配置", base_url="https://ai.one/v1",
+                  api_key="sk-original-secret", model="model-old", use_now="1")
+        rows, _ = self.keys()
+
+        self.post(f"/settings/api-keys/{rows[0]['id']}/edit", name="新名称",
+                  base_url="https://ai.updated/v1", model="model-new", api_key="")
+
+        rows, active_key = self.keys()
+        self.assertEqual(rows[0]["name"], "新名称")
+        self.assertEqual(rows[0]["base_url"], "https://ai.updated/v1")
+        self.assertEqual(rows[0]["model"], "model-new")
+        self.assertEqual(rows[0]["api_key"], "sk-original-secret")
+        self.assertEqual(active_key, "sk-original-secret")
+        with app_module.app.test_request_context("/"):
+            self.assertEqual(app_module.get_setting(2, "ai_api_url"), "https://ai.updated/v1")
+            self.assertEqual(app_module.get_setting(2, "ai_api_key"), "sk-original-secret")
+            self.assertEqual(app_module.get_setting(2, "ai_model"), "model-new")
+
+    def test_edit_config_replaces_key_only_when_new_key_is_provided(self):
+        self.post("/settings/api-keys/add", name="主账号", base_url="https://ai.one/v1",
+                  api_key="sk-original-secret", model="model-old", use_now="1")
+        rows, _ = self.keys()
+
+        self.post(f"/settings/api-keys/{rows[0]['id']}/edit", name="主账号",
+                  base_url="https://ai.one/v1", model="model-new",
+                  api_key="sk-replacement-secret")
+
+        rows, active_key = self.keys()
+        self.assertEqual(rows[0]["api_key"], "sk-replacement-secret")
+        self.assertEqual(active_key, "sk-replacement-secret")
+
+    def test_other_teachers_cannot_edit_api_config(self):
+        con = sqlite3.connect(app_module.DB_PATH)
+        cur = con.execute(
+            "INSERT INTO ai_api_keys(teacher_id,name,base_url,api_key,is_active) "
+            "VALUES(3,'别人','https://ai.one/v1','sk-other',0)")
+        other_key_id = cur.lastrowid
+        con.commit()
+        con.close()
+
+        self.post(f"/settings/api-keys/{other_key_id}/edit", name="被篡改",
+                  base_url="https://attacker.example/v1", model="other",
+                  api_key="sk-stolen")
+
+        con = sqlite3.connect(app_module.DB_PATH)
+        row = con.execute(
+            "SELECT name,base_url,api_key FROM ai_api_keys WHERE teacher_id=3").fetchone()
+        con.close()
+        self.assertEqual(row, ("别人", "https://ai.one/v1", "sk-other"))
 
     def test_invalid_key_is_rejected(self):
         self.post("/settings/api-keys/add", name="坏地址", base_url="ftp://nope",

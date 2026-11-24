@@ -101,13 +101,30 @@
 {% for k in api_keys %}<details class="api-key-card" {% if k.is_active %}open{% endif %}>
 <summary><strong>{{ k.name }}</strong><span>{{ '当前使用' if k.is_active else '未启用' }}</span><span class="muted small">{{ k.model or '未选择模型' }}</span></summary>
 <div class="api-key-config"><p class="muted small">{{ k.base_url }} · Key {{ k.masked_key }}</p>
-          <form method="post" action="{{ url_for('settings_api_key_model', key_id=k.id) }}"
-                class="model-inline">
-            <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-            <input aria-label="模型名称" name="model" value="{{ k.model }}" maxlength="120"
-                   placeholder="填写该入口的模型">
-            <button type="submit" class="ghost small">保存</button>
-          </form>
+          <details class="api-key-edit-fold">
+            <summary>编辑配置</summary>
+            <form method="post" action="{{ url_for('settings_api_key_edit', key_id=k.id) }}"
+                  class="stack-form api-key-edit">
+              <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+              <label>名称
+                <input name="name" value="{{ k.name }}" maxlength="60" required>
+              </label>
+              <label>接口基地址
+                <input name="base_url" value="{{ k.base_url }}" maxlength="500" required>
+              </label>
+              <label>模型
+                <input name="model" value="{{ k.model }}" maxlength="120"
+                       placeholder="填写该入口的模型">
+              </label>
+              <label>替换 API Key（可选）
+                <input name="api_key" type="password" autocomplete="new-password"
+                       autocapitalize="off" spellcheck="false"
+                       placeholder="留空则保留当前 Key">
+              </label>
+              <p class="muted small">出于安全考虑，已保存的 Key 不会显示或填入此表单。只有输入新 Key 才会替换。</p>
+              <button type="submit" class="ghost small">保存配置</button>
+            </form>
+          </details>
         </div><div class="api-key-actions">
           {% if k.is_active %}<span class="tag-chip ok">当前使用</span>
           {% else %}<span class="muted small">未启用</span>{% endif %}

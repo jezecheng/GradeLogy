@@ -503,6 +503,55 @@ def register(registry, deps):
         flash("已保存 API Key")
         return redirect(url_for("settings_page"))
 
+    @registry.route("/settings/api-keys/<int:key_id>/edit", methods=["POST"])
+    @role_required("teacher")
+    def settings_api_key_edit(key_id):
+        """编辑已保存的配置；旧 API Key 不回传，留空时保持原 Key 不变。"""
+        if env_ai_settings.get("ai_api_key"):
+            flash("API Key 已由环境变量注入，页面上的 Key 管理不会生效")
+            return redirect(url_for("settings_page"))
+
+        name = (request.form.get("name") or "").strip()[:60] or "未命名 Key"
+        base_url = (request.form.get("base_url") or "").strip().rstrip("/")
+        model = (request.form.get("model") or "").strip()[:120]
+        replacement_key = (request.form.get("api_key") or "").strip()
+        if not _valid_api_base_url(base_url):
+            flash("接口基地址需要以 http:// 或 https:// 开头")
+            return redirect(url_for("settings_page"))
+        if model and not _valid_model_name(model):
+            flash("模型名称只能包含英文字母、数字、点、下划线、斜线、连字符或冒号")
+            return redirect(url_for("settings_page"))
+
+        db = get_db()
+        row = db.execute(
+            "SELECT is_active,api_key FROM ai_api_keys WHERE id=? AND teacher_id=?",
+            (key_id, g.user["id"])).fetchone()
+        if row is None:
+            flash("未找到该 API Key")
+            return redirect(url_for("settings_page"))
+
+        # 不把现有密钥放入表单或响应；仅在用户提供新值时更新。
+        if replacement_key:
+            db.execute(
+                "UPDATE ai_api_keys SET name=?,base_url=?,model=?,api_key=?,"
+                "updated_at=CURRENT_TIMESTAMP WHERE id=? AND teacher_id=?",
+                (name, base_url, model, replacement_key, key_id, g.user["id"]))
+        else:
+            db.execute(
+                "UPDATE ai_api_keys SET name=?,base_url=?,model=?,"
+                "updated_at=CURRENT_TIMESTAMP WHERE id=? AND teacher_id=?",
+                (name, base_url, model, key_id, g.user["id"]))
+
+        if row["is_active"]:
+            save_setting(g.user["id"], "ai_api_url", base_url)
+            save_setting(g.user["id"], "ai_api_key",
+                         replacement_key or row["api_key"])
+            if not env_ai_settings.get("ai_model"):
+                save_setting(g.user["id"], "ai_model", model)
+        db.commit()
+        flash("配置已更新；未填写新 API Key 时保留原 Key")
+        return redirect(url_for("settings_page"))
+
     @registry.route("/settings/api-keys/<int:key_id>/activate", methods=["POST"])
     @role_required("teacher")
     def settings_api_key_activate(key_id):

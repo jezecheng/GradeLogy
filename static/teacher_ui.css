@@ -86,9 +86,10 @@
 .settings-workspace .api-key-card { padding: 14px 0; border-top: 1px solid var(--ui-border); }
 .api-key-card summary { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-height: 44px; cursor: pointer; }
 .api-key-card .api-key-config { padding: 12px 0; }
+.api-key-edit-fold { margin-top: 10px; }
+.api-key-edit-fold > summary { display: inline-flex; min-height: 36px; }
+.settings-workspace .api-key-edit { max-width: 560px; margin-top: 12px; }
 .api-key-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
-.settings-workspace .model-inline { display: flex; align-items: end; gap: 8px; }
-.settings-workspace .model-inline label { flex: 1; min-width: 0; }
 .prompt-workspace .prompt-item[open] { background: #f9fbff; border-radius: 8px; padding: 0 12px; }
 .prompt-workspace .prompt-body { max-width: 960px; }
 .ui-dirty-hint { color: #a65c00; font-size: 13px; }
