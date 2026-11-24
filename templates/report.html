@@ -23,15 +23,15 @@
            {{ '撤回发布' if sub.report_published else '一键发布给学生' }}</button>
       </form>
       <a class="report-download-button" href="{{ url_for('submission_report_download', sid=sub.id) }}">下载 .md</a>
-       <button type="button" class="report-download-button" id="download-report-pdf"
-              data-filename="{{ student_name }}_{{ hw.title }}_批阅报告.pdf">
-        <span class="report-pdf-spinner" id="report-pdf-button-spinner" aria-hidden="true" hidden></span>
-        <span data-pdf-button-label>下载 PDF</span>
-      </button>
-      <span class="report-pdf-progress" id="report-pdf-progress" role="status"
-            aria-live="polite" hidden>
-        <span class="report-pdf-spinner" aria-hidden="true"></span>正在按页面显示效果生成 PDF…
-      </span>
+       <button type="button" class="report-download-button" id="download-report-image"
+               data-filename="{{ student_name }}_{{ hw.title }}_批阅报告.png">
+        <span class="report-image-spinner" id="report-image-button-spinner" aria-hidden="true" hidden></span>
+        <span data-image-button-label>下载长图 PNG</span>
+       </button>
+       <span class="report-image-progress" id="report-image-progress" role="status"
+             aria-live="polite" hidden>
+         <span class="report-image-spinner" aria-hidden="true"></span>正在生成高清长图…
+       </span>
       {% endif %}
     </div>
     {% endif %}
@@ -101,16 +101,15 @@
 
 {% if is_teacher %}
 <script src="{{ url_for('static', filename='vendor/html2canvas/html2canvas.min.js') }}"></script>
-<script src="{{ url_for('static', filename='vendor/jspdf/jspdf.umd.min.js') }}"></script>
 <script>
 // 重新生成报告：已有内容时先确认覆盖，提交后按钮显示小圆环并禁用
 (function () {
-  var pdfButton = document.getElementById('download-report-pdf');
-  var pdfProgress = document.getElementById('report-pdf-progress');
-  var pdfButtonLabel = pdfButton && pdfButton.querySelector('[data-pdf-button-label]');
-  var pdfButtonSpinner = document.getElementById('report-pdf-button-spinner');
-  if (pdfButton && pdfProgress) {
-    var buttonLabel = pdfButtonLabel ? pdfButtonLabel.textContent : '下载 PDF';
+  var imageButton = document.getElementById('download-report-image');
+  var imageProgress = document.getElementById('report-image-progress');
+  var imageButtonLabel = imageButton && imageButton.querySelector('[data-image-button-label]');
+  var imageButtonSpinner = document.getElementById('report-image-button-spinner');
+  if (imageButton && imageProgress) {
+    var buttonLabel = imageButtonLabel ? imageButtonLabel.textContent : '下载长图 PNG';
     function nextFrame() {
       return new Promise(function (resolve) {
         window.requestAnimationFrame(function () {
@@ -134,83 +133,56 @@
         })();
       });
     }
-    function canvasSlice(source, top, height) {
-      var slice = document.createElement('canvas');
-      slice.width = source.width;
-      slice.height = height;
-      slice.getContext('2d').drawImage(source, 0, top, source.width, height,
-                                       0, 0, slice.width, slice.height);
-      return slice;
-    }
-    function pageBreaks(target, canvas, maxHeight) {
-      var rect = target.getBoundingClientRect();
-      var scaleY = canvas.height / Math.max(1, rect.height);
-      var candidates = Array.from(target.querySelectorAll(
-        '.report-body h1, .report-body h2, .report-body h3, .report-body p, '
-        + '.report-body li, .report-body tr, .report-body blockquote'
-      )).map(function (element) {
-        return (element.getBoundingClientRect().bottom - rect.top) * scaleY;
-      }).filter(function (bottom) {
-        return Number.isFinite(bottom) && bottom > 0 && bottom < canvas.height;
-      }).sort(function (a, b) { return a - b; });
-      // 永远以完整内容块的边界分页；最后一页边界也纳入，不能退回固定高度硬切。
-      candidates.push(canvas.height);
-
-      var breaks = [];
-      var top = 0;
-      while (top < canvas.height) {
-        var ideal = Math.min(canvas.height, top + maxHeight);
-        var nearStart = top + maxHeight * 0.72;
-        var nearEnd = top + maxHeight * 1.12;
-        var before = null;
-        var after = null;
-        var safe = null;
-        var nearest = Infinity;
-        for (var i = 0; i < candidates.length; i += 1) {
-          var boundary = candidates[i];
-          if (boundary <= top + 1) continue;
-          if (boundary < ideal) before = boundary;
-          else if (after === null) after = boundary;
-          if (boundary >= nearStart && boundary <= nearEnd) {
-            var distance = Math.abs(boundary - ideal);
-            if (distance < nearest) {
-              nearest = distance;
-              safe = boundary;
-            }
-          }
+    function canvasToPngBlob(canvas) {
+      return new Promise(function (resolve, reject) {
+        if (typeof canvas.toBlob === 'function') {
+          canvas.toBlob(function (blob) {
+            if (blob) resolve(blob);
+            else reject(new Error('PNG 编码失败'));
+          }, 'image/png');
+          return;
         }
-        // 没有接近页面底部的边界时，优先延后到下一个完整块，不把文字/表格行切成两半。
-        if (safe === null) {
-          if (after !== null && (before === null || after - ideal <= ideal - before)) safe = after;
-          else safe = before !== null ? before : after;
+        try {
+          var dataUrl = canvas.toDataURL('image/png');
+          var binary = atob(dataUrl.split(',')[1]);
+          var bytes = new Uint8Array(binary.length);
+          for (var i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+          resolve(new Blob([bytes], { type: 'image/png' }));
+        } catch (error) {
+          reject(error);
         }
-        var next = safe === null ? canvas.height : Math.round(safe);
-        if (next <= top) next = canvas.height;
-        breaks.push(next);
-        top = next;
-      }
-      return breaks;
+      });
     }
-    pdfButton.addEventListener('click', async function () {
-      if (pdfButton.disabled) return;
+    imageButton.addEventListener('click', async function () {
+      if (imageButton.disabled) return;
       var target = document.getElementById('report-export-content');
-      if (!target || typeof window.html2canvas !== 'function'
-          || !window.jspdf || typeof window.jspdf.jsPDF !== 'function') {
-        alert('PDF 导出组件未能加载，请刷新页面后重试。');
+      if (!target || typeof window.html2canvas !== 'function') {
+        alert('长图导出组件未能加载，请刷新页面后重试。');
         return;
       }
-      pdfButton.disabled = true;
-      if (pdfButtonSpinner) pdfButtonSpinner.hidden = false;
-      if (pdfButtonLabel) pdfButtonLabel.textContent = '生成中…';
-      pdfProgress.hidden = false;
-      target.classList.add('report-pdf-capturing');
+      imageButton.disabled = true;
+      if (imageButtonSpinner) imageButtonSpinner.hidden = false;
+      if (imageButtonLabel) imageButtonLabel.textContent = '生成中…';
+      imageProgress.hidden = false;
+      target.classList.add('report-image-capturing');
       try {
         await waitForMathRenderer();
         if (document.fonts && document.fonts.ready) await document.fonts.ready;
         await nextFrame();
+        // 高 DPI 屏幕优先按 2~3 倍渲染；对超长报告动态降倍率，避免浏览器画布尺寸/内存上限。
+        var bounds = target.getBoundingClientRect();
+        var cssWidth = Math.ceil(Math.max(target.scrollWidth, bounds.width, 1));
+        var cssHeight = Math.ceil(Math.max(target.scrollHeight, bounds.height, 1));
+        var desiredScale = Math.min(3, Math.max(2, window.devicePixelRatio || 1));
+        var scale = Math.max(1, Math.min(
+          desiredScale,
+          30000 / cssWidth,
+          30000 / cssHeight,
+          Math.sqrt(60000000 / (cssWidth * cssHeight))
+        ));
         var canvas = await window.html2canvas(target, {
           backgroundColor: '#ffffff',
-          scale: Math.min(2, Math.max(1.5, window.devicePixelRatio || 1)),
+          scale: scale,
           useCORS: true,
           logging: false,
           windowWidth: document.documentElement.clientWidth,
@@ -219,44 +191,29 @@
           }
         });
         if (!canvas.width || !canvas.height) throw new Error('报告页面没有可导出的内容');
-
-        var jsPDF = window.jspdf.jsPDF;
-        var pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
-        var pageWidth = 210, pageHeight = 297, margin = 8;
-        var contentWidth = pageWidth - margin * 2;
-        var contentHeight = pageHeight - margin * 2;
-        var sliceHeight = Math.max(1, Math.floor(canvas.width * contentHeight / contentWidth));
-        var breaks = pageBreaks(target, canvas, sliceHeight);
-        var top = 0;
-        for (var index = 0; index < breaks.length; index += 1) {
-          if (index) pdf.addPage();
-          var height = breaks[index] - top;
-          var pageCanvas = canvasSlice(canvas, top, height);
-          var image = pageCanvas.toDataURL('image/jpeg', 0.94);
-          var imageScale = Math.min(contentWidth / canvas.width, contentHeight / height);
-          var imageWidth = canvas.width * imageScale;
-          var imageHeight = height * imageScale;
-          var imageX = (pageWidth - imageWidth) / 2;
-          pdf.addImage(image, 'JPEG', imageX, margin, imageWidth, imageHeight, undefined, 'FAST');
-          pageCanvas.width = 0;
-          pageCanvas.height = 0;
-          top = breaks[index];
-        }
-        var filename = (pdfButton.dataset.filename || '批阅报告.pdf')
+        var blob = await canvasToPngBlob(canvas);
+        var filename = (imageButton.dataset.filename || '批阅报告.png')
           .replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '_').replace(/[ ._]+$/g, '');
-        if (!filename) filename = '批阅报告.pdf';
-        pdf.save(filename);
+        if (!filename) filename = '批阅报告.png';
+        var url = URL.createObjectURL(blob);
+        var link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
         canvas.width = 0;
         canvas.height = 0;
       } catch (error) {
-        console.error('批改报告 PDF 导出失败', error);
-        alert('PDF 生成失败，请刷新页面后重试。');
+        console.error('批改报告 PNG 长图导出失败', error);
+        alert('PNG 长图生成失败。报告过长时可适当缩短报告内容后重试。');
       } finally {
-        target.classList.remove('report-pdf-capturing');
-        pdfProgress.hidden = true;
-        if (pdfButtonSpinner) pdfButtonSpinner.hidden = true;
-        pdfButton.disabled = false;
-        if (pdfButtonLabel) pdfButtonLabel.textContent = buttonLabel;
+        target.classList.remove('report-image-capturing');
+        imageProgress.hidden = true;
+        if (imageButtonSpinner) imageButtonSpinner.hidden = true;
+        imageButton.disabled = false;
+        if (imageButtonLabel) imageButtonLabel.textContent = buttonLabel;
       }
     });
   }

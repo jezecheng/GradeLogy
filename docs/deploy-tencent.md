@@ -128,6 +128,7 @@ COOKIE_SECURE=0
 AI_API_URL=
 AI_API_KEY=
 AI_MODEL=
+TEMPORARY_GLOBAL_TEACHER_ACCESS=0
 LOG_LEVEL=INFO
 EOF
 chmod 600 .env
@@ -141,6 +142,8 @@ sudo chown -R 1000:1000 data
 ```
 
 `.env` 和 `data/` 都不会被 Git 跟踪，也不会被打进 Docker 镜像。
+
+`TEMPORARY_GLOBAL_TEACHER_ACCESS=0` 用于恢复老师按课程成员关系、图谱按协作角色授权的隔离模式。该开关在应用默认值中为 `1`，不要在生产实例中省略；设置后教师助手与 MCP 工具也按课程成员范围查询。若出于临时迁移目的需要全局教师访问，应显式设为 `1` 并限制账号和数据使用范围。
 
 ## 5. 首次构建与启动
 

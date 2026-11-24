@@ -428,13 +428,13 @@ details summary { cursor: pointer; color: #1456f0; }
 .report-editor > summary { color: #1456f0; cursor: pointer; font-size: 14px; }
 .report-editor textarea.mono { margin-top: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
                                font-size: 13px; line-height: 1.55; }
-.report-pdf-progress { display: inline-flex; align-items: center; gap: 7px; color: #475467;
-                       font-size: 13px; }
-.report-pdf-progress[hidden], .report-pdf-spinner[hidden] { display: none !important; }
-.report-pdf-spinner { display: inline-block; width: 13px; height: 13px; flex: 0 0 13px;
-                      border: 2px solid #c8d4f5; border-top-color: #1456f0;
-                      border-radius: 50%; animation: report-pdf-spin .75s linear infinite; }
-@keyframes report-pdf-spin { to { transform: rotate(360deg); } }
+.report-image-progress { display: inline-flex; align-items: center; gap: 7px; color: #475467;
+                         font-size: 13px; }
+.report-image-progress[hidden], .report-image-spinner[hidden] { display: none !important; }
+.report-image-spinner { display: inline-block; width: 13px; height: 13px; flex: 0 0 13px;
+                        border: 2px solid #c8d4f5; border-top-color: #1456f0;
+                        border-radius: 50%; animation: report-image-spin .75s linear infinite; }
+@keyframes report-image-spin { to { transform: rotate(360deg); } }
 .report-download-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px;
                           min-height: 44px; padding: 6px 12px; border: 1px solid #d0d5dd;
                           border-radius: 6px; background: #fff; color: #4a5260;
@@ -511,8 +511,8 @@ details summary { cursor: pointer; color: #1456f0; }
 .report-body table.report-attribution-table td:nth-child(3) { width: 60%; }
 .report-body .kg-sourced { min-width: 0; overflow: visible; }
 .report-body .kg-sourced table.report-table td:last-child { white-space: normal; }
-.report-pdf-capturing .report-body table.report-table { max-width: 100%; }
-.report-pdf-capturing .report-body .katex-display { max-width: 100%; overflow: visible !important; }
+.report-image-capturing .report-body table.report-table { max-width: 100%; }
+.report-image-capturing .report-body .katex-display { max-width: 100%; overflow: visible !important; }
 .report-body td .katex-display, .lecture-summary-body .katex-display,
 .tag-analysis-body .katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; }
 .report-body .katex, .lecture-summary-body .katex, .tag-analysis-body .katex { font-size: 1.05em; }

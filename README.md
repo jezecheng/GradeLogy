@@ -16,8 +16,8 @@ AI 批改是入口，GradeLogy 更重要的价值是把批改结果变成可追�
 | --- | --- |
 | **学科知识图谱** | 教材 / 考纲 / 讲义自动沉淀为概念与前置关系；所有教师可浏览并关联到有权限的课程，图谱编辑仍按协作权限控制。支持防环、体检、治理建议和运营指标。 |
 | **根因分析底座** | 知识点标签的横向 / 纵向分析与图谱前置关系结合，目标是从「这题错了」走到「哪个前置概念没掌握」。 |
-| **全角色数字助手** | 管理员、老师、学生都可自然语言查询各自可见的数据，权限与归属过滤后只读返回。 |
-| **MCP 只读工具集** | 内置 17 个 MCP 工具，把课程、讲次、成绩、批阅状态、AI 用量等能力开放给 Trae / Claude Desktop / Cursor。 |
+| **全角色数字助手** | 管理员、老师、学生有各自的只读助手与工具；老师课程数据范围受 `TEMPORARY_GLOBAL_TEACHER_ACCESS` 控制（默认开启全局访问，生产隔离部署应设为 `0`）。 |
+| **MCP 只读工具集** | 内置 17 个教师 MCP 工具，可查询课程、讲次、成绩、批阅状态、AI 用量和操作手册；服务用固定教师账号启动，不含写操作。 |
 | **可运维的单体** | 每日自动备份、整站导出恢复、一致性检查、日志轮转、Docker 部署，数据与附件同源迁移。 |
 
 知识图谱的设计取舍、当前进度与后续路线见 [知识图谱模块说明](docs/knowledge_graph.md)。
@@ -31,6 +31,8 @@ AI 批改是入口，GradeLogy 更重要的价值是把批改结果变成可追�
 ## 角色与操作手册
 
 各角色操作手册说明当前可用功能、操作步骤与前置条件；完整流程以对应角色手册及老师流程表为准。
+
+快速走通建课、收作业、批阅、发布与学生复习，可从[新手上手指南](docs/quick-start.md)开始。
 
 | 角色 | 手册 | 主要能力 |
 |------|------|----------|
@@ -52,7 +54,7 @@ AI 批改是入口，GradeLogy 更重要的价值是把批改结果变成可追�
 - **知识点标签与薄弱点分析**：保存作业范围不会调用 AI 或自动生成标签；教师可单独生成/编辑标签。完成批阅后可按标签做横向分析（同一讲全班共性问题）与纵向分析（同一学生跨讲次反复出错的知识点）。两类分析均有系统默认提示词，可复制 / 编辑，并在课程页按课程选择
 - **学科知识图谱**：上传教材、考纲或讲义，由 AI 增量抽取概念和关系；支持分层可视化、出处追踪、防环、体检、分类及协作权限。回滚须通过状态校验，避免覆盖后续成果。详见 [知识图谱模块说明](docs/knowledge_graph.md)。
 - **Digital Assistant 数字助手**：管理员、教师、学生登录后都有角色对应的助手，可用自然语言查询各自可见的数据并检索本角色正式手册；历史维护记录、设计草案和其他角色手册不参与操作步骤检索。数据查询按角色和归属过滤，只读；助手对话不进入 AI 用量、模型请求或应用访问日志。
-- **MCP 服务目录**：内置 `mcp_server.py`，可向 Trae、Claude Desktop、Cursor 等 MCP 客户端开放 `ask_help`、`list_courses`、`list_lectures`、`lecture_status`、`find_student`、`student_report`、`list_exams`、`exam_scores`、`course_overview`、`pending_work`、`grading_queue`、`search_reports`、`ai_usage`、`list_prompts`、`get_prompt`、`lesson_plan`、`lecture_scope` 17 个只读工具；仅允许教师账号，按课程归属授权，不提供写操作
+- **MCP 服务目录**：内置 `mcp_server.py`（stdio），可向 Trae、Claude Desktop、Cursor 等 MCP 客户端开放 `ask_help`、`list_courses`、`list_lectures`、`lecture_status`、`find_student`、`student_report`、`list_exams`、`exam_scores`、`course_overview`、`pending_work`、`grading_queue`、`search_reports`、`ai_usage`、`list_prompts`、`get_prompt`、`lesson_plan`、`lecture_scope` 17 个只读工具；仅允许教师账号，不提供写操作。`GRADELOGY_TEACHER` 固定该 MCP 进程的教师身份；`TEMPORARY_GLOBAL_TEACHER_ACCESS` 默认为开启，设为 `0` 后按课程成员关系过滤。接入前请评估学生成绩等数据是否可提供给该 MCP 客户端
 - **人工复核与报告发布**：复核页逐题自动保存；全部题目复核后生成报告。报告页的一键发布同时公开报告、逐题结果和学生错题/薄弱点数据；复核完成本身不公开。重新批阅时先隐藏旧结果
 - **工程能力**：配置环境变量化、Docker 部署、日志轮转、每日自动备份、数据整体导出与恢复、一致性检查、访问与审计日志
 

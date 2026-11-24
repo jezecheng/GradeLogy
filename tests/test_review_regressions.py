@@ -820,7 +820,7 @@ class ReviewRegressionTest(unittest.TestCase):
             "AND operation_type='report_generate' ORDER BY id DESC LIMIT 1").fetchone()
         self.assertEqual(operation["status"], "success")
 
-    def test_report_page_exports_pdf_from_the_browser_rendered_view(self):
+    def test_report_page_exports_high_resolution_long_png_from_browser_view(self):
         self.db.execute(
             "UPDATE submissions SET report_md=? WHERE id=30",
             ("# 化学作业报告\n\n| 题号 | 题干/小问 | 判定 | 批改说明 |\n"
@@ -831,14 +831,16 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         page = response.get_data(as_text=True)
         self.assertIn('id="report-export-content"', page)
-        self.assertIn('id="download-report-pdf"', page)
-        self.assertIn('id="report-pdf-progress"', page)
+        self.assertIn('id="download-report-image"', page)
+        self.assertIn('id="report-image-progress"', page)
         self.assertIn('class="report-download-button"', page)
-        self.assertIn('data-filename="Student_Lecture_批阅报告.pdf"', page)
+        self.assertIn('data-filename="Student_Lecture_批阅报告.png"', page)
         self.assertIn("vendor/html2canvas/html2canvas.min.js", page)
-        self.assertIn("vendor/jspdf/jspdf.umd.min.js", page)
-        self.assertIn('id="report-pdf-button-spinner"', page)
-        self.assertIn("pageBreaks", page)
+        self.assertNotIn("vendor/jspdf/jspdf.umd.min.js", page)
+        self.assertIn('id="report-image-button-spinner"', page)
+        self.assertIn("canvas.toBlob", page)
+        self.assertIn("image/png", page)
+        self.assertIn("60000000", page)
         self.assertIn("化学作业报告", page)
         visible_report = page.split('<div class="report-body">', 1)[1].split(
             '<details class="report-editor"', 1)[0]

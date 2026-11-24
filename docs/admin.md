@@ -177,6 +177,8 @@ DATA_DIR=/srv/gradelogy/data python app.py
 
 助手是**只读**的：只做查询和讲解步骤，删除、恢复等写操作仍需在对应页面完成；也不会输出密码或 API Key。学生和老师各自也有助手（学习助手 / 教学助手），都只能看到本人有权查看的数据。
 
+> **教师数据隔离注意**：部署环境变量 `TEMPORARY_GLOBAL_TEACHER_ACCESS` 默认值为 `1`，此时老师页面助手和外部 MCP 工具可访问全平台课程，所有老师也可编辑所有知识图谱。若需按课程成员和图谱协作角色隔离，请在部署的 `.env` / 环境变量中设置 `TEMPORARY_GLOBAL_TEACHER_ACCESS=0` 并重启服务。管理员应在启用 MCP 或增加教师账号前确认此策略；`mcp_server.py` 还会固定绑定 `GRADELOGY_TEACHER` 指定的一个教师账号。
+
 ## 日志与排查
 
 日志位于 `<数据目录>/logs/`：`app.log` 汇总全部日志，另有系统、用户、AI 使用、知识图谱、批阅和安全分类日志；每个文件按 5MB 轮转并保留 5 份。`LOG_LEVEL` 控制级别（设为 `WARNING` 可关闭访问日志）。记录内容：

@@ -13,8 +13,10 @@
       }
     }
 
-只对老师账号开放：启动时校验 users.role='teacher'，否则直接退出。
-所有查询都按该老师参与的课程过滤，不提供任何写操作。
+只对老师账号开放：启动时校验 users.role='teacher'，否则直接退出。一个进程
+固定使用 GRADELOGY_TEACHER，不提供 MCP 用户级登录或身份映射。
+教师工具课程范围由 TEMPORARY_GLOBAL_TEACHER_ACCESS 控制（默认开启全局课程访问；
+设为 0 后按课程成员关系过滤）。不提供任何写操作。
 """
 import json
 import os

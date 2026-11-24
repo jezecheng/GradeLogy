@@ -107,6 +107,35 @@ class AssistantToolsTest(unittest.TestCase):
         self.assertTrue(all(section["source"] == "docs/admin.md"
                             for section in admin["sections"]))
 
+    def test_help_answers_surface_workflow_prerequisites(self):
+        manual = assistant.ask_help("手动 AI 批阅前需要什么", role="teacher")
+        self.assertTrue(manual["found"])
+        manual_text = "\n".join(section["excerpt"] for section in manual["sections"])
+        self.assertIn("知识点标签", manual_text)
+        self.assertIn("不是手动批阅的前置条件", manual_text)
+        self.assertIn("教师版答案", manual_text)
+
+        automatic = assistant.ask_help("自动批阅要满足什么条件", role="teacher")
+        self.assertTrue(automatic["found"])
+        automatic_text = "\n".join(section["excerpt"] for section in automatic["sections"])
+        self.assertIn("已成功生成知识点标签", automatic_text)
+        self.assertIn("前 3 次提交", automatic_text)
+
+        report = assistant.ask_help("人工复核后怎么生成并发布报告", role="teacher")
+        self.assertTrue(report["found"])
+        report_text = "\n".join(section["excerpt"] for section in report["sections"])
+        self.assertIn("报告已成功生成", report_text)
+        self.assertIn("不会自动公开", report_text)
+        self.assertIn("正常模式还需完整可用的 AI 配置", report_text)
+
+        self.assertTrue(manual["answer_guidance"])
+        self.assertTrue(any("手动与自动批阅" in rule
+                            for rule in manual["answer_guidance"]))
+        mcp_result = json.loads(assistant.call_tool(
+            "ask_help", {"question": "自动批阅要满足什么条件"}, 1, "teacher"))
+        self.assertTrue(mcp_result["found"])
+        self.assertTrue(mcp_result["answer_guidance"])
+
     def test_assistant_rejects_open_chat_but_allows_platform_and_subject_questions(self):
         self.assertTrue(assistant.is_in_scope([
             {"role": "user", "content": "我还有什么作业没交？"}]))
