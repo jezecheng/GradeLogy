@@ -167,6 +167,27 @@ class SessionTimeoutTest(unittest.TestCase):
             login_page = self.client.get("/login")
         self.assertIn("登录状态已失效，请重新登录。", login_page.text)
 
+    def test_expired_document_refresh_redirects_to_login_even_if_accept_includes_json(self):
+        expired_at = self.start_time + 2700
+        headers = self.document_headers()
+        headers["Accept"] = "application/json, text/html"
+        with self.at(expired_at):
+            response = self.client.get("/courses", headers=headers)
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/login?next=/courses", response.location)
+        self.assertIsNone(self.last_activity())
+
+    def test_expired_ajax_request_still_receives_json_401(self):
+        expired_at = self.start_time + 2700
+        with self.at(expired_at):
+            response = self.client.get("/courses", headers={
+                "Accept": "application/json",
+                "X-Requested-With": "XMLHttpRequest",
+            })
+        self.assertEqual(response.status_code, 401)
+        self.assertTrue(response.json["ok"] is False)
+        self.assertEqual(response.headers.get("X-Session-Expired"), "1")
+
     def test_login_page_contains_accessible_idle_warning_for_authenticated_user(self):
         with self.at(self.start_time + 10):
             response = self.client.get("/courses", headers=self.document_headers())

@@ -453,10 +453,27 @@ def _ajax_request():
             or request.accept_mimetypes["application/json"] > 0)
 
 
+def _browser_document_request():
+    """Distinguish a real page navigation from fetch/XHR, even with JSON in Accept."""
+    if request.method not in ("GET", "HEAD"):
+        return False
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return False
+    destination = request.headers.get("Sec-Fetch-Dest")
+    if destination:
+        return destination == "document"
+    return "text/html" in request.headers.get("Accept", "").lower()
+
+
 def _unauthenticated_response(expired=False):
     """Give fetch clients a detectable 401, while preserving normal page redirects."""
     if expired:
         flash("登录状态已失效，请重新登录。")
+    # Browser navigations must never render the JSON auth error as a page. Check
+    # navigation headers before Accept: application/json, which some browsers
+    # include alongside text/html even for a normal document request.
+    if _browser_document_request():
+        return redirect(url_for("login", next=request.path))
     if _ajax_request():
         response = jsonify(ok=False, error="登录已失效，请重新登录。")
         response.status_code = 401
@@ -467,20 +484,13 @@ def _unauthenticated_response(expired=False):
 
 
 def _is_document_navigation():
-    if request.method not in ("GET", "HEAD"):
-        return False
     if request.endpoint in {"static", "healthz", "session_status", "admin_logs_tail",
                             "grading_queue", "lecture_grading_status",
                             "submission_grading_status", "knowledge_graph_status"}:
         return False
-    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
-        return False
-    destination = request.headers.get("Sec-Fetch-Dest")
-    if destination:
-        return destination == "document"
     # Fetch's default Accept is */* (which is compatible with HTML but is not a
-    # document navigation); require an explicit HTML media type for old browsers.
-    return "text/html" in request.headers.get("Accept", "").lower()
+    # document navigation); _browser_document_request requires explicit HTML.
+    return _browser_document_request()
 
 # ---------- 数据库 ----------
 def _migrate_upload_layout(con):
