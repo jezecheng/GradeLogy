@@ -7,6 +7,7 @@
 import json
 import hashlib
 import logging
+import os
 import sqlite3
 
 from utilities import kg_text, llm
@@ -441,10 +442,16 @@ def extract_material(db, material, abs_path):
             " VALUES(?,?,?,?,?)",
             (material["graph_id"], material["id"], page_no, number, text))
     if not kept:
+        ext = os.path.splitext(material["filename"] or "")[1].lower()
+        if ext == ".pdf":
+            error = "未抽取到文本，可能是扫描版 PDF，可改用文字版资料"
+        elif ext in (".doc", ".docx"):
+            error = "未抽取到文本，请确认 Word 文档包含可复制的文字内容"
+        else:
+            error = "未抽取到文本，请确认文件包含可复制的文字内容"
         db.execute("UPDATE kg_materials SET status=?, error=?, page_count=?, char_count=? "
                    "WHERE id=?",
-                   (STATUS_FAILED, "未抽取到文本，可能是扫描版 PDF，可改用文字版资料",
-                    len(pages), 0, material["id"]))
+                   (STATUS_FAILED, error, len(pages), 0, material["id"]))
         db.commit()
         return 0, False
     db.execute("UPDATE kg_materials SET page_count=?, char_count=?, status=?, error=? "

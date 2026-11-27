@@ -32,7 +32,7 @@
 
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
-| 资料上传、解析、分块、概念与关系抽取 | 已完成 | PDF/Markdown/TXT；后台建图，支持多文件、失败重试和重启续建。 |
+| 资料上传、解析、分块、概念与关系抽取 | 已完成 | PDF/Word/Markdown/TXT；后台建图，支持多文件、失败重试和重启续建。 |
 | 增量建图防环 | 已完成 | 写入 `prerequisite` 前用递归 CTE 检查可达性，会成环的关系直接跳过并计数提示。 |
 | 存量成环报告 | 已完成 | 对前置子图做强连通分量分析，在详情页列出环上概念和置信度最低、建议优先处理的关系。 |
 | 关系维护 | 已完成 | 关系边支持删除与反向；反向仅限 `prerequisite`，先排除原边做防环校验，重复反向边自动合并。 |
@@ -119,7 +119,7 @@ LLM 每次只处理一个文本块或截断后的子块，输出严格 JSON：
 
 ```mermaid
 flowchart TD
-    A[教师上传 PDF / Markdown / TXT] --> B{格式、大小与 SHA-256 校验}
+    A[教师上传 PDF / Word / Markdown / TXT] --> B{格式、大小与 SHA-256 校验}
     B -->|重复或不合格| X[跳过并提示原因]
     B -->|通过| C[按页抽取文字并清洗]
     C --> D[约 3000 字切块<br/>相邻块重叠 200 字]
@@ -144,10 +144,11 @@ flowchart TD
 
 | 项目 | 当前规则 |
 |---|---|
-| 文件格式 | `.pdf`、`.md`、`.markdown`、`.txt` |
+| 文件格式 | `.pdf`、`.doc`、`.docx`、`.md`、`.markdown`、`.txt` |
 | 单份文件上限 | 默认 500MB，可通过 `KG_MAX_UPLOAD_MB` 调整 |
 | 去重方式 | 同一图谱内按文件 SHA-256 去重 |
 | PDF 处理 | 使用 `pypdfium2` 按页读取文字层 |
+| Word 处理 | DOCX 读取正文 XML；DOC 解析 Word 97-2003 二进制正文，加密文档需先解除密码 |
 | 文本编码 | 依次尝试 UTF-8-SIG、UTF-8、GB18030 |
 | 单份资料建图文本上限 | 前 120,000 字 |
 | 分块大小 | 每块最多约 3,000 字 |
@@ -490,7 +491,7 @@ Content-Type: application/json
 
 | 位置 | 函数 | 职责 |
 |---|---|---|
-| `utilities/kg_text.py` | `extract_pages(path)` | PDF 按页或文本整体抽取 |
+| `utilities/kg_text.py` | `extract_pages(path)` | PDF 按页、Word 按分页符或文本整体抽取 |
 | `utilities/kg_text.py` | `chunk_pages(pages)` | 清洗并按约 3000 字分块 |
 | `utilities/kg_text.py` | `normalize_concept(name)` | 概念名及别名归一化 |
 | `utilities/knowledge_graph.py` | `analyze_batch(...)` | 调用 LLM 并清洗抽取 JSON |

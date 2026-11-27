@@ -26,6 +26,7 @@
   width: 34px; height: 34px; border-radius: 8px; font-size: 10px; font-weight: 600;
   background: #eef2ff; color: #1456f0; margin-right: 8px; vertical-align: top; }
 .file-icon.pdf { background: #fff1f0; color: #cf1322; }
+.file-icon.doc, .file-icon.docx { background: #e8f3ff; color: #1d4ed8; }
 .file-icon.md, .file-icon.markdown { background: #f3f0ff; color: #5b21b6; }
 .file-icon.txt { background: #f0f5ff; color: #1d4ed8; }
 .kg-file { display: flex; align-items: flex-start; }
@@ -285,10 +286,10 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
         enctype="multipart/form-data" class="stack-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
     <label>上传资料（可多选）
-      <input type="file" name="files" multiple accept=".pdf,.md,.markdown,.txt" required>
+      <input type="file" name="files" multiple accept=".pdf,.doc,.docx,.md,.markdown,.txt" required>
     </label>
     <p class="muted small">
-      支持 PDF / Markdown / TXT，单份最大 {{ max_upload_mb }}MB，可一次多选；
+      支持 PDF / Word（DOC、DOCX）/ Markdown / TXT，单份最大 {{ max_upload_mb }}MB，可一次多选；
       建图过程中也可以继续上传，新资料会自动加入待处理队列。
       单份资料最多取前 12 万字用于建图，重复内容按文件指纹自动跳过，新增资料只合并差异。
     </p>

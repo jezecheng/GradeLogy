@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import sqlite3
+import struct
 import tempfile
 import threading
 import time
@@ -480,7 +481,7 @@ class KGLogicTest(unittest.TestCase):
             row = self.con.execute("SELECT * FROM kg_materials WHERE id=?",
                                    (material_id,)).fetchone()
             self.assertEqual(row["status"], kg.STATUS_FAILED)
-            self.assertIn("扫描版", row["error"])
+            self.assertIn("未抽取到文本", row["error"])
         finally:
             os.remove(path)
 
@@ -489,6 +490,43 @@ class KGLogicTest(unittest.TestCase):
         self.assertEqual(chunks[0][0], 1)
         self.assertEqual(chunks[-1][0], 2)
         self.assertTrue(all(len(text) <= kg_text.CHUNK_CHARS for _p, text in chunks))
+
+    def test_extract_docx_pages_reads_paragraphs_and_page_breaks(self):
+        document = (
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/'
+            'wordprocessingml/2006/main"><w:body>'
+            '<w:p><w:r><w:t>氧化还原反应的实质</w:t></w:r></w:p>'
+            '<w:p><w:r><w:br w:type="page"/></w:r></w:p>'
+            '<w:p><w:r><w:t>是电子转移</w:t></w:r></w:p>'
+            '</w:body></w:document>')
+        fd, path = tempfile.mkstemp(suffix=".docx")
+        os.close(fd)
+        try:
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("word/document.xml", document)
+            pages = kg_text.extract_pages(path)
+        finally:
+            os.remove(path)
+        self.assertEqual([number for number, _text in pages], [1, 2])
+        self.assertIn("氧化还原反应的实质", pages[0][1])
+        self.assertIn("是电子转移", pages[1][1])
+
+    def test_word97_piece_table_decodes_compressed_and_unicode(self):
+        word = bytearray(2048)
+        struct.pack_into("<H", word, 0, kg_text._WORD_IDENT)
+        struct.pack_into("<H", word, 2, 0x00C1)
+        struct.pack_into("<I", word, 0x4C, 5)
+        word[1024:1027] = b"abc"
+        word[1030:1034] = "化学".encode("utf-16-le")
+        plc = (
+            struct.pack("<3I", 0, 3, 5)
+            + b"\x00\x00" + struct.pack("<I", (1024 << 1) | 0x40000000) + b"\x00\x00"
+            + b"\x00\x00" + struct.pack("<I", 1030) + b"\x00\x00")
+        clx = b"\x02" + struct.pack("<I", len(plc)) + plc
+        table = bytearray(64)
+        table[:len(clx)] = clx
+        struct.pack_into("<II", word, 0x01A2, 0, len(clx))
+        self.assertEqual(kg_text._word97_text(bytes(word), bytes(table)), "abc化学")
 
     @staticmethod
     def _concepts(*names):
@@ -1087,6 +1125,32 @@ class KGRouteTest(unittest.TestCase):
         self.assertTrue(os.path.exists(
             os.path.join(app_module.UPLOAD_DIR, material["stored_name"])))
 
+    def test_upload_docx_extracts_text_and_builds_chunks(self):
+        graph = self._create_graph()
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("word/document.xml", (
+                '<w:document xmlns:w="http://schemas.openxmlformats.org/'
+                'wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>'
+                + "氧化还原反应的实质是电子转移。" * 30
+                + '</w:t></w:r></w:p></w:body></w:document>'))
+        buffer.seek(0)
+        with mock.patch.object(app_module, "_kg_start_build") as start:
+            resp = self.client.post(
+                self.url("knowledge_graph_upload", gid=graph["id"]),
+                data={"_csrf": "test-token",
+                      "files": (buffer, "讲义.docx")},
+                content_type="multipart/form-data")
+        self.assertEqual(resp.status_code, 302)
+        start.assert_called_once()
+        con = self._db()
+        material = con.execute("SELECT * FROM kg_materials").fetchone()
+        chunks = con.execute("SELECT COUNT(*) FROM kg_chunks").fetchone()[0]
+        con.close()
+        self.assertEqual(material["filename"], "讲义.docx")
+        self.assertEqual(material["status"], kg.STATUS_PENDING)
+        self.assertGreater(chunks, 0)
+
     def test_upload_skips_duplicate_content(self):
         graph = self._create_graph()
         content = b"same content"
@@ -1108,7 +1172,7 @@ class KGRouteTest(unittest.TestCase):
             self.client.post(
                 self.url("knowledge_graph_upload", gid=graph["id"]),
                 data={"_csrf": "test-token",
-                      "files": (io.BytesIO(b"docx"), "讲义.docx")},
+                      "files": (io.BytesIO(b"xlsx"), "讲义.xlsx")},
                 content_type="multipart/form-data")
         start.assert_not_called()
         con = self._db()
@@ -1248,7 +1312,7 @@ class KGRouteTest(unittest.TestCase):
                 self.url("knowledge_graph_upload", gid=graph["id"]),
                 data={"_csrf": "test-token",
                       "files": [(io.BytesIO(b"good"), "good.txt"),
-                                (io.BytesIO(b"bad"), "bad.docx")]},
+                                (io.BytesIO(b"bad"), "bad.xlsx")]},
                 content_type="multipart/form-data")
         self.assertEqual(start.call_count, 1)
         con = self._db()
@@ -1270,7 +1334,7 @@ class KGRouteTest(unittest.TestCase):
         row = con.execute("SELECT * FROM kg_materials").fetchone()
         con.close()
         self.assertEqual(row["status"], kg.STATUS_FAILED)
-        self.assertIn("扫描版", row["error"])
+        self.assertIn("未抽取到文本", row["error"])
 
     def test_oversized_upload_is_rejected_before_processing(self):
         graph = self._create_graph()

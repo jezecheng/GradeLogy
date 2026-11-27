@@ -4717,7 +4717,7 @@ def knowledge_graph_upload(gid):
         filename = item.filename
         ext = os.path.splitext(filename)[1].lower()
         if ext not in kg_text.KG_EXTENSIONS:
-            flash(f"「{filename}」格式不支持，只接受 PDF / Markdown / TXT")
+            flash(f"「{filename}」格式不支持，只接受 PDF / Word / Markdown / TXT")
             continue
         stored = f"{now_beijing():%Y%m%d%H%M%S}_{secrets.token_hex(4)}{ext}"
         abs_path = os.path.join(abs_dir, stored)
