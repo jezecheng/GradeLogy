@@ -967,9 +967,11 @@ def _as_ids(value):
     return result
 
 
-def validate_audit_suggestions(db, graph_id, items):
+def validate_audit_suggestions(db, graph_id, items, max_items=None):
     """逐条校验模型建议：ID 必须属于本图、合并组不冲突、改动后前置关系不成环。
 
+    max_items 为参与校验的条数上限，默认 AUDIT_MAX_ITEMS（体检沿用 40）；
+    智能去重结果需要完整校验时显式传更大的值，避免超出部分被静默截断。
     返回 (可用建议, 被拦截建议, 错误)；错误恒为空串，保持与调用方一致的返回形态。
     """
     nodes = {row["id"]: row for row in db.execute(
@@ -977,9 +979,10 @@ def validate_audit_suggestions(db, graph_id, items):
         (graph_id,))}
     edges = {row["id"]: row for row in db.execute(
         "SELECT * FROM kg_edges WHERE graph_id=?", (graph_id,))}
+    limit = AUDIT_MAX_ITEMS if max_items is None else max(0, int(max_items))
     valid, rejected = [], []
     state = _audit_state()
-    for raw in (items or [])[:AUDIT_MAX_ITEMS]:
+    for raw in (items or [])[:limit]:
         if not isinstance(raw, dict):
             continue
         action = str(raw.get("action") or "").strip()

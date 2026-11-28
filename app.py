@@ -4602,6 +4602,7 @@ def knowledge_graph_detail(gid):
         graph_category_operation=graph_category_operation,
         dedups=dedups,
         graph_dedup_operation=graph_dedup_operation,
+        dedup_batch=kg_dedup_utils.DEDUP_APPLY_BATCH,
         archived_count=sum(1 for m in materials if m.get("archived_at")),
         archived_savings=kg_archive.archive_savings(materials),
         metrics=_kg_metrics(db, gid),
@@ -5332,6 +5333,8 @@ def knowledge_graph_dedup_apply(gid, did):
         groups = json.loads(dedup["groups"] or "[]")
     except (TypeError, ValueError):
         groups = []
+    if not isinstance(groups, list):
+        groups = []
     keep_ids_raw = (request.form.get("keep_ids") or "").strip()
     selected = None
     if keep_ids_raw:
@@ -5341,26 +5344,51 @@ def knowledge_graph_dedup_apply(gid, did):
                 selected.add(int(part))
             except (TypeError, ValueError):
                 continue
-    if selected is not None:
-        groups = [g for g in groups if g.get("keep_id") in selected]
-    items = kg_dedup_utils.flatten_dedup_suggestions(groups)
+    batch = kg_dedup_utils.DEDUP_APPLY_BATCH
+    if selected is None:
+        # 兼容不带 keep_ids 的旧调用：按单次上限取前若干簇，其余留待下次。
+        chosen = groups[:batch]
+    else:
+        chosen = [item for item in groups if item.get("keep_id") in selected]
+    if len(chosen) > batch:
+        flash(f"单次最多应用 {batch} 簇，请分批提交（本次选中 {len(chosen)} 簇）")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    items = kg_dedup_utils.flatten_dedup_suggestions(chosen)
     if not items:
         flash("没有可应用的合并簇")
         return redirect(url_for("knowledge_graph_detail", gid=gid))
+    # 应用前再快速校验一次：节点归属、簇间冲突与前置防环。
     valid, rejected, _ = kg_utils.validate_audit_suggestions(db, gid, items)
     if not valid:
         flash("这些合并簇未通过校验，请重新去重" + (
             f"（{rejected[0]['reason']}）" if rejected else ""))
         return redirect(url_for("knowledge_graph_detail", gid=gid))
     snapshot = kg_utils.apply_audit(db, gid, valid, commit=False)
-    db.execute("UPDATE kg_dedup_runs SET status=?, snapshot=?, applied_at=CURRENT_TIMESTAMP"
-               " WHERE id=?",
-               (kg_dedup_utils.DEDUP_APPLIED,
-                json.dumps(snapshot, ensure_ascii=False), did))
+    applied_keep_ids = {item["keep_id"] for item in valid}
+    remaining = [item for item in groups
+                 if item.get("keep_id") not in applied_keep_ids]
+    status = (kg_dedup_utils.DEDUP_APPLIED if not remaining
+              else kg_dedup_utils.DEDUP_PENDING)
+    # 快照只在第一次应用时保存，多次分批应用仍能回滚到全部应用前的状态。
+    saved_snapshot = dedup["snapshot"] or json.dumps(snapshot, ensure_ascii=False)
+    db.execute(
+        "UPDATE kg_dedup_runs SET status=?,groups=?,suggestions=?,snapshot=?,"
+        "applied_at=CURRENT_TIMESTAMP WHERE id=?",
+        (status, json.dumps(remaining, ensure_ascii=False),
+         json.dumps(kg_dedup_utils.flatten_dedup_suggestions(remaining),
+                    ensure_ascii=False),
+         saved_snapshot, did))
     db.commit()
-    kg_log.info("应用知识图谱去重 user=%s#%s graph=%s dedup=%s 簇=%s",
-                g.user["username"], g.user["id"], gid, did, len(valid))
-    flash(f"已应用 {len(valid)} 簇合并；后续没有建图或编辑时可回滚。")
+    kg_log.info("应用知识图谱去重 user=%s#%s graph=%s dedup=%s 簇=%s 剩余=%s",
+                g.user["username"], g.user["id"], gid, did, len(valid), len(remaining))
+    message = [f"已应用 {len(valid)} 簇合并"]
+    if rejected:
+        message.append(f"{len(rejected)} 簇未通过校验，已保留待确认")
+    if remaining:
+        message.append(f"剩余 {len(remaining)} 簇待确认，可继续分批应用")
+    else:
+        message.append("后续没有建图或编辑时可回滚")
+    flash("；".join(message) + "。")
     return redirect(url_for("knowledge_graph_detail", gid=gid))
 
 
@@ -5410,11 +5438,13 @@ def knowledge_graph_dedup_discard(gid, did):
         flash("该去重结果已处理")
         return redirect(url_for("knowledge_graph_detail", gid=gid))
     db.execute("UPDATE kg_dedup_runs SET status=? WHERE id=?",
-               (kg_dedup_utils.DEDUP_DISCARDED, did))
+               ((kg_dedup_utils.DEDUP_APPLIED if dedup["snapshot"]
+                 else kg_dedup_utils.DEDUP_DISCARDED), did))
     db.commit()
     kg_log.info("忽略知识图谱去重 user=%s#%s graph=%s dedup=%s",
                 g.user["username"], g.user["id"], gid, did)
-    flash("已忽略这次去重建议")
+    flash("已忽略这次去重建议" if not dedup["snapshot"]
+          else "已忽略剩余去重建议；此前已应用的合并仍可回滚")
     return redirect(url_for("knowledge_graph_detail", gid=gid))
 
 

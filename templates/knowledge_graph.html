@@ -113,6 +113,10 @@ tr[data-material-archived="true"] { opacity: .92; }
 .kg-dedup-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
   margin: 6px 0; }
 .kg-dedup-toolbar .kg-dedup-count-summary { margin-left: auto; font-size: 12px; color: #4b5563; }
+.kg-dedup-toolbar .kg-dedup-count-summary.is-over { color: #b91c1c; font-weight: 600; }
+.kg-dedup-pager { display: flex; gap: 8px; align-items: center; justify-content: flex-end;
+  margin: 2px 0 8px; font-size: 12px; }
+.kg-dedup-table tbody tr[hidden] { display: none; }
 .kg-dedup-table { width: 100%; border-collapse: collapse; margin: 6px 0; font-size: 13px;
   table-layout: fixed; }
 .kg-dedup-table th, .kg-dedup-table td { border: 1px solid #e5e7eb; padding: 6px 8px;
@@ -626,7 +630,7 @@ tr[data-material-archived="true"] { opacity: .92; }
   <p class="muted small">还没有去重记录。</p>
   {% endif %}
   {% for d in dedups %}
-  <div class="kg-audit" data-dedup-run="{{ d.id }}">
+  <div class="kg-audit" data-dedup-run="{{ d.id }}" data-page-size="{{ dedup_batch }}">
     <div class="kg-audit-head">
       <span class="kg-audit-status">{{ d.status }}</span>
       <span class="muted small">{{ d.created_at }}{% if d.applied_at %} · 应用 {{ d.applied_at }}{% endif %}{% if d.model %} · {{ d.model }}{% endif %}</span>
@@ -669,16 +673,16 @@ tr[data-material-archived="true"] { opacity: .92; }
     {% set editable = can_edit and d.status == '待确认' %}
     {% if editable %}
     <div class="kg-dedup-toolbar">
-      <button type="button" class="ghost small kg-dedup-select-all">全选</button>
-      <button type="button" class="ghost small kg-dedup-clear-all">取消全选</button>
-      <button type="button" class="ghost small kg-dedup-invert">反选</button>
-      <span class="kg-dedup-count-summary">已选 <span class="kg-dedup-count">{{ d.groups | length }}</span> / {{ d.groups | length }} 簇</span>
+      <button type="button" class="ghost small kg-dedup-select-all">全选本页</button>
+      <button type="button" class="ghost small kg-dedup-clear-all">取消本页</button>
+      <button type="button" class="ghost small kg-dedup-invert">反选本页</button>
+      <span class="kg-dedup-count-summary">已选 <span class="kg-dedup-count">{{ [d.groups | length, dedup_batch] | min }}</span> / 共 {{ d.groups | length }} 簇 · 单次最多 {{ dedup_batch }} 簇</span>
     </div>
     {% endif %}
     <table class="kg-dedup-table">
       <thead>
         <tr>
-          {% if editable %}<th class="kg-dedup-col-check"><input type="checkbox" class="kg-dedup-check-all" aria-label="全选"></th>{% endif %}
+          {% if editable %}<th class="kg-dedup-col-check"><input type="checkbox" class="kg-dedup-check-all" aria-label="全选本页"></th>{% endif %}
           <th>合并概念</th>
           <th>保留节点</th>
           <th>理由</th>
@@ -688,7 +692,7 @@ tr[data-material-archived="true"] { opacity: .92; }
       <tbody>
       {% for c in d.groups %}
         <tr data-keep-id="{{ c.keep_id }}">
-          {% if editable %}<td class="kg-dedup-col-check"><input type="checkbox" class="kg-dedup-row-check" value="{{ c.keep_id }}" checked></td>{% endif %}
+          {% if editable %}<td class="kg-dedup-col-check"><input type="checkbox" class="kg-dedup-row-check" value="{{ c.keep_id }}"{% if loop.index0 < dedup_batch %} checked{% endif %}></td>{% endif %}
           <td>
             <div class="kg-dedup-members">
               {% for name in c.member_names %}
@@ -705,6 +709,13 @@ tr[data-material-archived="true"] { opacity: .92; }
       {% endfor %}
       </tbody>
     </table>
+    {% if editable and d.groups | length > dedup_batch %}
+    <div class="kg-dedup-pager">
+      <button type="button" class="ghost small kg-dedup-prev" disabled>上一页</button>
+      <span class="muted small kg-dedup-page-info">第 1 / {{ ((d.groups | length) + dedup_batch - 1) // dedup_batch }} 页</span>
+      <button type="button" class="ghost small kg-dedup-next">下一页</button>
+    </div>
+    {% endif %}
     {% endif %}
     {% if d.rejected %}
     <details>
@@ -719,11 +730,10 @@ tr[data-material-archived="true"] { opacity: .92; }
     {% if can_edit and d.status == '待确认' and d.groups %}
     <div class="kg-audit-actions">
       <form method="post" class="kg-dedup-apply-form"
-            action="{{ url_for('knowledge_graph_dedup_apply', gid=graph.id, did=d.id) }}"
-            onsubmit="return confirm('将合并选中的重复概念，修改图谱；后续未建图或编辑时可回滚。继续？')">
+            action="{{ url_for('knowledge_graph_dedup_apply', gid=graph.id, did=d.id) }}">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
         <input type="hidden" name="keep_ids" class="kg-dedup-keep-ids" value="">
-        <button class="ghost small kg-dedup-apply-btn">应用选中 <span class="kg-dedup-count">{{ d.groups | length }}</span> 簇合并</button>
+        <button class="ghost small kg-dedup-apply-btn" disabled>应用选中 <span class="kg-dedup-count">0</span> 簇合并</button>
       </form>
       <form method="post" action="{{ url_for('knowledge_graph_dedup_discard', gid=graph.id, did=d.id) }}">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
@@ -742,57 +752,127 @@ tr[data-material-archived="true"] { opacity: .92; }
 </details>
 <script>
 (function () {
-  function syncRun(run) {
-    var checks = run.querySelectorAll('.kg-dedup-row-check');
-    var checked = [];
-    checks.forEach(function (cb) { if (cb.checked) checked.push(cb.value); });
-    run.querySelectorAll('.kg-dedup-keep-ids').forEach(function (input) {
-      input.value = checked.join(',');
-    });
-    run.querySelectorAll('.kg-dedup-count').forEach(function (cnt) {
-      cnt.textContent = checked.length;
-    });
-    run.querySelectorAll('.kg-dedup-apply-btn').forEach(function (btn) {
-      btn.disabled = checked.length === 0;
-    });
-    var head = run.querySelector('.kg-dedup-check-all');
-    if (head) {
-      head.checked = checks.length > 0 && checked.length === checks.length;
-      head.indeterminate = checked.length > 0 && checked.length < checks.length;
+  function initRun(run) {
+    var rows = Array.prototype.slice.call(
+      run.querySelectorAll('.kg-dedup-table tbody tr'));
+    var hasChecks = !!run.querySelector('.kg-dedup-row-check');
+    if (!rows.length || !hasChecks) return;
+    var pageSize = parseInt(run.getAttribute('data-page-size'), 10) || 40;
+    var pages = Math.max(1, Math.ceil(rows.length / pageSize));
+    var page = 0;
+
+    function pageRows() {
+      return rows.slice(page * pageSize, (page + 1) * pageSize);
     }
-  }
-  document.querySelectorAll('[data-dedup-run]').forEach(function (run) {
-    syncRun(run);
-    run.querySelectorAll('.kg-dedup-row-check').forEach(function (cb) {
-      cb.addEventListener('change', function () { syncRun(run); });
+
+    function sync() {
+      var checked = [];
+      run.querySelectorAll('.kg-dedup-row-check').forEach(function (cb) {
+        if (cb.checked) checked.push(cb.value);
+      });
+      var over = checked.length > pageSize;
+      run.querySelectorAll('.kg-dedup-keep-ids').forEach(function (input) {
+        input.value = checked.join(',');
+      });
+      run.querySelectorAll('.kg-dedup-count').forEach(function (cnt) {
+        cnt.textContent = checked.length;
+      });
+      run.querySelectorAll('.kg-dedup-apply-btn').forEach(function (btn) {
+        btn.disabled = checked.length === 0 || over;
+      });
+      var summary = run.querySelector('.kg-dedup-count-summary');
+      if (summary) summary.classList.toggle('is-over', over);
+      var cur = pageRows();
+      var curChecked = 0;
+      cur.forEach(function (tr) {
+        var cb = tr.querySelector('.kg-dedup-row-check');
+        if (cb && cb.checked) curChecked++;
+      });
+      var head = run.querySelector('.kg-dedup-check-all');
+      if (head) {
+        head.checked = cur.length > 0 && curChecked === cur.length;
+        head.indeterminate = curChecked > 0 && curChecked < cur.length;
+      }
+    }
+
+    function renderPage() {
+      rows.forEach(function (tr, i) {
+        tr.hidden = Math.floor(i / pageSize) !== page;
+      });
+      var info = run.querySelector('.kg-dedup-page-info');
+      if (info) info.textContent = '第 ' + (page + 1) + ' / ' + pages + ' 页';
+      var prev = run.querySelector('.kg-dedup-prev');
+      var next = run.querySelector('.kg-dedup-next');
+      if (prev) prev.disabled = page <= 0;
+      if (next) next.disabled = page >= pages - 1;
+      sync();
+    }
+
+    rows.forEach(function (tr) {
+      var cb = tr.querySelector('.kg-dedup-row-check');
+      if (cb) cb.addEventListener('change', sync);
     });
     var head = run.querySelector('.kg-dedup-check-all');
     if (head) {
       head.addEventListener('change', function () {
-        var on = head.checked;
-        run.querySelectorAll('.kg-dedup-row-check').forEach(function (cb) { cb.checked = on; });
-        syncRun(run);
+        pageRows().forEach(function (tr) {
+          var cb = tr.querySelector('.kg-dedup-row-check');
+          if (cb) cb.checked = head.checked;
+        });
+        sync();
       });
     }
     run.querySelectorAll('.kg-dedup-select-all').forEach(function (b) {
       b.addEventListener('click', function () {
-        run.querySelectorAll('.kg-dedup-row-check').forEach(function (cb) { cb.checked = true; });
-        syncRun(run);
+        pageRows().forEach(function (tr) {
+          var cb = tr.querySelector('.kg-dedup-row-check');
+          if (cb) cb.checked = true;
+        });
+        sync();
       });
     });
     run.querySelectorAll('.kg-dedup-clear-all').forEach(function (b) {
       b.addEventListener('click', function () {
-        run.querySelectorAll('.kg-dedup-row-check').forEach(function (cb) { cb.checked = false; });
-        syncRun(run);
+        pageRows().forEach(function (tr) {
+          var cb = tr.querySelector('.kg-dedup-row-check');
+          if (cb) cb.checked = false;
+        });
+        sync();
       });
     });
     run.querySelectorAll('.kg-dedup-invert').forEach(function (b) {
       b.addEventListener('click', function () {
-        run.querySelectorAll('.kg-dedup-row-check').forEach(function (cb) { cb.checked = !cb.checked; });
-        syncRun(run);
+        pageRows().forEach(function (tr) {
+          var cb = tr.querySelector('.kg-dedup-row-check');
+          if (cb) cb.checked = !cb.checked;
+        });
+        sync();
       });
     });
-  });
+    var prev = run.querySelector('.kg-dedup-prev');
+    var next = run.querySelector('.kg-dedup-next');
+    if (prev) prev.addEventListener('click', function () {
+      if (page > 0) { page--; renderPage(); }
+    });
+    if (next) next.addEventListener('click', function () {
+      if (page < pages - 1) { page++; renderPage(); }
+    });
+    run.querySelectorAll('.kg-dedup-apply-form').forEach(function (form) {
+      form.addEventListener('submit', function (e) {
+        var count = run.querySelectorAll('.kg-dedup-row-check:checked').length;
+        if (count === 0 || count > pageSize) {
+          e.preventDefault();
+          alert('单次最多应用 ' + pageSize + ' 簇，请取消部分勾选或分批提交');
+          return;
+        }
+        if (!confirm('将合并选中的 ' + count + ' 簇重复概念，修改图谱；后续未建图或编辑时可回滚。继续？')) {
+          e.preventDefault();
+        }
+      });
+    });
+    renderPage();
+  }
+  document.querySelectorAll('[data-dedup-run]').forEach(initRun);
 
   // 去重进度：轮询通用状态接口，原地更新进度条与逐组状态，不打断当前页面。
   var box = document.getElementById('kg-dedup-progress');

@@ -798,6 +798,19 @@ class KGLogicTest(unittest.TestCase):
         self.assertEqual(len(valid), 1)
         self.assertIn("boom", error)
 
+    def test_assemble_dedup_keeps_all_clusters_beyond_audit_cap(self):
+        """去重结果不受体检 40 条上限约束：超过 40 簇也应全部可用。"""
+        raw = []
+        for index in range(45):
+            a = self._dedup_node(f"同义甲{index}", "分类")
+            b = self._dedup_node(f"同义乙{index}", "分类")
+            raw.append({"node_ids": [a, b], "keep_id": a,
+                        "reason": "同义", "confidence": 0.9})
+        valid, rejected, error = kd.assemble_dedup_result(self.con, 1, raw)
+        self.assertEqual(error, "")
+        self.assertEqual(len(valid), 45)
+        self.assertEqual(rejected, [])
+
     @staticmethod
     def _dedup_group(*nodes):
         return [{"id": nid, "name": name, "aliases": [], "category": "",
@@ -1209,6 +1222,66 @@ class KGRouteTest(unittest.TestCase):
         resp = self.login(4).get(
             self.url("knowledge_graph_concept", gid=graph["id"], nid=node_id))
         self.assertEqual(resp.status_code, 403)
+
+    def test_dedup_apply_batches_more_than_forty_clusters(self):
+        """单次最多应用 40 簇，剩余簇保留待确认，可继续分批应用。"""
+        graph = self._create_graph()
+        groups = []
+        for index in range(45):
+            a = self._concept(graph["id"], f"同义甲{index}")
+            b = self._concept(graph["id"], f"同义乙{index}")
+            groups.append({
+                "node_ids": [a, b], "keep_id": a, "keep_name": f"同义甲{index}",
+                "member_names": [f"同义甲{index}", f"同义乙{index}"],
+                "reason": "同义", "confidence": 0.9, "action": "merge_nodes",
+                "suggestion": {"action": "merge_nodes", "node_ids": [a, b],
+                               "keep_id": a, "reason": "同义"},
+            })
+        con = self._db()
+        con.execute(
+            "INSERT INTO kg_dedup_runs(graph_id,status,model,groups) VALUES(?,?,?,?)",
+            (graph["id"], "待确认", "m", json.dumps(groups, ensure_ascii=False)))
+        con.commit()
+        run_id = con.execute(
+            "SELECT id FROM kg_dedup_runs WHERE graph_id=? ORDER BY id DESC",
+            (graph["id"],)).fetchone()["id"]
+        con.close()
+
+        def _ids(items):
+            return ",".join(str(item["keep_id"]) for item in items)
+
+        # 超过 40 簇的单次提交被拒绝，图谱不变。
+        self._post("knowledge_graph_dedup_apply", {"keep_ids": _ids(groups)},
+                   gid=graph["id"], did=run_id)
+        con = self._db()
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM kg_nodes WHERE graph_id=?",
+            (graph["id"],)).fetchone()[0], 90)
+        con.close()
+
+        # 第一批 40 簇应用成功，剩余 5 簇仍在待确认状态。
+        self._post("knowledge_graph_dedup_apply", {"keep_ids": _ids(groups[:40])},
+                   gid=graph["id"], did=run_id)
+        con = self._db()
+        row = con.execute("SELECT * FROM kg_dedup_runs WHERE id=?", (run_id,)).fetchone()
+        remaining = json.loads(row["groups"])
+        con.close()
+        self.assertEqual(row["status"], "待确认")
+        self.assertEqual(len(remaining), 5)
+        self.assertTrue(row["snapshot"])
+
+        # 第二批应用剩余 5 簇后状态变为已应用，快照仍是最早那份。
+        self._post("knowledge_graph_dedup_apply",
+                   {"keep_ids": _ids(remaining)}, gid=graph["id"], did=run_id)
+        con = self._db()
+        row = con.execute("SELECT * FROM kg_dedup_runs WHERE id=?", (run_id,)).fetchone()
+        node_count = con.execute(
+            "SELECT COUNT(*) FROM kg_nodes WHERE graph_id=?",
+            (graph["id"],)).fetchone()[0]
+        con.close()
+        self.assertEqual(row["status"], "已应用")
+        self.assertEqual(json.loads(row["groups"]), [])
+        self.assertEqual(node_count, 45)
 
     def _concept(self, graph_id, name, category="概念"):
         con = self._db()

@@ -51,6 +51,7 @@ GROUP_LABEL = {
 }
 
 DEDUP_GROUP_MAX = 40            # 单批送模型的候选节点上限
+DEDUP_APPLY_BATCH = 40          # 单次应用（以及界面每页）的合并簇上限
 DEDUP_NEIGHBOR_JACCARD = 0.5    # 共享邻居结构召回的 Jaccard 阈值
 DEDUP_MAX_TOKENS = 16384
 DEDUP_ACTION_LABEL = {"merge_nodes": "合并概念"}
@@ -588,9 +589,10 @@ def assemble_dedup_result(db, graph_id, raw_clusters, errors=()):
     _enrich_groups(merged_clusters, name_by_id)
 
     suggestions = flatten_dedup_suggestions(merged_clusters)
-    valid, _rejected, _ = kg_utils.validate_audit_suggestions(db, graph_id, suggestions)
-    valid_keys = {frozenset(item["node_ids"]) for item in valid}
-    over_cap = len(suggestions) > kg_utils.AUDIT_MAX_ITEMS
+    # 去重簇由并查集保证互不重叠，必须全量校验：沿用体检的 40 条上限会让
+    # 超出的簇被误判为「未纳入」，导致一次去重只能落地几十个合并。
+    valid, _rejected, _ = kg_utils.validate_audit_suggestions(
+        db, graph_id, suggestions, max_items=len(suggestions))
 
     valid_groups = []
     for item in valid:
@@ -617,6 +619,7 @@ def assemble_dedup_result(db, graph_id, raw_clusters, errors=()):
         })
 
     # rejected_groups：未通过整体校验的簇，逐条单独校验以获得准确原因与成员。
+    valid_keys = {frozenset(item["node_ids"]) for item in valid}
     rejected_groups = []
     for cluster in merged_clusters:
         if frozenset(cluster["node_ids"]) in valid_keys:
@@ -624,11 +627,8 @@ def assemble_dedup_result(db, graph_id, raw_clusters, errors=()):
         single = [{"action": "merge_nodes", "node_ids": cluster["node_ids"],
                    "keep_id": cluster["keep_id"], "reason": cluster["reason"]}]
         _v, _r, _ = kg_utils.validate_audit_suggestions(db, graph_id, single)
-        if _v:
-            reason = ("本批建议数已达上限，该簇未纳入" if over_cap
-                      else "与本批其它合并合并后会产生冲突")
-        else:
-            reason = _r[0]["reason"] if _r else "未通过校验"
+        reason = "与本批其它合并合并后会产生冲突" if _v else (
+            _r[0]["reason"] if _r else "未通过校验")
         rejected_groups.append({
             "node_ids": cluster["node_ids"],
             "keep_id": cluster["keep_id"],
