@@ -49,6 +49,8 @@ PORT = int(_env("PORT", "5000"))
 MAX_UPLOAD_MB = int(_env("MAX_UPLOAD_MB", "20"))
 # 知识图谱资料通常是整本教材或考纲，单独放宽；仍保留上限防止磁盘被占满
 KG_MAX_UPLOAD_MB = int(_env("KG_MAX_UPLOAD_MB", "500"))
+# 智能去重候选组之间无依赖，可并发判定；受模型限流约束，默认 3，最高 8
+KG_DEDUP_CONCURRENCY = max(1, min(8, int(_env("KG_DEDUP_CONCURRENCY", "3"))))
 # 备份包解压后的总大小上限（MB），防止恶意 zip 撑爆磁盘
 MAX_RESTORE_MB = int(_env("MAX_RESTORE_MB", "2048"))
 LOG_LEVEL = _env("LOG_LEVEL", "INFO").upper()

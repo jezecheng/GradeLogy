@@ -3352,7 +3352,21 @@ def ai_operation_status(operation_id):
             own_course(operation["course_id"])
         else:
             abort(403)
-    response = jsonify(ok=True, status=operation["status"], error=operation["error"] or "")
+    progress = None
+    if operation["operation_type"] == "kg_dedup":
+        run = db.execute(
+            "SELECT status,progress FROM kg_dedup_runs WHERE operation_id=? "
+            "ORDER BY id DESC LIMIT 1", (operation["id"],)).fetchone()
+        if run:
+            try:
+                progress = json.loads(run["progress"] or "{}")
+            except (TypeError, ValueError):
+                progress = {}
+            if not isinstance(progress, dict):
+                progress = {}
+            progress["run_status"] = run["status"]
+    response = jsonify(ok=True, status=operation["status"],
+                       error=operation["error"] or "", progress=progress)
     response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -4485,16 +4499,26 @@ def _kg_dedup_view(row):
         rejected = json.loads(row["rejected"] or "[]")
     except (TypeError, ValueError):
         rejected = []
+    try:
+        progress = json.loads(row["progress"] or "{}")
+    except (TypeError, ValueError):
+        progress = {}
+    if not isinstance(progress, dict):
+        progress = {}
     for group in groups:
         group["action_label"] = kg_dedup_utils.DEDUP_ACTION_LABEL.get(
             group.get("action"), group.get("action") or "")
+    status = row["status"]
     return {
-        "id": row["id"], "status": row["status"],
+        "id": row["id"], "status": status,
         "model": row["model"] or "", "error": row["error"] or "",
         "created_at": _localtime(row["created_at"]),
         "applied_at": _localtime(row["applied_at"]) if row["applied_at"] else "",
         "groups": groups, "rejected": rejected,
         "has_snapshot": bool(row["snapshot"]),
+        "operation_id": row["operation_id"] or 0,
+        "progress": progress,
+        "resumable": kg_dedup_utils.run_is_resumable(status, progress),
     }
 
 
@@ -5171,6 +5195,61 @@ def knowledge_graph_audit_discard(gid, aid):
     return redirect(url_for("knowledge_graph_detail", gid=gid))
 
 
+def _submit_dedup_job(gid, run_id, api_url, api_key, model, max_tokens, created_by,
+                      failure_status):
+    """入队一次去重运行；入队失败时把记录标记为 failure_status 并返回错误提示。"""
+    application = current_app._get_current_object()
+    db = get_db()
+
+    def runner(database, operation):
+        database.execute("UPDATE kg_dedup_runs SET operation_id=? WHERE id=?",
+                         (operation["id"], run_id))
+        database.commit()
+        _run_dedup_job(database, operation, gid, run_id, api_url, api_key, model,
+                       max_tokens, created_by, application)
+
+    operation, queue_err = _ai_task_queue.submit(
+        created_by, "kg_dedup", model=model, runner=runner,
+        resource_key=f"knowledge_graph:{gid}", dedup_key=f"kg_dedup|{gid}")
+    if queue_err:
+        db.execute("UPDATE kg_dedup_runs SET status=?,error=?,"
+                   "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                   (failure_status, queue_err[:500], run_id))
+        db.commit()
+        return queue_err
+    db.execute("UPDATE kg_dedup_runs SET operation_id=? WHERE id=?",
+               (operation["id"], run_id))
+    db.commit()
+    return ""
+
+
+def _run_dedup_job(database, operation, gid, run_id, api_url, api_key, model,
+                   max_tokens, created_by, application):
+    """后台执行一条去重记录：并发判定、逐组落进度、失败可断点续跑。"""
+    try:
+        valid, rejected, run_err, status = kg_dedup_utils.run_dedup_run(
+            database, gid, run_id, api_url, api_key, model,
+            usage_hook=operation["usage_hook"], max_tokens=max_tokens,
+            task_context=application.app_context)
+    except Exception as e:  # noqa: BLE001 后台任务失败写入记录，绝不让线程静默崩溃
+        run_err = str(e)
+        status = kg_dedup_utils.DEDUP_FAILED
+        valid, rejected = [], []
+        kg_log.exception("知识图谱去重失败 graph=%s run=%s", gid, run_id)
+        try:
+            database.execute(
+                "UPDATE kg_dedup_runs SET status=?,error=?,finished_at=CURRENT_TIMESTAMP"
+                " WHERE id=?", (status, run_err[:500], run_id))
+            database.commit()
+        except Exception:
+            database.rollback()
+    kg_log.info("知识图谱去重 user=#%s graph=%s run=%s status=%s 可应用簇=%s 拦截簇=%s",
+                created_by, gid, run_id, status, len(valid), len(rejected))
+    _finish_ai_operation(
+        operation, "failed" if status == kg_dedup_utils.DEDUP_FAILED else "success",
+        run_err)
+
+
 @_routes.route("/knowledge-graphs/<oid:gid>/dedup", methods=["POST"])
 @role_required("teacher", "admin")
 def knowledge_graph_dedup_run(gid):
@@ -5180,51 +5259,55 @@ def knowledge_graph_dedup_run(gid):
     api_url, api_key, model, err = _ai_endpoint(g.user["id"])
     if err:
         db.execute(
-            "INSERT INTO kg_dedup_runs(graph_id,status,model,error,created_by)"
-            " VALUES(?,?,?,?,?)",
+            "INSERT INTO kg_dedup_runs(graph_id,status,model,error,created_by,finished_at)"
+            " VALUES(?,?,?,?,?,CURRENT_TIMESTAMP)",
             (gid, kg_dedup_utils.DEDUP_FAILED, "", err, g.user["id"]))
         db.commit()
         flash(f"智能去重未执行：{err}")
         return redirect(url_for("knowledge_graph_detail", gid=gid))
     max_tokens = _get_max_tokens(g.user["id"], "max_tokens_kg_dedup")
-    created_by = g.user["id"]
-
-    def runner(database, operation):
-        try:
-            valid_groups, rejected_groups, run_err = kg_dedup_utils.run_dedup(
-                database, gid, api_url, api_key, model,
-                usage_hook=operation["usage_hook"], max_tokens=max_tokens)
-        except Exception as e:  # noqa: BLE001
-            run_err = str(e)
-            kg_log.exception("知识图谱去重失败 graph=%s", gid)
-            valid_groups, rejected_groups = [], []
-        suggestions = kg_dedup_utils.flatten_dedup_suggestions(valid_groups)
-        if not valid_groups:
-            status = kg_dedup_utils.DEDUP_FAILED if run_err else kg_dedup_utils.DEDUP_CLEAN
-        else:
-            status = kg_dedup_utils.DEDUP_PENDING
-        database.execute(
-            "INSERT INTO kg_dedup_runs(graph_id,status,model,error,groups,"
-            "suggestions,rejected,operation_id,created_by) VALUES(?,?,?,?,?,?,?,?,?)",
-            (gid, status, model, (run_err or "")[:500],
-             json.dumps(valid_groups, ensure_ascii=False),
-             json.dumps(suggestions, ensure_ascii=False),
-             json.dumps(rejected_groups, ensure_ascii=False),
-             operation["id"], created_by))
-        database.commit()
-        kg_log.info("知识图谱去重 user=#%s graph=%s status=%s 可应用簇=%s 拦截簇=%s",
-                    created_by, gid, status, len(valid_groups), len(rejected_groups))
-        _finish_ai_operation(
-            operation, "failed" if (not valid_groups and run_err) else "success", run_err)
-
-    operation, queue_err = _ai_task_queue.submit(
-        g.user["id"], "kg_dedup", model=model, runner=runner,
-        resource_key=f"knowledge_graph:{gid}",
-        dedup_key=f"kg_dedup|{gid}")
+    run_id = kg_dedup_utils.create_dedup_run(
+        db, gid, model=model, created_by=g.user["id"])
+    queue_err = _submit_dedup_job(
+        gid, run_id, api_url, api_key, model, max_tokens, g.user["id"],
+        kg_dedup_utils.DEDUP_FAILED)
     if queue_err:
         flash(queue_err)
     else:
-        flash("智能去重已加入后台队列，可离开当前页面。")
+        flash("智能去重已加入后台队列，可离开当前页面；进度与断点会自动保留。")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/dedup/<oid:did>/resume", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_dedup_resume(gid, did):
+    """从断点继续未完成的候选组：已完成组复用结果，不重复调用模型。"""
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    dedup = _kg_dedup(gid, did)
+    try:
+        progress = json.loads(dedup["progress"] or "{}")
+    except (TypeError, ValueError):
+        progress = {}
+    if not kg_dedup_utils.run_is_resumable(dedup["status"], progress):
+        flash("该去重记录当前不可继续")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    api_url, api_key, model, err = _ai_endpoint(g.user["id"])
+    if err:
+        flash(f"智能去重未继续：{err}")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    max_tokens = _get_max_tokens(g.user["id"], "max_tokens_kg_dedup")
+    db.execute("UPDATE kg_dedup_runs SET status=?,error='',finished_at=NULL WHERE id=?",
+               (kg_dedup_utils.DEDUP_RUNNING, did))
+    db.commit()
+    queue_err = _submit_dedup_job(
+        gid, did, api_url, api_key, model, max_tokens, g.user["id"], dedup["status"])
+    if queue_err:
+        flash(queue_err)
+    else:
+        kg_log.info("续跑知识图谱去重 user=%s#%s graph=%s dedup=%s",
+                    g.user["username"], g.user["id"], gid, did)
+        flash("已从断点继续去重，已完成的候选组不会重复判定。")
     return redirect(url_for("knowledge_graph_detail", gid=gid))
 
 
@@ -5321,7 +5404,9 @@ def knowledge_graph_dedup_discard(gid, did):
     _kg_graph(gid, edit=True)
     db = get_db()
     dedup = _kg_dedup(gid, did)
-    if dedup["status"] != kg_dedup_utils.DEDUP_PENDING:
+    if dedup["status"] not in (kg_dedup_utils.DEDUP_PENDING,
+                               kg_dedup_utils.DEDUP_FAILED,
+                               kg_dedup_utils.DEDUP_INTERRUPTED):
         flash("该去重结果已处理")
         return redirect(url_for("knowledge_graph_detail", gid=gid))
     db.execute("UPDATE kg_dedup_runs SET status=? WHERE id=?",

@@ -423,8 +423,29 @@ CREATE TABLE IF NOT EXISTS kg_dedup_runs(
   operation_id INTEGER,
   created_by INTEGER NOT NULL DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  applied_at TEXT);
+  applied_at TEXT,
+  plan TEXT DEFAULT '[]',
+  progress TEXT DEFAULT '{}',
+  graph_sig TEXT DEFAULT '',
+  started_at TEXT,
+  finished_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_kg_dedup_runs_graph ON kg_dedup_runs(graph_id, id);
+-- 去重候选组：逐组持久化判定状态，支持并发执行、进度展示与断点续跑
+CREATE TABLE IF NOT EXISTS kg_dedup_groups(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL REFERENCES kg_dedup_runs(id),
+  group_index INTEGER NOT NULL,
+  fingerprint TEXT DEFAULT '',
+  node_ids TEXT DEFAULT '[]',
+  member_names TEXT DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'pending',
+  clusters TEXT DEFAULT '[]',
+  error TEXT DEFAULT '',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT,
+  finished_at TEXT,
+  UNIQUE(run_id, group_index));
+CREATE INDEX IF NOT EXISTS idx_kg_dedup_groups_run ON kg_dedup_groups(run_id, status);
 -- 图谱协作：manage 可改名/删除/管理成员，edit 可加语料与改关系，use 可在自己的课程中引入
 CREATE TABLE IF NOT EXISTS kg_members(
   graph_id INTEGER NOT NULL REFERENCES knowledge_graphs(id),
@@ -683,6 +704,13 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=(), reco
     audit_cols = {r[1] for r in con.execute("PRAGMA table_info(kg_audits)")}
     if "operation_id" not in audit_cols:
         con.execute("ALTER TABLE kg_audits ADD COLUMN operation_id INTEGER")
+    # 智能去重：进度透明与断点续跑所需的运行态字段（旧库幂等补列）
+    dedup_cols = {r[1] for r in con.execute("PRAGMA table_info(kg_dedup_runs)")}
+    for col, ddl in (("plan", "TEXT DEFAULT '[]'"), ("progress", "TEXT DEFAULT '{}'"),
+                     ("graph_sig", "TEXT DEFAULT ''"), ("started_at", "TEXT"),
+                     ("finished_at", "TEXT")):
+        if col not in dedup_cols:
+            con.execute(f"ALTER TABLE kg_dedup_runs ADD COLUMN {col} {ddl}")
     con.execute("CREATE INDEX IF NOT EXISTS idx_ai_operations_material "
                 "ON ai_operations(material_id, id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_ai_usage_chunk "
@@ -705,8 +733,18 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=(), reco
                     ("服务重启，知识图谱建图已中断，已自动重新排队，将从未完成块续建",))
         con.execute("UPDATE ai_operations SET status='failed', error=?, "
                     "finished_at=datetime('now','+8 hours') WHERE status IN ('queued','running') "
+                    "AND operation_type='kg_dedup'",
+                    ("服务重启，智能去重已中断，可点击「继续去重」从未完成的候选组续跑",))
+        con.execute("UPDATE ai_operations SET status='failed', error=?, "
+                    "finished_at=datetime('now','+8 hours') WHERE status IN ('queued','running') "
                     "AND operation_type<>'kg_build'",
                     ("服务重启，后台 AI 任务已中断，请重新提交",))
+        # 去重逐组状态落库：重启后正在进行/排队中的运行标记为「已中断」，
+        # 失败/进行中的候选组回到待处理，已完成组保留结果供断点续跑。
+        con.execute("UPDATE kg_dedup_groups SET status='pending', finished_at=NULL "
+                    "WHERE status='running'")
+        con.execute("UPDATE kg_dedup_runs SET status='已中断', finished_at=datetime('now','+8 hours') "
+                    "WHERE status='进行中'")
         con.execute("""
             UPDATE ai_usage_events SET status='error',
               error=CASE WHEN EXISTS(

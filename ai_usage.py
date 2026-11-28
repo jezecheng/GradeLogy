@@ -8,6 +8,7 @@ ai_usage_events 一行；费用按操作开始时的价格与高峰倍率快照�
 """
 import json
 import logging
+import threading
 from datetime import datetime, timedelta
 
 from db import get_db
@@ -128,13 +129,17 @@ def _scrub_debug(value, secrets):
     return value
 
 
+_call_index_lock = threading.Lock()
+
+
 def _call_index(operation, event, existing):
     call_key = event.get("call_key")
     if call_key:
-        indexes = operation.setdefault("_call_indexes", {})
-        if call_key not in indexes:
-            indexes[call_key] = len(indexes) + 1
-        return indexes[call_key]
+        with _call_index_lock:
+            indexes = operation.setdefault("_call_indexes", {})
+            if call_key not in indexes:
+                indexes[call_key] = len(indexes) + 1
+            return indexes[call_key]
     if existing is not None and existing["call_index"] is not None:
         return existing["call_index"]
     operation["_legacy_call_index"] = operation.get("_legacy_call_index", 0) + 1

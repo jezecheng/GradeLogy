@@ -1,19 +1,27 @@
 # -*- coding: utf-8 -*-
 """知识图谱智能去重：跨分类 + 共享邻居结构 + 别名冲突三路召回疑似同义概念，
-分批送 LLM 判定合并簇，复用 knowledge_graph 的校验/快照/回滚纯图函数。
+并发分批送 LLM 判定合并簇，复用 knowledge_graph 的校验/快照/回滚纯图函数。
 
 设计要点（对齐 kg_dedup_archive_plan.md 阶段二）：
 - 候选召回先用倒排索引把可能相似的节点对捞出，避免 O(n²) 全图两两比较；
-- 每批候选 ≤ DEDUP_GROUP_MAX，逐组送模型，单组失败只记录、不中断整体；
+- 候选组之间互不依赖，按 KG_DEDUP_CONCURRENCY 并发判定，单组失败只记录、不中断整体；
+- 逐组状态写入 kg_dedup_groups，运行进度写入 kg_dedup_runs.progress，界面可实时展示；
+- 已完成候选组持久化判定结果，失败/中断后可从断点续跑，不重复调用模型；
 - 模型只输出合并簇（merge_nodes），不自动改图；汇总后整体交
   kg_utils.validate_audit_suggestions 校验（ID 归属 / 冲突 / 前置防环），
   应用时扁平化为 merge_nodes 走同一套 apply_audit + snapshot + restore。
 """
+import hashlib
+import json
 import logging
 import re
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextlib import nullcontext
 
-from utilities import knowledge_graph as kg_utils
+import config
 from utilities import kg_text, llm
+from utilities import knowledge_graph as kg_utils
+from utilities.time_utils import beijing_wall_now
 
 log = logging.getLogger("gradelogy.kg_dedup")
 
@@ -24,6 +32,23 @@ DEDUP_DISCARDED = kg_utils.AUDIT_DISCARDED      # 已忽略
 DEDUP_FAILED = kg_utils.AUDIT_FAILED            # 失败
 DEDUP_CLEAN = kg_utils.AUDIT_CLEAN              # 无需调整
 DEDUP_ROLLED_BACK = kg_utils.AUDIT_ROLLED_BACK  # 已回滚
+
+# 去重运行态：进行中 / 服务重启中断。中断后可从未完成候选组继续。
+DEDUP_RUNNING = "进行中"
+DEDUP_INTERRUPTED = "已中断"
+DEDUP_RESUMABLE = (DEDUP_FAILED, DEDUP_INTERRUPTED)
+
+# 候选组逐组状态（与 kg_dedup_groups.status 一致）。
+GROUP_PENDING = "pending"
+GROUP_RUNNING = "running"
+GROUP_DONE = "done"
+GROUP_FAILED = "failed"
+GROUP_LABEL = {
+    GROUP_PENDING: "待处理",
+    GROUP_RUNNING: "判定中",
+    GROUP_DONE: "已完成",
+    GROUP_FAILED: "失败",
+}
 
 DEDUP_GROUP_MAX = 40            # 单批送模型的候选节点上限
 DEDUP_NEIGHBOR_JACCARD = 0.5    # 共享邻居结构召回的 Jaccard 阈值
@@ -100,21 +125,15 @@ def _node_context(row):
     }
 
 
-def build_dedup_candidates(db, graph_id):
-    """三路召回候选组，避免 O(n²)：别名/名称归一冲突、共享邻居结构（跨分类）、
-    同分类名称 token 重叠。候选对经并查集连成组，单组 ≤ DEDUP_GROUP_MAX。
-
-    返回 list[list[node_context]]，node_context 含 id/name/aliases/category/
-    definition/confidence 及按 relation 分组的邻居结构。
-    """
+def _load_graph_context(db, graph_id):
+    """加载全图节点上下文与邻居结构，供候选召回和断点续跑复用。"""
     node_rows = db.execute(
         "SELECT id,name,normalized,category,definition,aliases,confidence "
         "FROM kg_nodes WHERE graph_id=? ORDER BY id", (graph_id,)).fetchall()
-    if len(node_rows) < 2:
-        return []
     nodes = {row["id"]: _node_context(row) for row in node_rows}
+    if not nodes:
+        return nodes
     name_by_id = {nid: ctx["name"] for nid, ctx in nodes.items()}
-
     edge_rows = db.execute(
         "SELECT src_id,dst_id,relation FROM kg_edges WHERE graph_id=?",
         (graph_id,)).fetchall()
@@ -125,24 +144,38 @@ def build_dedup_candidates(db, graph_id):
         src, dst, relation = edge["src_id"], edge["dst_id"], edge["relation"]
         if src not in nodes or dst not in nodes:
             continue
-        peer_name = name_by_id
         if relation == "prerequisite":
             # src 是 dst 的前置：dst 的前置含 src，src 的延伸含 dst
             neighbors[dst]["prerequisites"].append(
-                {"id": src, "name": peer_name[src]})
+                {"id": src, "name": name_by_id[src]})
             neighbors[src]["dependents"].append(
-                {"id": dst, "name": peer_name[dst]})
+                {"id": dst, "name": name_by_id[dst]})
         elif relation == "contains":
-            neighbors[src]["contains"].append({"id": dst, "name": peer_name[dst]})
-            neighbors[dst]["contains"].append({"id": src, "name": peer_name[src]})
+            neighbors[src]["contains"].append({"id": dst, "name": name_by_id[dst]})
+            neighbors[dst]["contains"].append({"id": src, "name": name_by_id[src]})
         elif relation == "related":
-            neighbors[src]["related"].append({"id": dst, "name": peer_name[dst]})
-            neighbors[dst]["related"].append({"id": src, "name": peer_name[src]})
+            neighbors[src]["related"].append({"id": dst, "name": name_by_id[dst]})
+            neighbors[dst]["related"].append({"id": src, "name": name_by_id[src]})
         neighbor_set[src].add(dst)
         neighbor_set[dst].add(src)
-    for nid in nodes:
-        nodes[nid]["neighbors"] = neighbors[nid]
+    for nid, ctx in nodes.items():
+        ctx["neighbors"] = neighbors[nid]
+        ctx["neighbor_ids"] = neighbor_set[nid]
+    return nodes
 
+
+def build_dedup_candidates(db, graph_id):
+    """三路召回候选组，避免 O(n²)：别名/名称归一冲突、共享邻居结构（跨分类）、
+    同分类名称 token 重叠。候选对经并查集连成组，单组 ≤ DEDUP_GROUP_MAX。
+
+    返回 list[list[node_context]]，node_context 含 id/name/aliases/category/
+    definition/confidence 及按 relation 分组的邻居结构。
+    """
+    nodes = _load_graph_context(db, graph_id)
+    if len(nodes) < 2:
+        return []
+
+    neighbor_set = {nid: ctx["neighbor_ids"] for nid, ctx in nodes.items()}
     pairs = set()  # (a, b) 且 a < b
 
     # (a) 别名/名称归一冲突（强信号）：normalized 列本身有唯一约束，
@@ -350,48 +383,171 @@ def flatten_dedup_suggestions(valid_groups):
     return result
 
 
-def run_dedup(db, graph_id, api_url, api_key, model, usage_hook=None,
-              max_tokens=DEDUP_MAX_TOKENS):
-    """逐组判定合并簇 → 并查集合并重叠簇 → 扁平化 → 整体校验。
+# ---------- 并发执行、进度与断点 ----------
 
-    返回 (valid_groups, rejected_groups, error)。单组异常/失败只记录、不中断整体。
-    valid_groups 每项含 node_ids/keep_id/keep_name/member_names/reason/confidence/suggestion；
-    rejected_groups 每项含 node_ids/keep_id/member_names/reason/confidence。
-    调用方可通过 flatten_dedup_suggestions(valid_groups) 拿到 apply 用建议列表。
+def _resolve_concurrency(value):
+    """候选组并发数：显式值优先，其次环境配置；限制在 1~8，避免打满模型限流。"""
+    if value:
+        try:
+            return max(1, min(8, int(value)))
+        except (TypeError, ValueError):
+            pass
+    try:
+        return max(1, min(8, int(getattr(config, "KG_DEDUP_CONCURRENCY", 3))))
+    except (TypeError, ValueError):
+        return 3
+
+
+def graph_signature(db, graph_id):
+    """图谱节点 ID 与边数指纹：断点续跑前校验图谱未发生结构变化。"""
+    rows = db.execute(
+        "SELECT id FROM kg_nodes WHERE graph_id=? ORDER BY id", (graph_id,)).fetchall()
+    edge_count = db.execute(
+        "SELECT COUNT(*) FROM kg_edges WHERE graph_id=?", (graph_id,)).fetchone()[0]
+    digest = hashlib.sha1()
+    digest.update(f"e{edge_count};".encode())
+    for row in rows:
+        digest.update(f"n{row[0]};".encode())
+    return digest.hexdigest()[:16]
+
+
+def group_fingerprint(node_ids):
+    """单个候选组的稳定指纹，用于断点续跑时匹配已完成结果。"""
+    ids = sorted(int(i) for i in node_ids or [])
+    return hashlib.sha1(",".join(str(i) for i in ids).encode()).hexdigest()[:16]
+
+
+def _safe_json_list(value):
+    try:
+        data = json.loads(value or "[]")
+    except (TypeError, ValueError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _safe_json_dict(value):
+    try:
+        data = json.loads(value or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _build_plan(candidates):
+    """把候选组冻结为可持久化的执行计划（索引 + 节点 ID + 成员名 + 指纹）。"""
+    plan = []
+    for index, group in enumerate(candidates):
+        node_ids = [int(ctx["id"]) for ctx in group]
+        plan.append({
+            "index": index,
+            "node_ids": node_ids,
+            "member_names": [ctx["name"] for ctx in group],
+            "fingerprint": group_fingerprint(node_ids),
+        })
+    return plan
+
+
+def load_group_contexts(db, graph_id, id_lists):
+    """按节点 ID 列表重建候选组上下文（含邻居结构），用于断点续跑。"""
+    nodes = _load_graph_context(db, graph_id)
+    groups = []
+    for ids in id_lists:
+        group = [nodes[nid] for nid in ids if nid in nodes]
+        groups.append(group)
+    return groups
+
+
+def _analyze_items(items, *, api_url, api_key, model, max_tokens, usage_hook=None,
+                   concurrency=None, task_context=None, known_ids=None,
+                   on_group_start=None, on_group_done=None):
+    """并发判定候选组，逐组回调状态；回调始终在编排线程执行，便于安全落库。
+
+    items 为 [(plan_index, group_context), ...]；on_group_done(index, clusters, error)
+    收到的是已按 known_ids 过滤后的合并簇。
     """
-    candidates = build_dedup_candidates(db, graph_id)
-    if not candidates:
-        return [], [], "未发现疑似重复的概念"
-    name_rows = db.execute(
-        "SELECT id,name FROM kg_nodes WHERE graph_id=?", (graph_id,)).fetchall()
-    name_by_id = {row["id"]: row["name"] for row in name_rows}
-    known = set(name_by_id)
-
     raw_clusters = []
     errors = []
-    for index, group in enumerate(candidates):
-        try:
-            groups, err = analyze_dedup_group(
-                group, api_url, api_key, model, max_tokens, usage_hook=usage_hook)
-        except Exception as e:  # 单组失败不中断整体
-            log.exception("去重候选组判定失败 graph=%s group=%s", graph_id, index)
-            errors.append(f"第 {index + 1} 组：{e}")
-            continue
-        if err:
-            errors.append(f"第 {index + 1} 组：{err}")
-            continue
-        for cluster in groups:
-            ids = [i for i in cluster["node_ids"] if i in known]
+    if not items:
+        return raw_clusters, errors
+    concurrency = _resolve_concurrency(concurrency)
+
+    def clean_clusters(clusters):
+        result = []
+        for cluster in clusters:
+            ids = [i for i in cluster["node_ids"]
+                   if known_ids is None or i in known_ids]
             if len(ids) < 2:
                 continue
             cluster["node_ids"] = ids
             if cluster["keep_id"] not in ids:
                 cluster["keep_id"] = ids[0]
-            raw_clusters.append(cluster)
+            result.append(cluster)
+        return result
 
+    def worker(group):
+        context = task_context() if task_context else nullcontext()
+        with context:
+            return analyze_dedup_group(
+                group, api_url, api_key, model, max_tokens, usage_hook=usage_hook)
+
+    def handle(index, groups, err):
+        clusters = [] if err else clean_clusters(groups)
+        if on_group_done:
+            on_group_done(index, clusters, err)
+        if err:
+            errors.append(f"第 {index + 1} 组：{err}")
+        else:
+            raw_clusters.extend(clusters)
+
+    if concurrency <= 1 or len(items) <= 1:
+        for index, group in items:
+            if on_group_start:
+                on_group_start(index)
+            try:
+                groups, err = worker(group)
+            except Exception as e:  # noqa: BLE001 单组失败不中断整体
+                groups, err = [], str(e)
+            handle(index, groups, err)
+        return raw_clusters, errors
+
+    with ThreadPoolExecutor(max_workers=min(concurrency, len(items)),
+                            thread_name_prefix="kg-dedup") as pool:
+        pending = iter(items)
+        futures = {}
+
+        def submit_next():
+            try:
+                index, group = next(pending)
+            except StopIteration:
+                return False
+            if on_group_start:
+                on_group_start(index)
+            futures[pool.submit(worker, group)] = index
+            return True
+
+        for _ in range(min(concurrency, len(items))):
+            submit_next()
+        while futures:
+            done, _ = wait(list(futures), return_when=FIRST_COMPLETED)
+            for future in done:
+                index = futures.pop(future)
+                try:
+                    groups, err = future.result()
+                except Exception as e:  # noqa: BLE001
+                    groups, err = [], str(e)
+                handle(index, groups, err)
+                submit_next()
+    return raw_clusters, errors
+
+
+def assemble_dedup_result(db, graph_id, raw_clusters, errors=()):
+    """合并重叠簇 → 扁平化为 merge_nodes → 整体校验，返回 (valid, rejected, error)。"""
     if not raw_clusters:
         message = "；".join(errors) if errors else "未发现可合并的重复概念"
         return [], [], message
+    name_rows = db.execute(
+        "SELECT id,name FROM kg_nodes WHERE graph_id=?", (graph_id,)).fetchall()
+    name_by_id = {row["id"]: row["name"] for row in name_rows}
 
     # 并查集合并重叠簇：A=B、B=C → A=B=C。
     all_ids = set()
@@ -483,3 +639,236 @@ def run_dedup(db, graph_id, api_url, api_key, model, usage_hook=None,
 
     error = "；".join(errors) if errors else ""
     return valid_groups, rejected_groups, error
+
+
+def run_dedup(db, graph_id, api_url, api_key, model, usage_hook=None,
+              max_tokens=DEDUP_MAX_TOKENS, *, concurrency=None, task_context=None):
+    """一次性执行智能去重（不落进度记录），供命令行与旧调用方使用。
+
+    逐组并发判定 → 并查集合并重叠簇 → 扁平化 → 整体校验。
+    返回 (valid_groups, rejected_groups, error)。单组异常/失败只记录、不中断整体。
+    """
+    candidates = build_dedup_candidates(db, graph_id)
+    if not candidates:
+        return [], [], "未发现疑似重复的概念"
+    known_ids = {row[0] for row in db.execute(
+        "SELECT id FROM kg_nodes WHERE graph_id=?", (graph_id,)).fetchall()}
+    raw_clusters, errors = _analyze_items(
+        list(enumerate(candidates)), api_url=api_url, api_key=api_key,
+        model=model, max_tokens=max_tokens, usage_hook=usage_hook,
+        concurrency=concurrency, task_context=task_context, known_ids=known_ids)
+    return assemble_dedup_result(db, graph_id, raw_clusters, errors)
+
+
+# ---------- 持久化运行：进度、断点续跑 ----------
+
+def create_dedup_run(db, graph_id, *, model="", created_by=0, operation_id=None):
+    """创建一条「进行中」的去重记录，计划与进度随候选组逐步写入。"""
+    cur = db.execute(
+        "INSERT INTO kg_dedup_runs(graph_id,status,model,operation_id,created_by,started_at)"
+        " VALUES(?,?,?,?,?,CURRENT_TIMESTAMP)",
+        (graph_id, DEDUP_RUNNING, model, operation_id, created_by))
+    db.commit()
+    return cur.lastrowid
+
+
+def _progress_payload(rows):
+    """把逐组行汇总成界面可直接渲染的进度结构。"""
+    counts = {}
+    groups = []
+    for row in rows:
+        status = row["status"]
+        counts[status] = counts.get(status, 0) + 1
+        names = _safe_json_list(row["member_names"])
+        groups.append({
+            "index": row["group_index"],
+            "status": status,
+            "count": len(names),
+            "names": names[:3],
+            "error": (row["error"] or "")[:80],
+            "attempts": row["attempts"] or 0,
+        })
+    total = len(rows)
+    done = counts.get(GROUP_DONE, 0)
+    failed = counts.get(GROUP_FAILED, 0)
+    processed = done + failed
+    return {
+        "total": total,
+        "done": done,
+        "failed": failed,
+        "running": counts.get(GROUP_RUNNING, 0),
+        "pending": counts.get(GROUP_PENDING, 0),
+        "percent": round(processed * 100 / total) if total else 0,
+        "updated_at": beijing_wall_now().isoformat(sep=" ", timespec="seconds"),
+        "groups": groups,
+    }
+
+
+def _write_progress(db, run_id):
+    rows = db.execute(
+        "SELECT * FROM kg_dedup_groups WHERE run_id=? ORDER BY group_index",
+        (run_id,)).fetchall()
+    payload = _progress_payload(rows)
+    db.execute("UPDATE kg_dedup_runs SET progress=? WHERE id=?",
+               (json.dumps(payload, ensure_ascii=False), run_id))
+    db.commit()
+    return payload
+
+
+def _finish_run(db, run_id, status, valid_groups, rejected_groups, error):
+    rows = db.execute(
+        "SELECT * FROM kg_dedup_groups WHERE run_id=? ORDER BY group_index",
+        (run_id,)).fetchall()
+    progress = _progress_payload(rows)
+    suggestions = flatten_dedup_suggestions(valid_groups)
+    db.execute(
+        "UPDATE kg_dedup_runs SET status=?,groups=?,suggestions=?,rejected=?,error=?,"
+        "progress=?,finished_at=CURRENT_TIMESTAMP WHERE id=?",
+        (status, json.dumps(valid_groups, ensure_ascii=False),
+         json.dumps(suggestions, ensure_ascii=False),
+         json.dumps(rejected_groups, ensure_ascii=False),
+         (error or "")[:500], json.dumps(progress, ensure_ascii=False), run_id))
+    db.commit()
+
+
+def run_is_resumable(status, progress):
+    """该去重记录是否还能从未完成候选组继续。"""
+    if status in (DEDUP_APPLIED, DEDUP_DISCARDED, DEDUP_ROLLED_BACK):
+        return False
+    if not isinstance(progress, dict):
+        return False
+    total = int(progress.get("total") or 0)
+    if total <= 0:
+        return False
+    failed = int(progress.get("failed") or 0)
+    done = int(progress.get("done") or 0)
+    if failed > 0:
+        return True
+    return status in DEDUP_RESUMABLE and done < total
+
+
+def run_dedup_run(db, graph_id, run_id, api_url, api_key, model, usage_hook=None,
+                  max_tokens=DEDUP_MAX_TOKENS, concurrency=None,
+                  task_context=None):
+    """执行一条已创建的持久化去重记录，支持并发判定与断点续跑。
+
+    - 首次执行：生成候选计划并写入 kg_dedup_groups；
+    - 续跑：图谱结构未变化时复用已完成组结果，只重跑失败/未完成组；
+    - 每次组开始/结束都更新 kg_dedup_runs.progress，界面可实时查看。
+
+    返回 (valid_groups, rejected_groups, error, status)。
+    """
+    run = db.execute(
+        "SELECT * FROM kg_dedup_runs WHERE id=? AND graph_id=?",
+        (run_id, graph_id)).fetchone()
+    if not run:
+        return [], [], "去重记录不存在", DEDUP_FAILED
+
+    plan = _safe_json_list(run["plan"])
+    signature = graph_signature(db, graph_id)
+    if plan:
+        if (run["graph_sig"] or "") != signature:
+            message = "图谱内容在去重开始后已变化，无法从断点继续；请重新开始去重。"
+            _finish_run(db, run_id, DEDUP_FAILED, [], [], message)
+            return [], [], message, DEDUP_FAILED
+    else:
+        candidates = build_dedup_candidates(db, graph_id)
+        if not candidates:
+            message = "未发现疑似重复的概念"
+            _finish_run(db, run_id, DEDUP_FAILED, [], [], message)
+            return [], [], message, DEDUP_FAILED
+        plan = _build_plan(candidates)
+        db.execute("UPDATE kg_dedup_runs SET plan=?,graph_sig=? WHERE id=?",
+                   (json.dumps(plan, ensure_ascii=False), signature, run_id))
+        db.commit()
+
+    # 补齐组行（旧记录或异常中断时）；进行中/失败组重置为待处理，已完成组保留结果。
+    existing = {row["group_index"] for row in db.execute(
+        "SELECT group_index FROM kg_dedup_groups WHERE run_id=?", (run_id,)).fetchall()}
+    for item in plan:
+        if item["index"] in existing:
+            continue
+        db.execute(
+            "INSERT OR IGNORE INTO kg_dedup_groups(run_id,group_index,fingerprint,"
+            "node_ids,member_names,status) VALUES(?,?,?,?,?,?)",
+            (run_id, item["index"], item["fingerprint"],
+             json.dumps(item["node_ids"], ensure_ascii=False),
+             json.dumps(item["member_names"], ensure_ascii=False), GROUP_PENDING))
+    db.execute(
+        "UPDATE kg_dedup_groups SET status=?, finished_at=NULL, error='' "
+        "WHERE run_id=? AND status IN (?,?)",
+        (GROUP_PENDING, run_id, GROUP_RUNNING, GROUP_FAILED))
+    db.commit()
+
+    rows = db.execute(
+        "SELECT * FROM kg_dedup_groups WHERE run_id=? ORDER BY group_index",
+        (run_id,)).fetchall()
+    done_indexes = {row["group_index"] for row in rows if row["status"] == GROUP_DONE}
+    pending_plan = [item for item in plan if item["index"] not in done_indexes]
+    contexts = load_group_contexts(
+        db, graph_id, [item["node_ids"] for item in pending_plan])
+    items = []
+    for item, context in zip(pending_plan, contexts):
+        if len(context) >= 2:
+            items.append((item["index"], context))
+        else:  # 节点已不存在等边界：直接视为无合并结果，避免卡在待处理
+            db.execute(
+                "UPDATE kg_dedup_groups SET status=?,clusters='[]',error='',"
+                "finished_at=CURRENT_TIMESTAMP WHERE run_id=? AND group_index=?",
+                (GROUP_DONE, run_id, item["index"]))
+    db.commit()
+    _write_progress(db, run_id)
+
+    known_ids = {row[0] for row in db.execute(
+        "SELECT id FROM kg_nodes WHERE graph_id=?", (graph_id,)).fetchall()}
+
+    def on_group_start(index):
+        db.execute(
+            "UPDATE kg_dedup_groups SET status=?,attempts=attempts+1,"
+            "started_at=COALESCE(started_at,CURRENT_TIMESTAMP),finished_at=NULL "
+            "WHERE run_id=? AND group_index=?",
+            (GROUP_RUNNING, run_id, index))
+        db.commit()
+        _write_progress(db, run_id)
+
+    def on_group_done(index, clusters, error):
+        if error:
+            db.execute(
+                "UPDATE kg_dedup_groups SET status=?,error=?,finished_at=CURRENT_TIMESTAMP "
+                "WHERE run_id=? AND group_index=?",
+                (GROUP_FAILED, (error or "")[:500], run_id, index))
+        else:
+            db.execute(
+                "UPDATE kg_dedup_groups SET status=?,clusters=?,error='',"
+                "finished_at=CURRENT_TIMESTAMP WHERE run_id=? AND group_index=?",
+                (GROUP_DONE, json.dumps(clusters, ensure_ascii=False), run_id, index))
+        db.commit()
+        _write_progress(db, run_id)
+
+    _analyze_items(
+        items, api_url=api_url, api_key=api_key, model=model,
+        max_tokens=max_tokens, usage_hook=usage_hook, concurrency=concurrency,
+        task_context=task_context, known_ids=known_ids,
+        on_group_start=on_group_start, on_group_done=on_group_done)
+
+    rows = db.execute(
+        "SELECT * FROM kg_dedup_groups WHERE run_id=? ORDER BY group_index",
+        (run_id,)).fetchall()
+    all_clusters = []
+    errors = []
+    for row in rows:
+        if row["status"] == GROUP_DONE:
+            all_clusters.extend(_safe_json_list(row["clusters"]))
+        elif row["status"] == GROUP_FAILED:
+            errors.append(f"第 {row['group_index'] + 1} 组：{row['error'] or '未知错误'}")
+
+    if not all_clusters:
+        message = "；".join(errors) if errors else "未发现可合并的重复概念"
+        status = DEDUP_FAILED if errors else DEDUP_CLEAN
+        _finish_run(db, run_id, status, [], [], message)
+        return [], [], message, status
+
+    valid, rejected, error = assemble_dedup_result(db, graph_id, all_clusters, errors)
+    status = DEDUP_PENDING if valid else (DEDUP_FAILED if errors else DEDUP_CLEAN)
+    _finish_run(db, run_id, status, valid, rejected, error)
+    return valid, rejected, error, status

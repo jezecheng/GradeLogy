@@ -37,7 +37,7 @@
 | 存量成环报告 | 已完成 | 对前置子图做强连通分量分析，在详情页列出环上概念和置信度最低、建议优先处理的关系。 |
 | 关系维护 | 已完成 | 关系边支持删除与反向；反向仅限 `prerequisite`，先排除原边做防环校验，重复反向边自动合并。 |
 | AI 图谱体检 | 已完成 | LLM 只输出结构化建议（合并节点/反向/删除/下线），服务端校验 ID、合并冲突与成环风险后生成预览；用户确认后应用，应用前保存快照，可回滚。 |
-| AI 智能去重 | 已完成 | 三路召回疑似重复概念（别名/名称归一冲突、跨分类共享邻居、同分类 token 重叠），分批送 LLM 判定合并簇，复用体检的校验/快照/回滚；按簇可视化预览，教师逐簇确认后应用。 |
+| AI 智能去重 | 已完成 | 三路召回疑似重复概念（别名/名称归一冲突、跨分类共享邻居、同分类 token 重叠），候选组按 `KG_DEDUP_CONCURRENCY` 并发送 LLM 判定；逐组进度实时可见，失败/重启后可从未完成候选组断点续跑（已完成组不重复调用模型）；按簇可视化预览，教师逐簇确认后应用，复用体检的校验/快照/回滚。 |
 | 资料归档减容 | 已完成 | 把已建图资料的源文件移出 `uploads/` 到独立归档目录，仅保留建图历史（元数据、文本块、节点、关系、体检记录）；归档文件不进系统备份，可随时还原。 |
 | 协作权限 | 已完成 | 创建者/管理员拥有管理权限；获授权成员可设为管理、编辑或使用角色。成员管理只对管理角色开放；教师只读浏览和课程关联不依赖成员记录。`TEMPORARY_GLOBAL_TEACHER_ACCESS=1` 时所有老师临时获得编辑权限，但不因此获得管理角色。 |
 | 图谱运营指标 | 已完成 | 详情页展示语料文件与各数据表的空间占用、累计构建用时、Token 和涉及模型。 |
@@ -365,7 +365,8 @@ erDiagram
 | POST | `/knowledge-graphs/<oid:gid>/audit/<oid:aid>/apply` | 应用体检建议并保存应用前快照 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/audit/<oid:aid>/rollback` | 从快照回滚已应用的建议 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/audit/<oid:aid>/discard` | 忽略一次体检结果 | 重定向 |
-| POST | `/knowledge-graphs/<oid:gid>/dedup` | 异步运行智能去重并保存合并簇建议 | 重定向 |
+| POST | `/knowledge-graphs/<oid:gid>/dedup` | 异步运行智能去重并保存合并簇建议；候选组并发判定并逐组记录进度 | 重定向 |
+| POST | `/knowledge-graphs/<oid:gid>/dedup/<oid:did>/resume` | 从断点继续未完成的候选组，已完成组复用结果 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/dedup/<oid:did>/apply` | 应用所选去重合并簇并保存应用前快照；表单 `keep_ids` 为保留的簇 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/dedup/<oid:did>/rollback` | 从快照回滚最近一次已应用的去重 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/dedup/<oid:did>/discard` | 忽略一次去重结果 | 重定向 |
@@ -518,7 +519,7 @@ Content-Type: application/json
 | `utilities/knowledge_graph.py` | `analyze_graph(...)` | 调用模型生成图谱体检建议 |
 | `utilities/knowledge_graph.py` | `validate_audit_suggestions(...)` | 校验建议的 ID、合并冲突和成环风险 |
 | `utilities/knowledge_graph.py` | `apply_audit(...)` / `restore_snapshot(...)` | 应用建议与快照回滚 |
-| `utilities/kg_dedup.py` | `build_dedup_candidates(...)` / `run_dedup(...)` | 三路召回疑似重复概念并分批送 LLM 判定合并簇，汇总后复用体检校验 |
+| `utilities/kg_dedup.py` | `build_dedup_candidates(...)` / `run_dedup(...)` / `run_dedup_run(...)` | 三路召回疑似重复概念，并发分批送 LLM 判定合并簇；持久化逐组状态与进度，支持断点续跑，汇总后复用体检校验 |
 | `utilities/kg_archive.py` | `archive_material(...)` / `restore_material_archive(...)` / `bulk_archive_materials(...)` | 资料源文件归档/还原与批量事务，解析归档路径 |
 | `app.py` | `start_kg_recovery()` | 启动时恢复待建图和建图中资料 |
 

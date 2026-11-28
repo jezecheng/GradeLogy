@@ -24,7 +24,8 @@ import app as app_module  # noqa: E402
 import db as database  # noqa: E402
 from utilities import kg_cli, kg_dedup as kd, kg_text, kg_transfer, knowledge_graph as kg  # noqa: E402
 
-_TABLES = ("kg_category_maps", "kg_members", "kg_audits", "kg_chunks", "kg_edges",
+_TABLES = ("kg_dedup_groups", "kg_dedup_runs", "kg_category_maps", "kg_members",
+           "kg_audits", "kg_chunks", "kg_edges",
            "kg_nodes", "kg_materials", "knowledge_graphs", "tag_analyses",
            "question_assessments", "question_tags", "questions", "submissions", "lectures", "exams",
            "exam_scores", "enrollments", "course_teachers", "courses", "users",
@@ -796,6 +797,96 @@ class KGLogicTest(unittest.TestCase):
             valid, rejected, error = kd.run_dedup(self.con, 1, "u", "k", "m")
         self.assertEqual(len(valid), 1)
         self.assertIn("boom", error)
+
+    @staticmethod
+    def _dedup_group(*nodes):
+        return [{"id": nid, "name": name, "aliases": [], "category": "",
+                 "definition": "", "confidence": 0.9, "normalized": ""}
+                for nid, name in nodes]
+
+    def test_dedup_run_persists_progress_and_resumes_completed_groups(self):
+        a = self._dedup_node("概念甲")
+        b = self._dedup_node("概念乙")
+        c = self._dedup_node("概念丙")
+        d = self._dedup_node("概念丁")
+        groups = [self._dedup_group((a, "概念甲"), (b, "概念乙")),
+                  self._dedup_group((c, "概念丙"), (d, "概念丁"))]
+        calls = []
+
+        def fake_chat(api, key, model, content, **kwargs):
+            text = content[0]["text"] if isinstance(content, list) else content
+            calls.append(text)
+            if "概念丙" in text:
+                raise RuntimeError("temporary boom")
+            return json.dumps({"groups": [
+                {"node_ids": [a, b], "keep_id": a, "reason": "同义",
+                 "confidence": 0.9}]}, ensure_ascii=False), "stop", ""
+
+        run_id = kd.create_dedup_run(self.con, 1, model="m", created_by=1)
+        with mock.patch.object(kd, "build_dedup_candidates", return_value=groups), \
+                mock.patch.object(kd.llm, "chat", side_effect=fake_chat):
+            valid, _rejected, error, status = kd.run_dedup_run(
+                self.con, 1, run_id, "u", "k", "m", concurrency=2)
+        self.assertEqual(len(valid), 1)
+        self.assertIn("temporary boom", error)
+        self.assertEqual(status, kd.DEDUP_PENDING)
+        progress = json.loads(self.con.execute(
+            "SELECT progress FROM kg_dedup_runs WHERE id=?",
+            (run_id,)).fetchone()["progress"])
+        self.assertEqual((progress["total"], progress["done"], progress["failed"]),
+                         (2, 1, 1))
+        self.assertTrue(kd.run_is_resumable(kd.DEDUP_PENDING, progress))
+        first_calls = len(calls)
+
+        def good_chat(api, key, model, content, **kwargs):
+            text = content[0]["text"] if isinstance(content, list) else content
+            calls.append(text)
+            ids = [c, d] if "概念丙" in text else [a, b]
+            return json.dumps({"groups": [
+                {"node_ids": ids, "keep_id": ids[0], "reason": "同义",
+                 "confidence": 0.9}]}, ensure_ascii=False), "stop", ""
+
+        with mock.patch.object(kd, "build_dedup_candidates", return_value=groups), \
+                mock.patch.object(kd.llm, "chat", side_effect=good_chat):
+            valid2, _rejected2, error2, status2 = kd.run_dedup_run(
+                self.con, 1, run_id, "u", "k", "m", concurrency=2)
+        self.assertEqual(len(valid2), 2)
+        self.assertEqual(error2, "")
+        self.assertEqual(status2, kd.DEDUP_PENDING)
+        # 断点续跑只重跑失败组，已完成组直接复用结果
+        self.assertEqual(len(calls) - first_calls, 1)
+
+    def test_dedup_resume_refuses_after_graph_changed(self):
+        a = self._dedup_node("概念甲")
+        b = self._dedup_node("概念乙")
+        c = self._dedup_node("概念丙")
+        d = self._dedup_node("概念丁")
+        groups = [self._dedup_group((a, "概念甲"), (b, "概念乙")),
+                  self._dedup_group((c, "概念丙"), (d, "概念丁"))]
+
+        def fake_chat(api, key, model, content, **kwargs):
+            text = content[0]["text"] if isinstance(content, list) else content
+            if "概念丙" in text:
+                raise RuntimeError("boom")
+            return json.dumps({"groups": [
+                {"node_ids": [a, b], "keep_id": a, "reason": "同义",
+                 "confidence": 0.9}]}, ensure_ascii=False), "stop", ""
+
+        run_id = kd.create_dedup_run(self.con, 1, model="m", created_by=1)
+        with mock.patch.object(kd, "build_dedup_candidates", return_value=groups), \
+                mock.patch.object(kd.llm, "chat", side_effect=fake_chat):
+            kd.run_dedup_run(self.con, 1, run_id, "u", "k", "m", concurrency=2)
+        # 图谱结构变化后旧计划失效，不能再从断点继续
+        self._dedup_node("概念戊")
+        calls = []
+        with mock.patch.object(kd.llm, "chat",
+                               side_effect=lambda *a, **k: calls.append(1)):
+            valid, rejected, error, status = kd.run_dedup_run(
+                self.con, 1, run_id, "u", "k", "m", concurrency=2)
+        self.assertEqual((valid, rejected), ([], []))
+        self.assertEqual(status, kd.DEDUP_FAILED)
+        self.assertIn("已变化", error)
+        self.assertEqual(calls, [])
 
 
 class KGRouteTest(unittest.TestCase):

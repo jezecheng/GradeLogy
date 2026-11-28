@@ -118,6 +118,17 @@ tr[data-material-archived="true"] { opacity: .92; }
   padding: 2px 10px; font-size: 13px; }
 .kg-dedup-member.is-keep { background: #ecfdf5; border-color: #6ee7b7; color: #065f46; font-weight: 600; }
 .kg-dedup-member em { font-style: normal; font-size: 11px; color: #047857; }
+.kg-dedup-progress { margin: 8px 0; padding: 10px; border: 1px dashed #d1d5db;
+  border-radius: 10px; background: #f9fafb; }
+.kg-dedup-progress-meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  margin-bottom: 6px; font-size: 12px; color: #4b5563; }
+.kg-dedup-progress progress { width: 100%; height: 8px; }
+.kg-dedup-progress details { margin-top: 6px; }
+.kg-dedup-group-list { max-height: 220px; overflow: auto; margin: 6px 0 0;
+  padding-left: 18px; font-size: 12px; color: #4b5563; }
+.kg-dedup-group-list li.is-running { color: #b45309; }
+.kg-dedup-group-list li.is-failed { color: #b91c1c; }
+.kg-dedup-group-list li.is-done { color: #065f46; }
 .kg-cat-check { width: 34px; }
 .kg-role-badge { background: #eef0f3; color: #4b5563; border-radius: 999px;
   padding: 2px 10px; font-size: 12px; font-weight: 500; vertical-align: middle; }
@@ -570,7 +581,7 @@ tr[data-material-archived="true"] { opacity: .92; }
 </details>
 
 <details class="card kg-fold" id="kg-dedup"
-         {% if dedups and dedups[0].status == '待确认' %}open{% endif %}>
+         {% if dedups and dedups[0].status in ('待确认', '进行中') %}open{% endif %}>
   <summary class="card-head"><h2>智能去重 <span class="muted small">（AI 找出疑似重复概念，逐簇确认后才合并）</span></h2></summary>
   {% if can_edit %}
   {% set dedup_busy = graph_dedup_operation and graph_dedup_operation.status in ('queued', 'running') %}
@@ -586,6 +597,20 @@ tr[data-material-archived="true"] { opacity: .92; }
     <span class="muted small">跨分类结合名称与共享邻居结构召回疑似重复概念；合并前可逐簇剔除，应用后可回滚。</span>
   </form>
   {% if graph_dedup_operation and graph_dedup_operation.status == 'failed' %}<p class="danger-text small" role="status">上次智能去重失败：{{ graph_dedup_operation.error or '请重试。' }}</p>{% endif %}
+  {% if dedup_busy %}
+  <div class="kg-dedup-progress" id="kg-dedup-progress"
+       data-status-url="{{ url_for('ai_operation_status', operation_id=graph_dedup_operation.id) }}">
+    <div class="kg-dedup-progress-meta">
+      <strong>去重进度</strong>
+      <span class="kg-dedup-progress-text">正在准备候选组…</span>
+    </div>
+    <progress max="100" value="0"></progress>
+    <details>
+      <summary class="muted small">查看逐组进度</summary>
+      <ul class="kg-dedup-group-list"></ul>
+    </details>
+  </div>
+  {% endif %}
   {% endif %}
   {% if not dedups %}
   <p class="muted small">还没有去重记录。</p>
@@ -597,6 +622,39 @@ tr[data-material-archived="true"] { opacity: .92; }
       <span class="muted small">{{ d.created_at }}{% if d.applied_at %} · 应用 {{ d.applied_at }}{% endif %}{% if d.model %} · {{ d.model }}{% endif %}</span>
     </div>
     {% if d.error %}<p class="kg-request-error">{{ d.error }}</p>{% endif %}
+    {% if d.progress and d.progress.total %}
+    <p class="muted small">候选组 {{ d.progress.total }} 组 · 已完成 {{ d.progress.done or 0 }} · 失败 {{ d.progress.failed or 0 }} · 判定中 {{ d.progress.running or 0 }} · 待处理 {{ d.progress.pending or 0 }}{% if d.progress.updated_at %} · 更新 {{ d.progress.updated_at }}{% endif %}</p>
+    <details>
+      <summary class="muted small">逐组进度</summary>
+      <ul class="kg-dedup-group-list">
+        {% for g in d.progress.groups %}
+        <li class="{% if g.status == 'failed' %}is-failed{% elif g.status == 'running' %}is-running{% elif g.status == 'done' %}is-done{% endif %}">
+          第 {{ g.index + 1 }} 组（{{ g.count }} 个概念：{{ g.names | join('、') }}{% if g.count > (g.names | length) %}…{% endif %}）· {{ {'pending': '待处理', 'running': '判定中', 'done': '已完成', 'failed': '失败'}.get(g.status, g.status) }}{% if g.error %} · {{ g.error }}{% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+    </details>
+    {% endif %}
+    {% if can_edit and d.resumable %}
+    <div class="kg-audit-actions">
+      <form method="post" data-ai-submit-form data-ai-busy-label="继续去重…"
+            action="{{ url_for('knowledge_graph_dedup_resume', gid=graph.id, did=d.id) }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <button class="ghost small">继续去重（从 {{ d.progress.done or 0 }}/{{ d.progress.total }} 组续跑）</button>
+      </form>
+      <form method="post" action="{{ url_for('knowledge_graph_dedup_discard', gid=graph.id, did=d.id) }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <button class="ghost small">忽略</button>
+      </form>
+    </div>
+    {% elif can_edit and d.status in ('失败', '已中断') %}
+    <div class="kg-audit-actions">
+      <form method="post" action="{{ url_for('knowledge_graph_dedup_discard', gid=graph.id, did=d.id) }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <button class="ghost small">忽略</button>
+      </form>
+    </div>
+    {% endif %}
     {% if d.groups %}
     <div class="kg-dedup-clusters">
       {% for c in d.groups %}
@@ -681,6 +739,73 @@ tr[data-material-archived="true"] { opacity: .92; }
     });
   });
   document.querySelectorAll('.kg-dedup-apply-form').forEach(refresh);
+
+  // 去重进度：轮询通用状态接口，原地更新进度条与逐组状态，不打断当前页面。
+  var box = document.getElementById('kg-dedup-progress');
+  if (!box) return;
+  var statusUrl = box.getAttribute('data-status-url');
+  if (!statusUrl) return;
+  var bar = box.querySelector('progress');
+  var text = box.querySelector('.kg-dedup-progress-text');
+  var list = box.querySelector('.kg-dedup-group-list');
+  var labels = {pending: '待处理', running: '判定中', done: '已完成', failed: '失败'};
+  var stopped = false;
+  var busy = false;
+  function render(progress) {
+    if (!progress) return;
+    var total = Number(progress.total || 0);
+    var done = Number(progress.done || 0);
+    var failed = Number(progress.failed || 0);
+    var running = Number(progress.running || 0);
+    var pending = Number(progress.pending || 0);
+    if (bar) bar.value = total ? Math.min(100, Math.round((done + failed) * 100 / total)) : 0;
+    if (text) {
+      var parts = total
+        ? ['共 ' + total + ' 组', '已完成 ' + done, '失败 ' + failed,
+           '判定中 ' + running, '待处理 ' + pending]
+        : ['正在准备候选组…'];
+      if (progress.updated_at) parts.push('更新 ' + progress.updated_at);
+      text.textContent = parts.join(' · ');
+    }
+    if (!list || !Array.isArray(progress.groups)) return;
+    list.innerHTML = '';
+    progress.groups.forEach(function (g) {
+      var li = document.createElement('li');
+      if (g.status === 'failed') li.className = 'is-failed';
+      else if (g.status === 'running') li.className = 'is-running';
+      else if (g.status === 'done') li.className = 'is-done';
+      var names = (g.names || []).join('、');
+      var ellipsis = Number(g.count || 0) > (g.names || []).length ? '…' : '';
+      li.textContent = '第 ' + (Number(g.index) + 1) + ' 组（' + Number(g.count || 0) +
+        ' 个概念：' + names + ellipsis + '）· ' + (labels[g.status] || g.status) +
+        (g.error ? ' · ' + g.error : '');
+      list.appendChild(li);
+    });
+  }
+  function poll() {
+    if (stopped || busy || !document.documentElement.contains(box)) return;
+    if (document.hidden) {
+      window.setTimeout(poll, 1800);
+      return;
+    }
+    busy = true;
+    fetch(statusUrl, { headers: { 'Accept': 'application/json' }, cache: 'no-store' })
+      .then(function (response) {
+        if (!response.ok) throw new Error('状态查询失败');
+        return response.json();
+      })
+      .then(function (data) {
+        render(data.progress);
+        if (data.status === 'queued' || data.status === 'running') {
+          window.setTimeout(poll, 1500);
+        } else {
+          stopped = true;  // 完成后交给通用队列轮询刷新页面
+        }
+      })
+      .catch(function () { window.setTimeout(poll, 2500); })
+      .finally(function () { busy = false; });
+  }
+  poll();
 })();
 </script>
 
