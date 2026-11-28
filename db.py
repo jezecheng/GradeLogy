@@ -335,6 +335,7 @@ CREATE TABLE IF NOT EXISTS kg_materials(
   started_at TEXT,
   finished_at TEXT,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  archived_at TEXT DEFAULT '',
   UNIQUE(graph_id, sha256));
 CREATE INDEX IF NOT EXISTS idx_kg_materials_graph ON kg_materials(graph_id, id);
 CREATE TABLE IF NOT EXISTS kg_chunks(
@@ -408,6 +409,22 @@ CREATE TABLE IF NOT EXISTS kg_category_maps(
   applied_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_kg_category_maps_graph
   ON kg_category_maps(graph_id, id);
+-- 智能去重：AI 对疑似同义概念输出合并簇，校验后待人工确认，应用前保存快照
+CREATE TABLE IF NOT EXISTS kg_dedup_runs(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  graph_id INTEGER NOT NULL REFERENCES knowledge_graphs(id),
+  status TEXT NOT NULL DEFAULT '待确认',
+  model TEXT DEFAULT '',
+  error TEXT DEFAULT '',
+  groups TEXT DEFAULT '[]',
+  suggestions TEXT DEFAULT '[]',
+  rejected TEXT DEFAULT '[]',
+  snapshot TEXT DEFAULT '',
+  operation_id INTEGER,
+  created_by INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  applied_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_kg_dedup_runs_graph ON kg_dedup_runs(graph_id, id);
 -- 图谱协作：manage 可改名/删除/管理成员，edit 可加语料与改关系，use 可在自己的课程中引入
 CREATE TABLE IF NOT EXISTS kg_members(
   graph_id INTEGER NOT NULL REFERENCES knowledge_graphs(id),
@@ -652,6 +669,9 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=(), reco
     for col in ("started_at", "finished_at"):
         if col not in material_cols:
             con.execute(f"ALTER TABLE kg_materials ADD COLUMN {col} TEXT")
+    # 轻量迁移：资料归档后源文件移出备份目录，仅保留建图历史
+    if "archived_at" not in material_cols:
+        con.execute("ALTER TABLE kg_materials ADD COLUMN archived_at TEXT DEFAULT ''")
     chunk_cols = {r[1] for r in con.execute("PRAGMA table_info(kg_chunks)")}
     for col, ddl in (("status", "TEXT NOT NULL DEFAULT 'pending'"),
                      ("error", "TEXT DEFAULT ''"),

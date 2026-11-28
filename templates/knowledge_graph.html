@@ -58,6 +58,19 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
 .kg-head-actions form { margin: 0; }
 .kg-material-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .kg-material-actions form { margin: 0; }
+.kg-archive-badge { background: #e0f2fe; color: #075985; border-radius: 999px;
+  padding: 1px 8px; font-size: 11px; font-weight: 500; margin-left: 6px;
+  vertical-align: middle; }
+.kg-archived { color: #075985; }
+.kg-archive-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 8px 0; padding: 8px 10px; background: #f8fafc; border: 1px solid #eef0f3;
+  border-radius: 10px; }
+.kg-archive-toolbar .muted { font-size: 12px; }
+.kg-archive-toolbar button:disabled { opacity: .5; cursor: not-allowed; }
+.kg-archived-section { margin-top: 12px; }
+.kg-row-check { width: 30px; text-align: center; }
+.kg-row-check input { cursor: pointer; }
+tr[data-material-archived="true"] { opacity: .92; }
 .kg-name { font-weight: 600; }
 .kg-request-toggle { border: 0; background: none; padding: 0; cursor: pointer;
   text-align: left; color: inherit; font: inherit; font-weight: 600; }
@@ -97,6 +110,14 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
 .kg-cat-batch[open] > summary::before { transform: rotate(90deg); }
 .kg-cat-batch-tip { margin-left: auto; color: #1456f0; font-size: 12px; }
 .kg-cat-batch .kg-audit { border-top: 0; padding-top: 2px; }
+.kg-dedup-clusters { display: flex; flex-direction: column; gap: 8px; margin: 6px 0; }
+.kg-dedup-cluster { border: 1px solid #e5e7eb; border-radius: 10px; padding: 8px 10px;
+  background: #fafafa; }
+.kg-dedup-members { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 4px; }
+.kg-dedup-member { background: #fff; border: 1px solid #e5e7eb; border-radius: 999px;
+  padding: 2px 10px; font-size: 13px; }
+.kg-dedup-member.is-keep { background: #ecfdf5; border-color: #6ee7b7; color: #065f46; font-weight: 600; }
+.kg-dedup-member em { font-style: normal; font-size: 11px; color: #047857; }
 .kg-cat-check { width: 34px; }
 .kg-role-badge { background: #eef0f3; color: #4b5563; border-radius: 999px;
   padding: 2px 10px; font-size: 12px; font-weight: 500; vertical-align: middle; }
@@ -275,6 +296,7 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
         处理中 <b data-status-count="building">{{ status_counts.building }}</b> ·
         待处理 <b data-status-count="pending">{{ status_counts.pending }}</b>
         {% if status_counts.failed %} · <span class="kg-failed">失败 <b data-status-count="failed">{{ status_counts.failed }}</b></span>{% endif %}
+        {% if archived_count %} · <span class="kg-archived">已归档 <b>{{ archived_count }}</b> · 节省 {{ (archived_savings / 1048576) | round(1) }} MB</span>{% endif %}
       </span>
     </h2>
     {% if materials %}
@@ -307,13 +329,29 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
     <span>○ 待处理 <b data-status-count="pending">{{ status_counts.pending }}</b></span>
     <span>✕ 失败 <b data-status-count="failed">{{ status_counts.failed }}</b></span>
   </div>
+  {% if can_edit %}
+  <div class="kg-archive-toolbar">
+    <label><input type="checkbox" id="kg-material-check-all"> 全选</label>
+    <span class="muted" id="kg-material-selected-count">已选 0 份</span>
+    <button type="button" class="ghost small" id="kg-bulk-archive" disabled>批量归档</button>
+    <button type="button" class="ghost small" id="kg-bulk-restore" disabled>批量还原</button>
+    <span class="muted small">归档会把源文件移出备份目录，仅保留图谱与抽取历史，可随时还原。</span>
+  </div>
+  {% endif %}
   <div class="kg-table-wrap">
   <table class="kg">
-    <thead><tr><th>资料（点击查看 AI Request）</th><th>大小</th><th>解析与分块</th><th>状态</th><th>上传时间</th><th>处理时间</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
+    <thead><tr>{% if can_edit %}<th class="kg-row-check"></th>{% endif %}<th>资料（点击查看 AI Request）</th><th>大小</th><th>解析与分块</th><th>状态</th><th>上传时间</th><th>处理时间</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
     <tbody>
       {% for m in materials %}
       {% set ext = m.filename.rsplit('.', 1)[-1] | lower %}
-      <tr data-material-id="{{ m.id }}">
+      <tr data-material-id="{{ m.id }}" data-material-archived="{{ 'true' if m.archived_at else 'false' }}">
+        {% if can_edit %}
+        <td class="kg-row-check">
+          <input type="checkbox" class="kg-material-check" value="{{ m.id }}"
+                 data-archived="{{ 'true' if m.archived_at else 'false' }}"
+                 {% if m.archived_at %}disabled{% endif %}>
+        </td>
+        {% endif %}
         <td>
           <div class="kg-file">
             <span class="file-icon {{ ext }}">{{ ext | upper }}</span>
@@ -339,6 +377,7 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
             {% elif m.status == '失败' %}<span class="status-dot">✕</span>处理失败
             {% else %}<span class="status-dot">○</span>待处理{% endif %}
           </span>
+          {% if m.archived_at %}<span class="kg-archive-badge">已归档</span>{% endif %}
         </td>
         <td>{{ m.created_at_local }}</td>
         <td class="kg-processing">
@@ -355,6 +394,19 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
               <button class="ghost small">重试建图</button>
             </form>
             {% endif %}
+            {% if m.archived_at %}
+            <form method="post" action="{{ url_for('knowledge_graph_material_restore', mid=m.id) }}"
+                  onsubmit="return confirm('还原这份资料？源文件将移回备份目录。')">
+              <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+              <button class="ghost small">还原</button>
+            </form>
+            {% elif m.status in ['完成', '失败'] %}
+            <form method="post" action="{{ url_for('knowledge_graph_material_archive', mid=m.id) }}"
+                  onsubmit="return confirm('将把这份资料的源文件移出备份目录，仅保留图谱与抽取历史，可随时还原。继续？')">
+              <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+              <button class="ghost small">归档</button>
+            </form>
+            {% endif %}
             <form method="post"
                   action="{{ url_for('knowledge_graph_material_delete', mid=m.id) }}"
                   onsubmit="return confirm('删除这份资料？仅由它支撑的概念与关系会一并移除。')">
@@ -366,7 +418,7 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
         {% endif %}
       </tr>
       <tr data-material-requests="{{ m.id }}" hidden>
-        <td colspan="{{ 7 if can_edit else 6 }}">
+        <td colspan="{{ 8 if can_edit else 7 }}">
           <div class="kg-request-panel" id="kg-requests-{{ m.id }}">
             <h3>AI Request 处理明细 <span class="muted small">含自动重试与服务重启前的记录</span></h3>
             <div data-request-content><p class="muted small">展开后加载请求进度。</p></div>
@@ -377,6 +429,42 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
     </tbody>
   </table>
   </div>
+  {% if archived_count %}
+  <details class="card kg-fold kg-archived-section" id="kg-archived" open>
+    <summary class="card-head">
+      <h2>已归档资料 <span class="muted small">{{ archived_count }} 份 · 节省 {{ (archived_savings / 1048576) | round(1) }} MB（源文件不在系统备份内）</span></h2>
+    </summary>
+    <p class="muted small">已归档资料的源文件已移出备份目录，仅保留图谱与抽取历史。仍可查看每份资料的 AI Request 明细，也可随时还原。</p>
+    <div class="kg-table-wrap">
+    <table class="kg">
+      <thead><tr><th>资料</th><th>大小</th><th>归档时间</th><th>文件状态</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
+      <tbody>
+      {% for m in materials if m.archived_at %}
+        <tr>
+          <td>
+            <button type="button" class="kg-request-toggle" data-archive-goto="{{ m.id }}">{{ m.filename }}</button>
+          </td>
+          <td>{{ (m.size / 1024) | round(0) | int }} KB</td>
+          <td>{{ m.archived_at }}</td>
+          <td>{% if m.file_exists %}<span class="status status-done">可还原</span>{% else %}<span class="kg-failed">已归档，文件未随备份恢复</span>{% endif %}</td>
+          {% if can_edit %}
+          <td>
+            <div class="kg-material-actions">
+              <form method="post" action="{{ url_for('knowledge_graph_material_restore', mid=m.id) }}"
+                    {% if not m.file_exists %}onsubmit="return false;"{% else %}onsubmit="return confirm('还原这份资料？源文件将移回备份目录。')"{% endif %}>
+                <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+                <button class="ghost small" {% if not m.file_exists %}disabled{% endif %}>还原</button>
+              </form>
+            </div>
+          </td>
+          {% endif %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </details>
+  {% endif %}
   {% else %}
   <p class="muted small">还没有资料。上传第一份教材或考纲即可冷启动图谱。</p>
   {% endif %}
@@ -480,6 +568,121 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
   </div>
   {% endfor %}
 </details>
+
+<details class="card kg-fold" id="kg-dedup"
+         {% if dedups and dedups[0].status == '待确认' %}open{% endif %}>
+  <summary class="card-head"><h2>智能去重 <span class="muted small">（AI 找出疑似重复概念，逐簇确认后才合并）</span></h2></summary>
+  {% if can_edit %}
+  {% set dedup_busy = graph_dedup_operation and graph_dedup_operation.status in ('queued', 'running') %}
+  <form class="kg-audit-run" method="post" data-ai-queue-form data-ai-busy-label="去重中…"
+        data-ai-operation-id="{{ graph_dedup_operation.id if dedup_busy else '' }}"
+        data-ai-status-url="{{ url_for('ai_operation_status', operation_id=graph_dedup_operation.id) if dedup_busy else '' }}"
+        action="{{ url_for('knowledge_graph_dedup_run', gid=graph.id) }}">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <button class="ghost small{% if dedup_busy %} is-busy{% endif %}"
+            {% if dedup_busy %}disabled aria-busy="true"{% endif %}>
+      {% if dedup_busy %}<span class="spinner" aria-hidden="true"></span>去重中…{% else %}开始去重{% endif %}
+    </button>
+    <span class="muted small">跨分类结合名称与共享邻居结构召回疑似重复概念；合并前可逐簇剔除，应用后可回滚。</span>
+  </form>
+  {% if graph_dedup_operation and graph_dedup_operation.status == 'failed' %}<p class="danger-text small" role="status">上次智能去重失败：{{ graph_dedup_operation.error or '请重试。' }}</p>{% endif %}
+  {% endif %}
+  {% if not dedups %}
+  <p class="muted small">还没有去重记录。</p>
+  {% endif %}
+  {% for d in dedups %}
+  <div class="kg-audit" data-dedup-run="{{ d.id }}">
+    <div class="kg-audit-head">
+      <span class="kg-audit-status">{{ d.status }}</span>
+      <span class="muted small">{{ d.created_at }}{% if d.applied_at %} · 应用 {{ d.applied_at }}{% endif %}{% if d.model %} · {{ d.model }}{% endif %}</span>
+    </div>
+    {% if d.error %}<p class="kg-request-error">{{ d.error }}</p>{% endif %}
+    {% if d.groups %}
+    <div class="kg-dedup-clusters">
+      {% for c in d.groups %}
+      <div class="kg-dedup-cluster" data-keep-id="{{ c.keep_id }}">
+        <div class="kg-dedup-members">
+          {% for name in c.member_names %}
+          <span class="kg-dedup-member{% if name == c.keep_name %} is-keep{% endif %}">
+            {{ name }}{% if name == c.keep_name %} <em>保留</em>{% endif %}
+          </span>
+          {% endfor %}
+        </div>
+        <div class="kg-note">{{ c.reason or '—' }} · 置信度 {{ ((c.confidence or 0) * 100) | round(0) | int }}%</div>
+        {% if can_edit and d.status == '待确认' %}
+        <button type="button" class="ghost small kg-dedup-skip">暂不合并</button>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% if d.rejected %}
+    <details>
+      <summary class="muted small">{{ d.rejected | length }} 簇未通过校验</summary>
+      <ul class="kg-cycle-list">
+        {% for r in d.rejected %}
+        <li>合并「{{ r.member_names | join('、') }}」：{{ r.reason }}</li>
+        {% endfor %}
+      </ul>
+    </details>
+    {% endif %}
+    {% if can_edit and d.status == '待确认' and d.groups %}
+    <div class="kg-audit-actions">
+      <form method="post" class="kg-dedup-apply-form"
+            action="{{ url_for('knowledge_graph_dedup_apply', gid=graph.id, did=d.id) }}"
+            onsubmit="return confirm('将合并选中的重复概念，修改图谱；后续未建图或编辑时可回滚。继续？')">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <input type="hidden" name="keep_ids" class="kg-dedup-keep-ids" value="">
+        <button class="ghost small kg-dedup-apply-btn">应用 <span class="kg-dedup-count">{{ d.groups | length }}</span> 簇合并</button>
+      </form>
+      <form method="post" action="{{ url_for('knowledge_graph_dedup_discard', gid=graph.id, did=d.id) }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <button class="ghost small">忽略全部</button>
+      </form>
+    </div>
+    {% elif can_edit and d.status == '已应用' and d.has_snapshot %}
+    <form method="post" action="{{ url_for('knowledge_graph_dedup_rollback', gid=graph.id, did=d.id) }}"
+          onsubmit="return confirm('回滚会检查后续变更；没有新建图或编辑时才恢复快照。继续？')">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <button class="ghost small">回滚</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endfor %}
+</details>
+<script>
+(function () {
+  function refresh(form) {
+    var run = form.closest('[data-dedup-run]');
+    if (!run) return;
+    var kept = [];
+    var visible = 0;
+    run.querySelectorAll('.kg-dedup-cluster').forEach(function (c) {
+      if (c.getAttribute('data-excluded') !== '1') {
+        kept.push(c.getAttribute('data-keep-id'));
+        visible++;
+      }
+    });
+    var input = form.querySelector('.kg-dedup-keep-ids');
+    if (input) input.value = kept.join(',');
+    var cnt = run.querySelector('.kg-dedup-count');
+    if (cnt) cnt.textContent = visible;
+    var btn = form.querySelector('.kg-dedup-apply-btn');
+    if (btn) btn.disabled = visible === 0;
+  }
+  document.querySelectorAll('.kg-dedup-skip').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var cluster = btn.closest('.kg-dedup-cluster');
+      if (!cluster) return;
+      cluster.setAttribute('data-excluded', '1');
+      cluster.style.display = 'none';
+      var run = cluster.closest('[data-dedup-run]');
+      if (run) run.querySelectorAll('.kg-dedup-apply-form').forEach(refresh);
+    });
+  });
+  document.querySelectorAll('.kg-dedup-apply-form').forEach(refresh);
+})();
+</script>
 
 <details class="card kg-fold" id="kg-category"
          {% if cat_maps and cat_maps[0].status == '待确认' %}open{% endif %}>
@@ -840,6 +1043,89 @@ table.kg th { color: #6b7280; font-weight: 500; font-size: 12px; }
 
     if (active) { poll(); }
   }());
+</script>
+<script>
+(function () {
+  var checkAll = document.getElementById('kg-material-check-all');
+  var checks = Array.prototype.slice.call(document.querySelectorAll('.kg-material-check'));
+  var countEl = document.getElementById('kg-material-selected-count');
+  var btnArchive = document.getElementById('kg-bulk-archive');
+  var btnRestore = document.getElementById('kg-bulk-restore');
+  if (!checkAll || !checks.length) { return; }
+
+  function selectedIds() {
+    return checks.filter(function (c) { return c.checked && !c.disabled; })
+      .map(function (c) { return c.value; });
+  }
+  function refresh() {
+    var ids = selectedIds();
+    var n = ids.length;
+    if (countEl) { countEl.textContent = '已选 ' + n + ' 份'; }
+    var hasArchived = ids.some(function (id) {
+      var c = checks.find(function (x) { return x.value === id; });
+      return c && c.dataset.archived === 'true';
+    });
+    var hasNonArchived = ids.some(function (id) {
+      var c = checks.find(function (x) { return x.value === id; });
+      return c && c.dataset.archived !== 'true';
+    });
+    if (btnArchive) { btnArchive.disabled = n === 0 || hasArchived; }
+    if (btnRestore) { btnRestore.disabled = n === 0 || hasNonArchived; }
+  }
+  checkAll.addEventListener('change', function () {
+    checks.forEach(function (c) { if (!c.disabled) c.checked = checkAll.checked; });
+    refresh();
+  });
+  checks.forEach(function (c) { c.addEventListener('change', refresh); });
+  refresh();
+
+  function submitBulk(endpoint, ids, confirmText) {
+    if (!ids.length) return;
+    if (!window.confirm(confirmText.replace('{N}', String(ids.length)))) return;
+    var form = document.createElement('form');
+    form.method = 'post';
+    form.action = endpoint;
+    var csrf = document.querySelector('input[name="_csrf"]');
+    if (csrf) {
+      var c = document.createElement('input');
+      c.type = 'hidden'; c.name = '_csrf'; c.value = csrf.value;
+      form.appendChild(c);
+    }
+    ids.forEach(function (id) {
+      var i = document.createElement('input');
+      i.type = 'hidden'; i.name = 'material_ids'; i.value = id;
+      form.appendChild(i);
+    });
+    document.body.appendChild(form);
+    form.submit();
+  }
+  {% if can_edit %}
+  var bulkArchiveUrl = {{ url_for('knowledge_graph_materials_bulk_archive', gid=graph.id) | tojson }};
+  var bulkRestoreUrl = {{ url_for('knowledge_graph_materials_bulk_restore', gid=graph.id) | tojson }};
+  if (btnArchive) {
+    btnArchive.addEventListener('click', function () {
+      submitBulk(bulkArchiveUrl, selectedIds(),
+        '将把 {N} 份资料的源文件移出备份目录，仅保留图谱与抽取历史，可随时还原。继续？');
+    });
+  }
+  if (btnRestore) {
+    btnRestore.addEventListener('click', function () {
+      submitBulk(bulkRestoreUrl, selectedIds(),
+        '将还原 {N} 份资料的源文件到备份目录。继续？');
+    });
+  }
+  {% endif %}
+
+  document.querySelectorAll('[data-archive-goto]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = btn.dataset.archiveGoto;
+      var row = document.querySelector('tr[data-material-id="' + id + '"]');
+      var toggle = row && row.querySelector('[data-material-toggle]');
+      if (row) { row.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+      if (toggle) { toggle.click(); }
+    });
+  });
+}());
 </script>
 {% endif %}
 

@@ -79,6 +79,8 @@ AI_MODEL = _env("AI_MODEL", "")
 
 # 备份：恢复前快照与每日自动备份都放这里
 BACKUP_DIR = os.path.abspath(_env("BACKUP_DIR", os.path.join(DATA_DIR, "backups")))
+# 知识图谱资料归档目录：归档后的源文件移出 uploads/，不进系统备份，但可还原
+ARCHIVE_DIR = os.path.abspath(_env("ARCHIVE_DIR", os.path.join(DATA_DIR, "archives")))
 BACKUP_KEEP = int(_env("BACKUP_KEEP", "7"))
 AUTO_BACKUP = _env("AUTO_BACKUP", "1").lower() not in ("0", "false", "no", "off")
 # 模型清单自动同步：每天通过 GET /v1/models 刷新一次各老师 TokenHub 入口的可用模型
@@ -100,7 +102,9 @@ def get(name, default=None):
 def ensure_dirs():
     """确保所有数据目录存在；容器首次启动、只读镜像下都靠它兜底。"""
     for path in (get("DATA_DIR"), get("STORAGE_DIR"), get("LOG_DIR"), get("BACKUP_DIR"),
-                 get("EXPORT_DIR"), get("AI_DEBUG_DIR"), os.path.dirname(get("DB_PATH"))):
+                 get("EXPORT_DIR"), get("AI_DEBUG_DIR"), get("ARCHIVE_DIR"),
+                 os.path.join(get("ARCHIVE_DIR"), "kg"),
+                 os.path.dirname(get("DB_PATH"))):
         os.makedirs(path, exist_ok=True)
 
 

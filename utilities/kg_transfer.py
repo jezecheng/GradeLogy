@@ -150,27 +150,39 @@ def _safe_archive_component(value, fallback):
     return (name or fallback)[:160]
 
 
-def _material_source_path(upload_dir, graph_id, stored_name):
-    """数据库路径必须是 kg/<gid>/<basename>，且任何一级都不能借符号链接逃逸。"""
-    value = str(stored_name or "")
+def _material_source_path(material, upload_dir, archive_dir=None):
+    """解析资料源文件的绝对路径，并做安全校验。
+
+    数据库路径必须是 kg/<gid>/<basename>，且任何一级都不能借符号链接逃逸。
+    ``archived_at`` 非空且传入了 ``archive_dir`` 时，从归档目录解析；归档文件
+    缺失抛明确错误，避免导出静默坏包。非归档材料沿用 uploads/kg/<gid>/ 原逻辑。
+    """
+    graph_id = material["graph_id"]
+    value = str(material.get("stored_name") or "")
     parts = value.split("/")
     if (not value or "\\" in value or "\x00" in value or value.startswith("/")
             or ntpath.splitdrive(value)[0]
             or len(parts) != 3 or parts[:2] != ["kg", str(graph_id)]
             or parts[2] in ("", ".", "..")):
         raise KGTransferError(f"材料 stored_name 路径不安全：{value!r}")
-    root = os.path.realpath(os.path.abspath(os.fspath(upload_dir)))
+    basename = parts[2]
+    archived = bool(material.get("archived_at")) and archive_dir is not None
+    root_dir = archive_dir if archived else upload_dir
+    root = os.path.realpath(os.path.abspath(os.fspath(root_dir)))
     graph_dir = os.path.abspath(os.path.join(root, "kg", str(graph_id)))
-    candidate = os.path.abspath(os.path.join(graph_dir, parts[2]))
+    candidate = os.path.abspath(os.path.join(graph_dir, basename))
     try:
         if os.path.commonpath((root, graph_dir)) != root:
             raise KGTransferError(f"材料目录越界：{value!r}")
     except ValueError as exc:
         raise KGTransferError(f"材料目录越界：{value!r}") from exc
     # realpath 与绝对路径不同，说明图谱目录或文件本身是符号链接。
-    if (os.path.realpath(graph_dir) != graph_dir
-            or os.path.realpath(candidate) != candidate
-            or not os.path.isfile(candidate)):
+    if os.path.realpath(graph_dir) != graph_dir or os.path.realpath(candidate) != candidate:
+        raise KGTransferError(f"材料文件包含不安全的符号链接：{value!r}")
+    if not os.path.isfile(candidate):
+        if archived:
+            raise KGTransferError(
+                f"资料 #{material['id']} 已归档且归档文件缺失，无法导出原始文件")
         raise KGTransferError(f"材料文件不存在或包含不安全的符号链接：{value!r}")
     return candidate
 
@@ -444,12 +456,15 @@ def _render_readme(metadata):
     return "\n".join(lines)
 
 
-def export_graph(db, graph_id, upload_dir, output_path, scope="full"):
+def export_graph(db, graph_id, upload_dir, output_path, scope="full", archive_dir=None):
     """导出指定图谱为 version=2 ZIP，并返回 manifest。
 
     ``scope="full"`` 导出完整迁移包；``scope="graph"`` 仅导出图谱本身
     （节点与关系），不包含原始资料文件、文本块、体检历史和协作成员，
     节点/关系上的 source_materials 会被清空。
+
+    ``archive_dir`` 传入时，已归档（archived_at 非空）的资料从归档目录读取；
+    不传则归档资料仍按 uploads 路径解析（与旧行为一致，缺失会报错）。
 
     迁移包不保留原图谱名称，导入时由使用者重新命名；同时写入
     metadata.json 与 README.md，便于其他 LLM 或平台理解包内容。
@@ -499,7 +514,7 @@ def export_graph(db, graph_id, upload_dir, output_path, scope="full"):
             used_paths = set()
             for material in data["materials"]:
                 material_id = material["id"]
-                source = _material_source_path(upload_dir, graph_id, material["stored_name"])
+                source = _material_source_path(material, upload_dir, archive_dir)
                 filename = _safe_archive_component(
                     material.get("filename"), f"material_{material_id}")
                 archive_path = f"files/{material_id}/{filename}"

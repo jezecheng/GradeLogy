@@ -39,6 +39,8 @@ MAX_TOKENS_SETTINGS = {
                             "hint": "审校图谱并给出治理建议"},
     "max_tokens_kg_category": {"label": "知识图谱分类重构", "default": 32768,
                                "hint": "把自由分类重映射为分层学科树"},
+    "max_tokens_kg_dedup": {"label": "知识图谱智能去重", "default": 32768,
+                            "hint": "召回疑似重复概念并判定合并簇"},
     "max_tokens_report": {"label": "报告评语", "default": 8192,
                           "hint": "生成总评和逐题图谱评语；输出被截断时可调大"},
 }

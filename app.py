@@ -60,6 +60,8 @@ from utilities.ai_task_runtime import AI_EXECUTION_LOCK
 from utilities import knowledge_graph as kg_utils
 from utilities import kg_text
 from utilities import kg_transfer
+from utilities import kg_archive
+from utilities import kg_dedup as kg_dedup_utils
 from utilities import tags as tag_utils
 from utilities.time_utils import BEIJING_TZ, beijing_wall_now, now_beijing
 from utilities.teacher_views import workload
@@ -3340,7 +3342,7 @@ def ai_operation_status(operation_id):
     if not operation:
         abort(404)
     if operation["teacher_id"] != g.user["id"] and g.user["role"] != "admin":
-        if operation["operation_type"] in ("kg_audit", "kg_category"):
+        if operation["operation_type"] in ("kg_audit", "kg_category", "kg_dedup"):
             prefix = "knowledge_graph:"
             resource_key = operation["resource_key"] or ""
             if not resource_key.startswith(prefix) or not resource_key[len(prefix):].isdigit():
@@ -4270,7 +4272,8 @@ def knowledge_graph_export(gid):
     fd, path = tempfile.mkstemp(prefix=f"kg_{gid}_", suffix=".zip", dir=cfg.get("EXPORT_DIR"))
     os.close(fd)
     try:
-        kg_transfer.export_graph(get_db(), gid, _upload_dir(), path, scope=scope)
+        kg_transfer.export_graph(get_db(), gid, _upload_dir(), path, scope=scope,
+                                 archive_dir=cfg.get("ARCHIVE_DIR"))
     except Exception:  # noqa: BLE001 半截导出文件不能留在服务器
         kg_log.exception("知识图谱迁移包导出失败 user=%s#%s graph=%s scope=%s",
                          g.user["username"], g.user["id"], gid, scope)
@@ -4472,6 +4475,29 @@ def _kg_audit_view(row):
     }
 
 
+def _kg_dedup_view(row):
+    """把一条智能去重记录转成模板可直接渲染的簇结构。"""
+    try:
+        groups = json.loads(row["groups"] or "[]")
+    except (TypeError, ValueError):
+        groups = []
+    try:
+        rejected = json.loads(row["rejected"] or "[]")
+    except (TypeError, ValueError):
+        rejected = []
+    for group in groups:
+        group["action_label"] = kg_dedup_utils.DEDUP_ACTION_LABEL.get(
+            group.get("action"), group.get("action") or "")
+    return {
+        "id": row["id"], "status": row["status"],
+        "model": row["model"] or "", "error": row["error"] or "",
+        "created_at": _localtime(row["created_at"]),
+        "applied_at": _localtime(row["applied_at"]) if row["applied_at"] else "",
+        "groups": groups, "rejected": rejected,
+        "has_snapshot": bool(row["snapshot"]),
+    }
+
+
 def _kg_category_map_view(row):
     """把一条分类重构记录转成模板可直接渲染的结构。"""
     try:
@@ -4500,7 +4526,14 @@ def knowledge_graph_detail(gid):
     db = get_db()
     rows = db.execute("SELECT * FROM kg_materials WHERE graph_id=? "
                       "ORDER BY id DESC", (gid,)).fetchall()
-    materials = [_kg_material_view(db, row) for row in rows]
+    materials = []
+    for row in rows:
+        view = _kg_material_view(db, row)
+        # 资料可能已归档（源文件移出 uploads）；标记文件是否仍在磁盘上，
+        # 供模板对「已归档但文件未随备份恢复」做优雅降级。
+        view["file_exists"] = os.path.exists(kg_archive.material_file_path(
+            view, archive_root=cfg.get("ARCHIVE_DIR"), upload_root=_upload_dir()))
+        materials.append(view)
     building = any(m["status"] in (kg_utils.STATUS_PENDING, kg_utils.STATUS_BUILDING)
                    for m in materials)
     audits = [_kg_audit_view(row) for row in db.execute(
@@ -4514,6 +4547,12 @@ def knowledge_graph_detail(gid):
         "AND resource_key=? ORDER BY id DESC LIMIT 1", (f"knowledge_graph:{gid}",)).fetchone()
     graph_category_operation = db.execute(
         "SELECT id,status,error FROM ai_operations WHERE operation_type='kg_category' "
+        "AND resource_key=? ORDER BY id DESC LIMIT 1", (f"knowledge_graph:{gid}",)).fetchone()
+    dedups = [_kg_dedup_view(row) for row in db.execute(
+        "SELECT * FROM kg_dedup_runs WHERE graph_id=? ORDER BY id DESC LIMIT 3",
+        (gid,)).fetchall()]
+    graph_dedup_operation = db.execute(
+        "SELECT id,status,error FROM ai_operations WHERE operation_type='kg_dedup' "
         "AND resource_key=? ORDER BY id DESC LIMIT 1", (f"knowledge_graph:{gid}",)).fetchone()
     role = _kg_role(graph)
     members = db.execute(
@@ -4537,6 +4576,10 @@ def knowledge_graph_detail(gid):
         cat_maps=cat_maps,
         graph_audit_operation=graph_audit_operation,
         graph_category_operation=graph_category_operation,
+        dedups=dedups,
+        graph_dedup_operation=graph_dedup_operation,
+        archived_count=sum(1 for m in materials if m.get("archived_at")),
+        archived_savings=kg_archive.archive_savings(materials),
         metrics=_kg_metrics(db, gid),
         members=members, teacher_candidates=teacher_candidates,
         role=role, role_label=KG_ROLE_LABEL.get(role, "只读"),
@@ -4809,7 +4852,9 @@ def knowledge_graph_material_delete(mid):
         abort(404)
     _kg_graph(material["graph_id"], edit=True)
     try:
-        os.remove(os.path.join(_upload_dir(), material["stored_name"]))
+        # 资料可能已归档，源文件在 archives/ 下；按当前实际路径删除，避免归档文件残留。
+        os.remove(kg_archive.material_file_path(
+            material, archive_root=cfg.get("ARCHIVE_DIR"), upload_root=_upload_dir()))
     except OSError:
         pass
     kg_utils.delete_material(db, material)
@@ -4818,6 +4863,85 @@ def knowledge_graph_material_delete(mid):
                 material["filename"])
     flash(f"已删除资料「{material['filename']}」及其独有节点")
     return redirect(url_for("knowledge_graph_detail", gid=material["graph_id"]))
+
+
+@_routes.route("/knowledge-graphs/materials/<oid:mid>/archive", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_material_archive(mid):
+    """单条归档：把源文件移出 uploads，仅保留图谱与抽取历史。"""
+    db = get_db()
+    material = db.execute("SELECT * FROM kg_materials WHERE id=?", (mid,)).fetchone()
+    if not material:
+        abort(404)
+    _kg_graph(material["graph_id"], edit=True)
+    ok, err = kg_archive.archive_material(
+        db, material, archive_root=cfg.get("ARCHIVE_DIR"), upload_root=_upload_dir())
+    if ok:
+        kg_log.info("归档知识图谱资料 user=%s#%s graph=%s material=%s",
+                    g.user["username"], g.user["id"], material["graph_id"], mid)
+        flash(f"已归档资料「{material['filename']}」，源文件已移出备份目录，可随时还原")
+    else:
+        flash(err)
+    return redirect(url_for("knowledge_graph_detail", gid=material["graph_id"]))
+
+
+@_routes.route("/knowledge-graphs/materials/<oid:mid>/restore", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_material_restore(mid):
+    """单条还原：把归档文件移回 uploads。"""
+    db = get_db()
+    material = db.execute("SELECT * FROM kg_materials WHERE id=?", (mid,)).fetchone()
+    if not material:
+        abort(404)
+    _kg_graph(material["graph_id"], edit=True)
+    ok, err = kg_archive.restore_material_archive(
+        db, material, archive_root=cfg.get("ARCHIVE_DIR"), upload_root=_upload_dir())
+    if ok:
+        kg_log.info("还原知识图谱归档资料 user=%s#%s graph=%s material=%s",
+                    g.user["username"], g.user["id"], material["graph_id"], mid)
+        flash(f"已还原资料「{material['filename']}」的源文件")
+    else:
+        flash(err)
+    return redirect(url_for("knowledge_graph_detail", gid=material["graph_id"]))
+
+
+def _bulk_material_ids():
+    ids = request.form.getlist("material_ids")
+    if not ids:
+        ids = [p for p in str(request.form.get("material_ids", "")).split(",") if p.strip()]
+    return ids
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/materials/bulk-archive", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_materials_bulk_archive(gid):
+    _kg_graph(gid, edit=True)
+    success, failures = kg_archive.bulk_archive_materials(
+        get_db(), gid, _bulk_material_ids(),
+        archive_root=cfg.get("ARCHIVE_DIR"), upload_root=_upload_dir())
+    if failures:
+        flash("；".join(failures))
+    if success:
+        flash(f"已归档 {success} 份资料，源文件已移出备份目录，可随时还原")
+    elif not failures:
+        flash("未选择任何资料")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/materials/bulk-restore", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_materials_bulk_restore(gid):
+    _kg_graph(gid, edit=True)
+    success, failures = kg_archive.bulk_archive_materials(
+        get_db(), gid, _bulk_material_ids(), restore=True,
+        archive_root=cfg.get("ARCHIVE_DIR"), upload_root=_upload_dir())
+    if failures:
+        flash("；".join(failures))
+    if success:
+        flash(f"已还原 {success} 份资料的源文件")
+    elif not failures:
+        flash("未选择任何资料")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
 
 
 @_routes.route("/knowledge-graphs/<oid:gid>/edit", methods=["POST"])
@@ -5044,6 +5168,168 @@ def knowledge_graph_audit_discard(gid, aid):
     kg_log.info("忽略知识图谱体检 user=%s#%s graph=%s audit=%s",
                 g.user["username"], g.user["id"], gid, aid)
     flash("已忽略这次体检建议")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/dedup", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_dedup_run(gid):
+    """让模型找出疑似重复概念并输出合并簇：异步执行，结果保存在 kg_dedup_runs。"""
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    api_url, api_key, model, err = _ai_endpoint(g.user["id"])
+    if err:
+        db.execute(
+            "INSERT INTO kg_dedup_runs(graph_id,status,model,error,created_by)"
+            " VALUES(?,?,?,?,?)",
+            (gid, kg_dedup_utils.DEDUP_FAILED, "", err, g.user["id"]))
+        db.commit()
+        flash(f"智能去重未执行：{err}")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    max_tokens = _get_max_tokens(g.user["id"], "max_tokens_kg_dedup")
+    created_by = g.user["id"]
+
+    def runner(database, operation):
+        try:
+            valid_groups, rejected_groups, run_err = kg_dedup_utils.run_dedup(
+                database, gid, api_url, api_key, model,
+                usage_hook=operation["usage_hook"], max_tokens=max_tokens)
+        except Exception as e:  # noqa: BLE001
+            run_err = str(e)
+            kg_log.exception("知识图谱去重失败 graph=%s", gid)
+            valid_groups, rejected_groups = [], []
+        suggestions = kg_dedup_utils.flatten_dedup_suggestions(valid_groups)
+        if not valid_groups:
+            status = kg_dedup_utils.DEDUP_FAILED if run_err else kg_dedup_utils.DEDUP_CLEAN
+        else:
+            status = kg_dedup_utils.DEDUP_PENDING
+        database.execute(
+            "INSERT INTO kg_dedup_runs(graph_id,status,model,error,groups,"
+            "suggestions,rejected,operation_id,created_by) VALUES(?,?,?,?,?,?,?,?,?)",
+            (gid, status, model, (run_err or "")[:500],
+             json.dumps(valid_groups, ensure_ascii=False),
+             json.dumps(suggestions, ensure_ascii=False),
+             json.dumps(rejected_groups, ensure_ascii=False),
+             operation["id"], created_by))
+        database.commit()
+        kg_log.info("知识图谱去重 user=#%s graph=%s status=%s 可应用簇=%s 拦截簇=%s",
+                    created_by, gid, status, len(valid_groups), len(rejected_groups))
+        _finish_ai_operation(
+            operation, "failed" if (not valid_groups and run_err) else "success", run_err)
+
+    operation, queue_err = _ai_task_queue.submit(
+        g.user["id"], "kg_dedup", model=model, runner=runner,
+        resource_key=f"knowledge_graph:{gid}",
+        dedup_key=f"kg_dedup|{gid}")
+    if queue_err:
+        flash(queue_err)
+    else:
+        flash("智能去重已加入后台队列，可离开当前页面。")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+def _kg_dedup(gid, did):
+    row = get_db().execute("SELECT * FROM kg_dedup_runs WHERE id=? AND graph_id=?",
+                           (did, gid)).fetchone()
+    if not row:
+        abort(404)
+    return row
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/dedup/<oid:did>/apply", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_dedup_apply(gid, did):
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    dedup = _kg_dedup(gid, did)
+    if dedup["status"] != kg_dedup_utils.DEDUP_PENDING:
+        flash("该去重结果已处理，不能重复应用")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    try:
+        groups = json.loads(dedup["groups"] or "[]")
+    except (TypeError, ValueError):
+        groups = []
+    keep_ids_raw = (request.form.get("keep_ids") or "").strip()
+    selected = None
+    if keep_ids_raw:
+        selected = set()
+        for part in keep_ids_raw.split(","):
+            try:
+                selected.add(int(part))
+            except (TypeError, ValueError):
+                continue
+    if selected is not None:
+        groups = [g for g in groups if g.get("keep_id") in selected]
+    items = kg_dedup_utils.flatten_dedup_suggestions(groups)
+    if not items:
+        flash("没有可应用的合并簇")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    valid, rejected, _ = kg_utils.validate_audit_suggestions(db, gid, items)
+    if not valid:
+        flash("这些合并簇未通过校验，请重新去重" + (
+            f"（{rejected[0]['reason']}）" if rejected else ""))
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    snapshot = kg_utils.apply_audit(db, gid, valid, commit=False)
+    db.execute("UPDATE kg_dedup_runs SET status=?, snapshot=?, applied_at=CURRENT_TIMESTAMP"
+               " WHERE id=?",
+               (kg_dedup_utils.DEDUP_APPLIED,
+                json.dumps(snapshot, ensure_ascii=False), did))
+    db.commit()
+    kg_log.info("应用知识图谱去重 user=%s#%s graph=%s dedup=%s 簇=%s",
+                g.user["username"], g.user["id"], gid, did, len(valid))
+    flash(f"已应用 {len(valid)} 簇合并；后续没有建图或编辑时可回滚。")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/dedup/<oid:did>/rollback", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_dedup_rollback(gid, did):
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    dedup = _kg_dedup(gid, did)
+    if dedup["status"] != kg_dedup_utils.DEDUP_APPLIED or not dedup["snapshot"]:
+        flash("这条去重结果没有可回滚的快照")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    later = db.execute(
+        "SELECT id FROM kg_dedup_runs WHERE graph_id=? AND id>? AND status=? LIMIT 1",
+        (gid, did, kg_dedup_utils.DEDUP_APPLIED)).fetchone()
+    if later:
+        flash("之后已有新的去重结果被应用，请先回滚最新的那条")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    try:
+        snapshot = json.loads(dedup["snapshot"])
+    except (TypeError, ValueError):
+        snapshot = {}
+    try:
+        kg_utils.restore_snapshot(db, gid, snapshot, commit=False)
+    except ValueError as exc:
+        db.rollback()
+        flash(str(exc))
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    db.execute("UPDATE kg_dedup_runs SET status=? WHERE id=?",
+               (kg_dedup_utils.DEDUP_ROLLED_BACK, did))
+    db.commit()
+    kg_log.info("回滚知识图谱去重 user=%s#%s graph=%s dedup=%s",
+                g.user["username"], g.user["id"], gid, did)
+    flash("已回滚到去重应用前的图谱状态")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/dedup/<oid:did>/discard", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_dedup_discard(gid, did):
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    dedup = _kg_dedup(gid, did)
+    if dedup["status"] != kg_dedup_utils.DEDUP_PENDING:
+        flash("该去重结果已处理")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    db.execute("UPDATE kg_dedup_runs SET status=? WHERE id=?",
+               (kg_dedup_utils.DEDUP_DISCARDED, did))
+    db.commit()
+    kg_log.info("忽略知识图谱去重 user=%s#%s graph=%s dedup=%s",
+                g.user["username"], g.user["id"], gid, did)
+    flash("已忽略这次去重建议")
     return redirect(url_for("knowledge_graph_detail", gid=gid))
 
 

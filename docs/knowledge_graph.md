@@ -37,6 +37,8 @@
 | 存量成环报告 | 已完成 | 对前置子图做强连通分量分析，在详情页列出环上概念和置信度最低、建议优先处理的关系。 |
 | 关系维护 | 已完成 | 关系边支持删除与反向；反向仅限 `prerequisite`，先排除原边做防环校验，重复反向边自动合并。 |
 | AI 图谱体检 | 已完成 | LLM 只输出结构化建议（合并节点/反向/删除/下线），服务端校验 ID、合并冲突与成环风险后生成预览；用户确认后应用，应用前保存快照，可回滚。 |
+| AI 智能去重 | 已完成 | 三路召回疑似重复概念（别名/名称归一冲突、跨分类共享邻居、同分类 token 重叠），分批送 LLM 判定合并簇，复用体检的校验/快照/回滚；按簇可视化预览，教师逐簇确认后应用。 |
+| 资料归档减容 | 已完成 | 把已建图资料的源文件移出 `uploads/` 到独立归档目录，仅保留建图历史（元数据、文本块、节点、关系、体检记录）；归档文件不进系统备份，可随时还原。 |
 | 协作权限 | 已完成 | 创建者/管理员拥有管理权限；获授权成员可设为管理、编辑或使用角色。成员管理只对管理角色开放；教师只读浏览和课程关联不依赖成员记录。`TEMPORARY_GLOBAL_TEACHER_ACCESS=1` 时所有老师临时获得编辑权限，但不因此获得管理角色。 |
 | 图谱运营指标 | 已完成 | 详情页展示语料文件与各数据表的空间占用、累计构建用时、Token 和涉及模型。 |
 | 课程关联 | 已完成 | 所有教师可把任意系统图谱引入自己可访问的课程；关联用于讲次及学生分析，尚无独立的概念覆盖热力图。 |
@@ -52,7 +54,7 @@
 | P2 质量治理自动化 | 在体检建议基础上，对高置信的同名合并、孤立节点下线提供"一键应用"；补充置信度校准、重复证据检测与体检定时任务。 |
 | P3 教学闭环 | 学生端按前置关系生成复习路径；班级/讲次概念覆盖热力图；图谱缺口与错题分布联动。 |
 | P4 工程能力 | 建图任务多 worker 队列与限流；按资料增量重建；GraphML 导入导出（JSON 迁移包已支持）；图谱版本快照与差异对比。 |
-| P5 治理与审计 | 全量操作审计、快照保留策略、跨学科图谱复用与归档。 |
+| P5 治理与审计 | 全量操作审计、快照保留策略、跨学科图谱复用（资料归档减容已落地）。 |
 
 ## 2. 图谱形成的依据
 
@@ -261,12 +263,13 @@ erDiagram
 | 表 | 职责 | 关键约束或字段 |
 |---|---|---|
 | `knowledge_graphs` | 一张独立学科图谱 | 学科、名称、说明、学段、创建者 |
-| `kg_materials` | 原始资料及文件级状态 | `UNIQUE(graph_id, sha256)`；保存页数、字数、错误和处理时间 |
+| `kg_materials` | 原始资料及文件级状态 | `UNIQUE(graph_id, sha256)`；保存页数、字数、错误和处理时间；`archived_at` 非空表示源文件已归档（移出 uploads 但建图历史保留） |
 | `kg_chunks` | 资料文本块及断点续建状态 | 保存页码、块号、正文、chunk 状态、抽取 JSON、错误和时间 |
 | `kg_nodes` | 概念节点 | `UNIQUE(graph_id, normalized)`；保存定义、别名、出处和置信度 |
 | `kg_edges` | 有向关系边 | `UNIQUE(graph_id, src_id, dst_id, relation)`；保存依据、出处和置信度 |
 | `kg_audits` | 图谱体检记录 | 保存模型、建议 JSON、未通过校验的原因、应用前快照、`operation_id` 与状态 |
 | `kg_category_maps` | 分类重构记录 | 保存模型生成的分类映射、校验未通过项、应用前快照、`operation_id` 与状态 |
+| `kg_dedup_runs` | 智能去重记录 | 保存候选组、模型输出、校验通过/拒绝的合并簇、应用前快照、`operation_id` 与状态 |
 | `kg_members` | 图谱协作成员 | 复合主键 `(graph_id, user_id)`；`role` 为 `manage/edit/use` |
 | `course_knowledge_graphs` | 课程与图谱多对多关联 | 复合主键 `(course_id, graph_id)` |
 
@@ -281,9 +284,9 @@ erDiagram
 - 建图任务：`ai_operations.operation_type = 'kg_build'`，通过 `material_id` 关联资料；
 - 单次模型尝试：`ai_usage_events`，通过 `chunk_id` 关联文本块；
 - 图谱体检：`ai_operations.operation_type = 'kg_audit'`，`kg_audits.operation_id` 记录对应调用，用于把 token 归属到图谱；
-- 备份迁移：数据库与 `uploads/kg/` 一起进入系统备份范围。
+- 备份迁移：数据库与 `uploads/kg/` 一起进入系统备份范围；已归档资料的源文件位于独立归档目录（默认 `data/archives/kg/`），不进入备份，以减少备份体积。
 
-详情页的「存储明细」把空间拆成两部分：语料文件大小，以及 `knowledge_graphs/kg_materials/kg_chunks/kg_nodes/kg_edges/kg_audits/kg_members` 各表的估算占用。由于运行环境的 SQLite 未启用 `dbstat`，表占用按行文本长度加约 15% 行头与索引开销估算，并在页面上注明口径。
+详情页的「存储明细」把空间拆成两部分：语料文件大小，以及 `knowledge_graphs/kg_materials/kg_chunks/kg_nodes/kg_edges/kg_audits/kg_members` 各表的估算占用。由于运行环境的 SQLite 未启用 `dbstat`，表占用按行文本长度加约 15% 行头与索引开销估算，并在页面上注明口径。资料区另显示已归档数量与已节省空间，已归档资料的源文件不计入语料文件大小。
 
 因此，恢复系统时既能恢复图数据，也能恢复形成图谱的原始证据和逐块处理记录。
 
@@ -327,7 +330,7 @@ erDiagram
 | 角色 | 能力 |
 | --- | --- |
 | `manage` | 改名、删除图谱、分配/移除成员；创建者和管理员自动拥有 |
-| `edit` | 上传/重试/删除资料、下载资料、反向/删除关系、执行体检并应用建议、执行分类重构并应用建议 |
+| `edit` | 上传/重试/删除资料、下载资料、归档/还原资料、反向/删除关系、执行体检并应用建议、执行分类重构并应用建议、执行智能去重并应用建议 |
 | `use` | 协作成员角色；可下载图谱源资料，但关联课程不再要求 `use` 角色 |
 | 其他教师（只读） | 仅在 `TEMPORARY_GLOBAL_TEACHER_ACCESS=0` 时适用：查看图谱、概念邻域与运营指标，可将图谱关联到自己有权限的课程，但不能下载源资料 |
 
@@ -350,6 +353,10 @@ erDiagram
 | POST | `/knowledge-graphs/<oid:gid>/materials` | 上传一份或多份资料；表单字段 `files` | 重定向 |
 | POST | `/knowledge-graphs/materials/<oid:mid>/retry` | 重试失败资料的建图；复用成功文本块，仅重新处理未完成块 | 重定向 |
 | POST | `/knowledge-graphs/materials/<oid:mid>/delete` | 删除资料并回收其独有节点和边 | 重定向 |
+| POST | `/knowledge-graphs/materials/<oid:mid>/archive` | 把已建图资料的源文件移入归档目录，保留建图历史 | 重定向 |
+| POST | `/knowledge-graphs/materials/<oid:mid>/restore` | 把已归档资料的源文件还原回 uploads | 重定向 |
+| POST | `/knowledge-graphs/<oid:gid>/materials/bulk-archive` | 批量归档资料；表单 `material_ids` 多选，整体事务一致 | 重定向 |
+| POST | `/knowledge-graphs/<oid:gid>/materials/bulk-restore` | 批量还原已归档资料；表单 `material_ids` 多选 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/edit` | 修改名称和说明；表单 `name/description` | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/delete` | 删除整张图谱、关联和原始文件 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/edges/<oid:eid>/reverse` | 反向前置关系；会成环则拒绝，重复边自动合并 | 重定向 |
@@ -358,6 +365,10 @@ erDiagram
 | POST | `/knowledge-graphs/<oid:gid>/audit/<oid:aid>/apply` | 应用体检建议并保存应用前快照 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/audit/<oid:aid>/rollback` | 从快照回滚已应用的建议 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/audit/<oid:aid>/discard` | 忽略一次体检结果 | 重定向 |
+| POST | `/knowledge-graphs/<oid:gid>/dedup` | 异步运行智能去重并保存合并簇建议 | 重定向 |
+| POST | `/knowledge-graphs/<oid:gid>/dedup/<oid:did>/apply` | 应用所选去重合并簇并保存应用前快照；表单 `keep_ids` 为保留的簇 | 重定向 |
+| POST | `/knowledge-graphs/<oid:gid>/dedup/<oid:did>/rollback` | 从快照回滚最近一次已应用的去重 | 重定向 |
+| POST | `/knowledge-graphs/<oid:gid>/dedup/<oid:did>/discard` | 忽略一次去重结果 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/categories/analyze` | 异步分析并预览分类重构建议 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/categories/<oid:mid>/apply` | 应用所选分类映射；表单 `selected` 为所选映射索引 | 重定向 |
 | POST | `/knowledge-graphs/<oid:gid>/categories/<oid:mid>/rollback` | 从应用前快照回滚分类重构 | 重定向 |
@@ -507,6 +518,8 @@ Content-Type: application/json
 | `utilities/knowledge_graph.py` | `analyze_graph(...)` | 调用模型生成图谱体检建议 |
 | `utilities/knowledge_graph.py` | `validate_audit_suggestions(...)` | 校验建议的 ID、合并冲突和成环风险 |
 | `utilities/knowledge_graph.py` | `apply_audit(...)` / `restore_snapshot(...)` | 应用建议与快照回滚 |
+| `utilities/kg_dedup.py` | `build_dedup_candidates(...)` / `run_dedup(...)` | 三路召回疑似重复概念并分批送 LLM 判定合并簇，汇总后复用体检校验 |
+| `utilities/kg_archive.py` | `archive_material(...)` / `restore_material_archive(...)` / `bulk_archive_materials(...)` | 资料源文件归档/还原与批量事务，解析归档路径 |
 | `app.py` | `start_kg_recovery()` | 启动时恢复待建图和建图中资料 |
 
 ## 7. 当前边界
@@ -520,6 +533,8 @@ Content-Type: application/json
 7. **表空间是估算值**：环境未启用 SQLite `dbstat`，不读取真实页分配，按行内容长度与固定开销推算。
 8. **体检不自动落库**：LLM 建议必须经过服务端校验和人工确认；同名合并、孤立节点下线目前也不自动执行。
 9. **根因联动尚未闭环**：相关分析已使用课程图谱的标签匹配和前置关系；不会在每次批阅时注入整张图谱，诊断和复习路径仍需教师判断。
+10. **去重不自动合并**：LLM 只给出合并簇建议，必须经服务端校验（ID 归属、冲突、防环）和教师逐簇确认后才应用；应用前保存快照，可回滚。单组模型失败只记录错误、不中断整体。
+11. **归档不删建图历史**：归档只移动源文件，`kg_chunks/kg_nodes/kg_edges/kg_materials` 行全部保留；归档文件不进系统备份，可还原。建图中/待建图的资料不允许归档。
 
 ## 8. 实现与验证索引
 

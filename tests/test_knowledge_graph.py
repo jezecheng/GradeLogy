@@ -22,7 +22,7 @@ except ImportError:
 
 import app as app_module  # noqa: E402
 import db as database  # noqa: E402
-from utilities import kg_cli, kg_text, kg_transfer, knowledge_graph as kg  # noqa: E402
+from utilities import kg_cli, kg_dedup as kd, kg_text, kg_transfer, knowledge_graph as kg  # noqa: E402
 
 _TABLES = ("kg_category_maps", "kg_members", "kg_audits", "kg_chunks", "kg_edges",
            "kg_nodes", "kg_materials", "knowledge_graphs", "tag_analyses",
@@ -696,6 +696,106 @@ class KGLogicTest(unittest.TestCase):
         keep = self.con.execute("SELECT * FROM kg_nodes WHERE id=?",
                                 (ids["A"],)).fetchone()
         self.assertIn("B", json.loads(keep["aliases"]))
+
+
+    def _dedup_node(self, name, category="", aliases=(), definition=""):
+        cur = self.con.execute(
+            "INSERT INTO kg_nodes(graph_id,name,normalized,category,aliases,"
+            "definition,confidence) VALUES(1,?,?,?,?,?,0.9)",
+            (name, kg_text.normalize_concept(name), category,
+             json.dumps(list(aliases), ensure_ascii=False), definition))
+        self.con.commit()
+        return cur.lastrowid
+
+    def _dedup_edge(self, src, dst, relation="prerequisite"):
+        self.con.execute(
+            "INSERT INTO kg_edges(graph_id,src_id,dst_id,relation,evidence,confidence)"
+            " VALUES(1,?,?,?,?,0.8)", (src, dst, relation, ""))
+        self.con.commit()
+
+    def test_dedup_candidates_recall_alias_conflict(self):
+        self._dedup_node("牛顿第二定律", "力学", ["牛顿第二运动定律"])
+        self._dedup_node("牛顿第二运动定律", "力学")
+        names = {tuple(sorted(n["name"] for n in g))
+                 for g in kd.build_dedup_candidates(self.con, 1)}
+        self.assertIn(("牛顿第二定律", "牛顿第二运动定律"), names)
+
+    def test_dedup_candidates_recall_shared_neighbor_cross_category(self):
+        x = self._dedup_node("氧化还原反应", "反应类型")
+        y = self._dedup_node("氧化还原", "电化学")
+        z = self._dedup_node("电子转移", "基础")
+        self._dedup_edge(x, z)
+        self._dedup_edge(y, z)
+        names = {tuple(sorted(n["name"] for n in g))
+                 for g in kd.build_dedup_candidates(self.con, 1)}
+        self.assertIn(("氧化还原", "氧化还原反应"), names)
+
+    def test_dedup_candidates_recall_same_category_token_overlap(self):
+        self._dedup_node("化学平衡常数", "化学平衡")
+        self._dedup_node("化学平衡移动", "化学平衡")
+        self._dedup_node("氧化还原反应", "反应类型")
+        names = {tuple(sorted(n["name"] for n in g))
+                 for g in kd.build_dedup_candidates(self.con, 1)}
+        self.assertIn(("化学平衡常数", "化学平衡移动"), names)
+        self.assertNotIn(("化学平衡常数", "氧化还原反应"), names)
+
+    def test_run_dedup_flattens_validates_and_restores(self):
+        a = self._dedup_node("动能定理", "力学")
+        b = self._dedup_node("动能定律", "力学")
+        reply = json.dumps({"groups": [
+            {"node_ids": [a, b], "keep_id": a, "reason": "同一概念不同写法",
+             "confidence": 0.9}]}, ensure_ascii=False)
+        with mock.patch.object(kd.llm, "chat", return_value=(reply, "stop", "")):
+            valid, rejected, error = kd.run_dedup(self.con, 1, "u", "k", "m")
+        self.assertEqual(error, "")
+        self.assertEqual(len(valid), 1)
+        self.assertEqual(set(valid[0]["node_ids"]), {a, b})
+        flat = kd.flatten_dedup_suggestions(valid)
+        self.assertEqual(flat[0]["action"], "merge_nodes")
+        snapshot = kg.apply_audit(self.con, 1, flat, commit=False)
+        self.con.commit()
+        self.assertEqual(self.con.execute(
+            "SELECT COUNT(*) FROM kg_nodes").fetchone()[0], 1)
+        kg.restore_snapshot(self.con, 1, snapshot)
+        self.con.commit()
+        self.assertEqual(self.con.execute(
+            "SELECT COUNT(*) FROM kg_nodes").fetchone()[0], 2)
+
+    def test_run_dedup_rejects_merges_that_introduce_cycle(self):
+        a = self._dedup_node("概念A", "分类一")
+        b = self._dedup_node("概念B", "分类一")
+        c = self._dedup_node("概念C", "分类一")
+        self._dedup_edge(a, b)
+        self._dedup_edge(b, c)
+        reply = json.dumps({"groups": [
+            {"node_ids": [a, c], "keep_id": a, "reason": "想合并",
+             "confidence": 0.8}]}, ensure_ascii=False)
+        with mock.patch.object(kd.llm, "chat", return_value=(reply, "stop", "")):
+            valid, rejected, error = kd.run_dedup(self.con, 1, "u", "k", "m")
+        self.assertEqual(error, "")
+        self.assertEqual(valid, [])
+        self.assertTrue(rejected)
+        self.assertIn("环", rejected[0]["reason"])
+
+    def test_run_dedup_single_group_failure_does_not_abort(self):
+        a = self._dedup_node("动量定理", "力学")
+        b = self._dedup_node("动量定律", "力学")
+        self._dedup_node("能量守恒", "热学")
+        self._dedup_node("能量守恒定律", "热学")
+        ok_reply = json.dumps({"groups": [
+            {"node_ids": [a, b], "keep_id": a, "reason": "同义",
+             "confidence": 0.9}]}, ensure_ascii=False)
+
+        def fake_chat(api, key, model, content, **kwargs):
+            text = content[0]["text"] if isinstance(content, list) else content
+            if "动量定理" in text:
+                return ok_reply, "stop", ""
+            raise RuntimeError("boom")
+
+        with mock.patch.object(kd.llm, "chat", side_effect=fake_chat):
+            valid, rejected, error = kd.run_dedup(self.con, 1, "u", "k", "m")
+        self.assertEqual(len(valid), 1)
+        self.assertIn("boom", error)
 
 
 class KGRouteTest(unittest.TestCase):
@@ -1902,7 +2002,8 @@ class KGRouteTest(unittest.TestCase):
     def test_all_teachers_can_export_graph_and_download_package(self):
         graph = self._create_graph()
 
-        def write_package(db, gid, upload_dir, output_path, scope="full"):
+        def write_package(db, gid, upload_dir, output_path, scope="full",
+                          archive_dir=None, **kwargs):
             self.assertEqual(gid, graph["id"])
             with zipfile.ZipFile(output_path, "w") as archive:
                 archive.writestr("manifest.json", "{}")
@@ -2444,6 +2545,191 @@ class KGTransferTest(unittest.TestCase):
         kg_dir = os.path.join(self.target_upload, "kg")
         self.assertEqual(os.listdir(kg_dir) if os.path.isdir(kg_dir) else [], [])
         self.assertFalse(self.target.in_transaction)
+
+
+class KGArchiveTest(unittest.TestCase):
+    """资料归档：移动文件、保留图谱、批量/还原、备份排除、导出兼容。"""
+
+    def setUp(self):
+        app_module.app.config.update(TESTING=True)
+        self.client = KGRouteTest.login(2)
+        con = self._db()
+        for table in _TABLES:
+            con.execute(f"DELETE FROM {table}")
+        con.executemany(
+            "INSERT INTO users(id,username,password_hash,display_name,role,active,"
+            "must_change_password) VALUES(?,?, 'x',?,?,1,0)",
+            [(2, "teacher", "老师", "teacher")])
+        con.commit()
+        con.close()
+        shutil.rmtree(os.path.join(app_module.UPLOAD_DIR, "kg"), ignore_errors=True)
+        shutil.rmtree(os.path.join(app_module.cfg.ARCHIVE_DIR, "kg"), ignore_errors=True)
+
+    def tearDown(self):
+        con = self._db()
+        for table in _TABLES:
+            con.execute(f"DELETE FROM {table}")
+        con.commit()
+        con.close()
+        shutil.rmtree(os.path.join(app_module.UPLOAD_DIR, "kg"), ignore_errors=True)
+        shutil.rmtree(os.path.join(app_module.cfg.ARCHIVE_DIR, "kg"), ignore_errors=True)
+
+    @staticmethod
+    def _db():
+        con = sqlite3.connect(app_module.DB_PATH)
+        con.row_factory = sqlite3.Row
+        return con
+
+    def _post(self, endpoint, data=None, **values):
+        payload = {"_csrf": "test-token"}
+        payload.update(data or {})
+        with app_module.app.test_request_context():
+            url = app_module.url_for(endpoint, **values)
+        return self.client.post(url, data=payload)
+
+    def _create_graph(self):
+        self._post("knowledge_graph_create", {"subject": "高中化学", "name": "归档测试图"})
+        con = self._db()
+        graph = con.execute("SELECT * FROM knowledge_graphs ORDER BY id DESC").fetchone()
+        con.close()
+        return graph
+
+    def _seed_material(self, graph_id, mid, filename, status="完成", content=b"data"):
+        abs_dir = os.path.join(app_module.UPLOAD_DIR, "kg", str(graph_id))
+        os.makedirs(abs_dir, exist_ok=True)
+        with open(os.path.join(abs_dir, filename), "wb") as fh:
+            fh.write(content)
+        sha = hashlib.sha256(content).hexdigest()
+        con = self._db()
+        con.execute(
+            "INSERT INTO kg_materials(id,graph_id,filename,stored_name,size,sha256,"
+            "status,uploaded_by) VALUES(?,?,?,?,?,?,?,2)",
+            (mid, graph_id, filename, f"kg/{graph_id}/{filename}",
+             len(content), sha, status))
+        con.execute(
+            "INSERT INTO kg_chunks(id,graph_id,material_id,content,status)"
+            " VALUES(?,?,?,?,'success')", (mid * 10, graph_id, mid, "chunk"))
+        con.execute(
+            "INSERT INTO kg_nodes(id,graph_id,name,normalized,source_materials)"
+            " VALUES(?,?,?,?,?)", (mid * 100, graph_id, f"概念{mid}", f"概念{mid}", f",{mid},"))
+        con.execute(
+            "INSERT INTO kg_edges(id,graph_id,src_id,dst_id,relation,source_materials)"
+            " VALUES(?,?,?,?,?,?)",
+            (mid * 1000, graph_id, mid * 100, mid * 100, "related", f",{mid},"))
+        con.commit()
+        con.close()
+
+    def test_archive_moves_file_and_keeps_chunks_nodes_edges(self):
+        graph = self._create_graph()
+        self._seed_material(graph["id"], 11, "book.txt", content=b"oxidation")
+        self._post("knowledge_graph_material_archive", mid=11)
+        con = self._db()
+        row = con.execute("SELECT archived_at FROM kg_materials WHERE id=11").fetchone()
+        self.assertTrue(row["archived_at"])
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM kg_chunks WHERE material_id=11").fetchone()[0], 1)
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM kg_nodes").fetchone()[0], 1)
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM kg_edges").fetchone()[0], 1)
+        con.close()
+        upload_path = os.path.join(app_module.UPLOAD_DIR, "kg", str(graph["id"]), "book.txt")
+        archive_path = os.path.join(
+            app_module.cfg.ARCHIVE_DIR, "kg", str(graph["id"]), "book.txt")
+        self.assertFalse(os.path.exists(upload_path))
+        self.assertTrue(os.path.isfile(archive_path))
+
+    def test_archive_rejects_building_status(self):
+        graph = self._create_graph()
+        self._seed_material(graph["id"], 12, "building.txt", status="建图中")
+        self._post("knowledge_graph_material_archive", mid=12)
+        con = self._db()
+        row = con.execute("SELECT archived_at FROM kg_materials WHERE id=12").fetchone()
+        con.close()
+        self.assertFalse(row["archived_at"])
+        self.assertTrue(os.path.isfile(
+            os.path.join(app_module.UPLOAD_DIR, "kg", str(graph["id"]), "building.txt")))
+
+    def test_bulk_archive_and_restore(self):
+        graph = self._create_graph()
+        self._seed_material(graph["id"], 21, "a.txt", content=b"a")
+        self._seed_material(graph["id"], 22, "b.txt", content=b"b")
+        self._post("knowledge_graph_materials_bulk_archive",
+                   {"material_ids": ["21", "22"]}, gid=graph["id"])
+        con = self._db()
+        rows = con.execute(
+            "SELECT id,archived_at FROM kg_materials WHERE id IN (21,22) ORDER BY id").fetchall()
+        self.assertTrue(all(r["archived_at"] for r in rows))
+        con.close()
+        for name in ("a.txt", "b.txt"):
+            self.assertFalse(os.path.exists(
+                os.path.join(app_module.UPLOAD_DIR, "kg", str(graph["id"]), name)))
+            self.assertTrue(os.path.isfile(
+                os.path.join(app_module.cfg.ARCHIVE_DIR, "kg", str(graph["id"]), name)))
+        self._post("knowledge_graph_materials_bulk_restore",
+                   {"material_ids": ["21", "22"]}, gid=graph["id"])
+        con = self._db()
+        rows = con.execute(
+            "SELECT archived_at FROM kg_materials WHERE id IN (21,22)").fetchall()
+        self.assertTrue(all(not r["archived_at"] for r in rows))
+        con.close()
+        for name in ("a.txt", "b.txt"):
+            self.assertTrue(os.path.isfile(
+                os.path.join(app_module.UPLOAD_DIR, "kg", str(graph["id"]), name)))
+
+    def test_archived_file_excluded_from_backup_zip(self):
+        graph = self._create_graph()
+        self._seed_material(graph["id"], 31, "archived.txt", content=b"x")
+        self._seed_material(graph["id"], 32, "kept.txt", content=b"y")
+        self._post("knowledge_graph_material_archive", mid=31)
+        handle = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        handle.close()
+        try:
+            app_module._build_backup_zip(handle.name)
+            with zipfile.ZipFile(handle.name) as archive:
+                names = archive.namelist()
+            self.assertIn(f"uploads/kg/{graph['id']}/kept.txt", names)
+            self.assertNotIn(f"uploads/kg/{graph['id']}/archived.txt", names)
+            self.assertFalse(any(n.startswith("archives/") for n in names))
+            con = self._db()
+            self.assertEqual(con.execute(
+                "SELECT COUNT(*) FROM kg_materials WHERE archived_at<>''").fetchone()[0], 1)
+            con.close()
+        finally:
+            os.remove(handle.name)
+
+    def test_export_reads_archived_file_and_errors_when_missing(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            upload = os.path.join(tmp, "uploads")
+            archive = os.path.join(tmp, "archives")
+            content = b"archived content"
+            con = sqlite3.connect(":memory:")
+            con.row_factory = sqlite3.Row
+            con.executescript(database.SCHEMA)
+            con.execute(
+                "INSERT INTO knowledge_graphs(id,subject,name,created_by) VALUES(7,'化学','x',2)")
+            archive_dir = os.path.join(archive, "kg", "7")
+            os.makedirs(archive_dir)
+            with open(os.path.join(archive_dir, "book.txt"), "wb") as fh:
+                fh.write(content)
+            sha = hashlib.sha256(content).hexdigest()
+            con.execute(
+                "INSERT INTO kg_materials(id,graph_id,filename,stored_name,size,sha256,"
+                "status,archived_at) VALUES(11,7,'教材.txt','kg/7/book.txt',?,?, '完成','2026-01-01')",
+                (len(content), sha))
+            con.commit()
+            package = os.path.join(tmp, "g.zip")
+            kg_transfer.export_graph(con, 7, upload, package, archive_dir=archive)
+            self.assertTrue(os.path.isfile(package))
+            with zipfile.ZipFile(package) as z:
+                self.assertTrue(any(n.startswith("files/11/") for n in z.namelist()))
+            os.remove(os.path.join(archive_dir, "book.txt"))
+            with self.assertRaises(kg_transfer.KGTransferError) as ctx:
+                kg_transfer.export_graph(con, 7, upload, os.path.join(tmp, "g2.zip"),
+                                         archive_dir=archive)
+            self.assertIn("已归档且归档文件缺失", str(ctx.exception))
+            con.close()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
