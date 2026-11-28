@@ -110,10 +110,20 @@ tr[data-material-archived="true"] { opacity: .92; }
 .kg-cat-batch[open] > summary::before { transform: rotate(90deg); }
 .kg-cat-batch-tip { margin-left: auto; color: #1456f0; font-size: 12px; }
 .kg-cat-batch .kg-audit { border-top: 0; padding-top: 2px; }
-.kg-dedup-clusters { display: flex; flex-direction: column; gap: 8px; margin: 6px 0; }
-.kg-dedup-cluster { border: 1px solid #e5e7eb; border-radius: 10px; padding: 8px 10px;
-  background: #fafafa; }
-.kg-dedup-members { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 4px; }
+.kg-dedup-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  margin: 6px 0; }
+.kg-dedup-toolbar .kg-dedup-count-summary { margin-left: auto; font-size: 12px; color: #4b5563; }
+.kg-dedup-table { width: 100%; border-collapse: collapse; margin: 6px 0; font-size: 13px;
+  table-layout: fixed; }
+.kg-dedup-table th, .kg-dedup-table td { border: 1px solid #e5e7eb; padding: 6px 8px;
+  text-align: left; vertical-align: top; word-break: break-word; }
+.kg-dedup-table th { background: #f3f4f6; color: #4b5563; font-weight: 600;
+  white-space: nowrap; }
+.kg-dedup-table th.kg-dedup-col-check, .kg-dedup-table td.kg-dedup-col-check {
+  width: 36px; text-align: center; padding: 6px 4px; }
+.kg-dedup-table th.kg-dedup-col-confidence { width: 70px; }
+.kg-dedup-table tbody tr:hover { background: #f9fafb; }
+.kg-dedup-members { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .kg-dedup-member { background: #fff; border: 1px solid #e5e7eb; border-radius: 999px;
   padding: 2px 10px; font-size: 13px; }
 .kg-dedup-member.is-keep { background: #ecfdf5; border-color: #6ee7b7; color: #065f46; font-weight: 600; }
@@ -656,23 +666,45 @@ tr[data-material-archived="true"] { opacity: .92; }
     </div>
     {% endif %}
     {% if d.groups %}
-    <div class="kg-dedup-clusters">
-      {% for c in d.groups %}
-      <div class="kg-dedup-cluster" data-keep-id="{{ c.keep_id }}">
-        <div class="kg-dedup-members">
-          {% for name in c.member_names %}
-          <span class="kg-dedup-member{% if name == c.keep_name %} is-keep{% endif %}">
-            {{ name }}{% if name == c.keep_name %} <em>保留</em>{% endif %}
-          </span>
-          {% endfor %}
-        </div>
-        <div class="kg-note">{{ c.reason or '—' }} · 置信度 {{ ((c.confidence or 0) * 100) | round(0) | int }}%</div>
-        {% if can_edit and d.status == '待确认' %}
-        <button type="button" class="ghost small kg-dedup-skip">暂不合并</button>
-        {% endif %}
-      </div>
-      {% endfor %}
+    {% set editable = can_edit and d.status == '待确认' %}
+    {% if editable %}
+    <div class="kg-dedup-toolbar">
+      <button type="button" class="ghost small kg-dedup-select-all">全选</button>
+      <button type="button" class="ghost small kg-dedup-clear-all">取消全选</button>
+      <button type="button" class="ghost small kg-dedup-invert">反选</button>
+      <span class="kg-dedup-count-summary">已选 <span class="kg-dedup-count">{{ d.groups | length }}</span> / {{ d.groups | length }} 簇</span>
     </div>
+    {% endif %}
+    <table class="kg-dedup-table">
+      <thead>
+        <tr>
+          {% if editable %}<th class="kg-dedup-col-check"><input type="checkbox" class="kg-dedup-check-all" aria-label="全选"></th>{% endif %}
+          <th>合并概念</th>
+          <th>保留节点</th>
+          <th>理由</th>
+          <th class="kg-dedup-col-confidence">置信度</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for c in d.groups %}
+        <tr data-keep-id="{{ c.keep_id }}">
+          {% if editable %}<td class="kg-dedup-col-check"><input type="checkbox" class="kg-dedup-row-check" value="{{ c.keep_id }}" checked></td>{% endif %}
+          <td>
+            <div class="kg-dedup-members">
+              {% for name in c.member_names %}
+              <span class="kg-dedup-member{% if name == c.keep_name %} is-keep{% endif %}">
+                {{ name }}{% if name == c.keep_name %} <em>保留</em>{% endif %}
+              </span>
+              {% endfor %}
+            </div>
+          </td>
+          <td>{{ c.keep_name }}</td>
+          <td>{{ c.reason or '—' }}</td>
+          <td>{{ ((c.confidence or 0) * 100) | round(0) | int }}%</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
     {% endif %}
     {% if d.rejected %}
     <details>
@@ -691,7 +723,7 @@ tr[data-material-archived="true"] { opacity: .92; }
             onsubmit="return confirm('将合并选中的重复概念，修改图谱；后续未建图或编辑时可回滚。继续？')">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
         <input type="hidden" name="keep_ids" class="kg-dedup-keep-ids" value="">
-        <button class="ghost small kg-dedup-apply-btn">应用 <span class="kg-dedup-count">{{ d.groups | length }}</span> 簇合并</button>
+        <button class="ghost small kg-dedup-apply-btn">应用选中 <span class="kg-dedup-count">{{ d.groups | length }}</span> 簇合并</button>
       </form>
       <form method="post" action="{{ url_for('knowledge_graph_dedup_discard', gid=graph.id, did=d.id) }}">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
@@ -710,35 +742,57 @@ tr[data-material-archived="true"] { opacity: .92; }
 </details>
 <script>
 (function () {
-  function refresh(form) {
-    var run = form.closest('[data-dedup-run]');
-    if (!run) return;
-    var kept = [];
-    var visible = 0;
-    run.querySelectorAll('.kg-dedup-cluster').forEach(function (c) {
-      if (c.getAttribute('data-excluded') !== '1') {
-        kept.push(c.getAttribute('data-keep-id'));
-        visible++;
-      }
+  function syncRun(run) {
+    var checks = run.querySelectorAll('.kg-dedup-row-check');
+    var checked = [];
+    checks.forEach(function (cb) { if (cb.checked) checked.push(cb.value); });
+    run.querySelectorAll('.kg-dedup-keep-ids').forEach(function (input) {
+      input.value = checked.join(',');
     });
-    var input = form.querySelector('.kg-dedup-keep-ids');
-    if (input) input.value = kept.join(',');
-    var cnt = run.querySelector('.kg-dedup-count');
-    if (cnt) cnt.textContent = visible;
-    var btn = form.querySelector('.kg-dedup-apply-btn');
-    if (btn) btn.disabled = visible === 0;
+    run.querySelectorAll('.kg-dedup-count').forEach(function (cnt) {
+      cnt.textContent = checked.length;
+    });
+    run.querySelectorAll('.kg-dedup-apply-btn').forEach(function (btn) {
+      btn.disabled = checked.length === 0;
+    });
+    var head = run.querySelector('.kg-dedup-check-all');
+    if (head) {
+      head.checked = checks.length > 0 && checked.length === checks.length;
+      head.indeterminate = checked.length > 0 && checked.length < checks.length;
+    }
   }
-  document.querySelectorAll('.kg-dedup-skip').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      var cluster = btn.closest('.kg-dedup-cluster');
-      if (!cluster) return;
-      cluster.setAttribute('data-excluded', '1');
-      cluster.style.display = 'none';
-      var run = cluster.closest('[data-dedup-run]');
-      if (run) run.querySelectorAll('.kg-dedup-apply-form').forEach(refresh);
+  document.querySelectorAll('[data-dedup-run]').forEach(function (run) {
+    syncRun(run);
+    run.querySelectorAll('.kg-dedup-row-check').forEach(function (cb) {
+      cb.addEventListener('change', function () { syncRun(run); });
+    });
+    var head = run.querySelector('.kg-dedup-check-all');
+    if (head) {
+      head.addEventListener('change', function () {
+        var on = head.checked;
+        run.querySelectorAll('.kg-dedup-row-check').forEach(function (cb) { cb.checked = on; });
+        syncRun(run);
+      });
+    }
+    run.querySelectorAll('.kg-dedup-select-all').forEach(function (b) {
+      b.addEventListener('click', function () {
+        run.querySelectorAll('.kg-dedup-row-check').forEach(function (cb) { cb.checked = true; });
+        syncRun(run);
+      });
+    });
+    run.querySelectorAll('.kg-dedup-clear-all').forEach(function (b) {
+      b.addEventListener('click', function () {
+        run.querySelectorAll('.kg-dedup-row-check').forEach(function (cb) { cb.checked = false; });
+        syncRun(run);
+      });
+    });
+    run.querySelectorAll('.kg-dedup-invert').forEach(function (b) {
+      b.addEventListener('click', function () {
+        run.querySelectorAll('.kg-dedup-row-check').forEach(function (cb) { cb.checked = !cb.checked; });
+        syncRun(run);
+      });
     });
   });
-  document.querySelectorAll('.kg-dedup-apply-form').forEach(refresh);
 
   // 去重进度：轮询通用状态接口，原地更新进度条与逐组状态，不打断当前页面。
   var box = document.getElementById('kg-dedup-progress');
