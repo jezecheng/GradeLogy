@@ -446,6 +446,27 @@ CREATE TABLE IF NOT EXISTS kg_dedup_groups(
   finished_at TEXT,
   UNIQUE(run_id, group_index));
 CREATE INDEX IF NOT EXISTS idx_kg_dedup_groups_run ON kg_dedup_groups(run_id, status);
+-- 无关性分析：AI 分批识别与学科无关的概念，确认后摘除（含关系），应用前保存快照
+CREATE TABLE IF NOT EXISTS kg_relevance_runs(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  graph_id INTEGER NOT NULL REFERENCES knowledge_graphs(id),
+  status TEXT NOT NULL DEFAULT '待确认',
+  model TEXT DEFAULT '',
+  error TEXT DEFAULT '',
+  suggestions TEXT DEFAULT '[]',
+  rejected TEXT DEFAULT '[]',
+  snapshot TEXT DEFAULT '',
+  operation_id INTEGER,
+  created_by INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  applied_at TEXT,
+  plan TEXT DEFAULT '[]',
+  progress TEXT DEFAULT '{}',
+  graph_sig TEXT DEFAULT '',
+  started_at TEXT,
+  finished_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_kg_relevance_runs_graph
+  ON kg_relevance_runs(graph_id, id);
 -- 图谱协作：manage 可改名/删除/管理成员，edit 可加语料与改关系，use 可在自己的课程中引入
 CREATE TABLE IF NOT EXISTS kg_members(
   graph_id INTEGER NOT NULL REFERENCES knowledge_graphs(id),
@@ -737,6 +758,10 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=(), reco
                     ("服务重启，智能去重已中断，可点击「继续去重」从未完成的候选组续跑",))
         con.execute("UPDATE ai_operations SET status='failed', error=?, "
                     "finished_at=datetime('now','+8 hours') WHERE status IN ('queued','running') "
+                    "AND operation_type='kg_relevance'",
+                    ("服务重启，无关性分析已中断，可点击「继续分析」从未完成的批次续跑",))
+        con.execute("UPDATE ai_operations SET status='failed', error=?, "
+                    "finished_at=datetime('now','+8 hours') WHERE status IN ('queued','running') "
                     "AND operation_type<>'kg_build'",
                     ("服务重启，后台 AI 任务已中断，请重新提交",))
         # 去重逐组状态落库：重启后正在进行/排队中的运行标记为「已中断」，
@@ -744,6 +769,8 @@ def init_db(upload_migrator=None, default_prompts=(), default_passwords=(), reco
         con.execute("UPDATE kg_dedup_groups SET status='pending', finished_at=NULL "
                     "WHERE status='running'")
         con.execute("UPDATE kg_dedup_runs SET status='已中断', finished_at=datetime('now','+8 hours') "
+                    "WHERE status='进行中'")
+        con.execute("UPDATE kg_relevance_runs SET status='已中断', finished_at=datetime('now','+8 hours') "
                     "WHERE status='进行中'")
         con.execute("""
             UPDATE ai_usage_events SET status='error',

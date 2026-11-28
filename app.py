@@ -62,6 +62,7 @@ from utilities import kg_text
 from utilities import kg_transfer
 from utilities import kg_archive
 from utilities import kg_dedup as kg_dedup_utils
+from utilities import kg_relevance as kg_relevance_utils
 from utilities import tags as tag_utils
 from utilities.time_utils import BEIJING_TZ, beijing_wall_now, now_beijing
 from utilities.teacher_views import workload
@@ -3342,7 +3343,8 @@ def ai_operation_status(operation_id):
     if not operation:
         abort(404)
     if operation["teacher_id"] != g.user["id"] and g.user["role"] != "admin":
-        if operation["operation_type"] in ("kg_audit", "kg_category", "kg_dedup"):
+        if operation["operation_type"] in ("kg_audit", "kg_category", "kg_dedup",
+                                           "kg_relevance"):
             prefix = "knowledge_graph:"
             resource_key = operation["resource_key"] or ""
             if not resource_key.startswith(prefix) or not resource_key[len(prefix):].isdigit():
@@ -3353,9 +3355,11 @@ def ai_operation_status(operation_id):
         else:
             abort(403)
     progress = None
-    if operation["operation_type"] == "kg_dedup":
+    if operation["operation_type"] in ("kg_dedup", "kg_relevance"):
+        table = ("kg_dedup_runs" if operation["operation_type"] == "kg_dedup"
+                 else "kg_relevance_runs")
         run = db.execute(
-            "SELECT status,progress FROM kg_dedup_runs WHERE operation_id=? "
+            f"SELECT status,progress FROM {table} WHERE operation_id=? "
             "ORDER BY id DESC LIMIT 1", (operation["id"],)).fetchone()
         if run:
             try:
@@ -4522,6 +4526,38 @@ def _kg_dedup_view(row):
     }
 
 
+def _kg_relevance_view(row):
+    """把一条无关性分析记录转成模板可直接渲染的结构。"""
+    try:
+        items = json.loads(row["suggestions"] or "[]")
+    except (TypeError, ValueError):
+        items = []
+    try:
+        rejected = json.loads(row["rejected"] or "[]")
+    except (TypeError, ValueError):
+        rejected = []
+    try:
+        progress = json.loads(row["progress"] or "{}")
+    except (TypeError, ValueError):
+        progress = {}
+    if not isinstance(progress, dict):
+        progress = {}
+    if not isinstance(items, list):
+        items = []
+    status = row["status"]
+    return {
+        "id": row["id"], "status": status,
+        "model": row["model"] or "", "error": row["error"] or "",
+        "created_at": _localtime(row["created_at"]),
+        "applied_at": _localtime(row["applied_at"]) if row["applied_at"] else "",
+        "items": items, "rejected": rejected if isinstance(rejected, list) else [],
+        "has_snapshot": bool(row["snapshot"]),
+        "operation_id": row["operation_id"] or 0,
+        "progress": progress,
+        "resumable": kg_relevance_utils.run_is_resumable(status, progress),
+    }
+
+
 def _kg_category_map_view(row):
     """把一条分类重构记录转成模板可直接渲染的结构。"""
     try:
@@ -4578,6 +4614,12 @@ def knowledge_graph_detail(gid):
     graph_dedup_operation = db.execute(
         "SELECT id,status,error FROM ai_operations WHERE operation_type='kg_dedup' "
         "AND resource_key=? ORDER BY id DESC LIMIT 1", (f"knowledge_graph:{gid}",)).fetchone()
+    relevances = [_kg_relevance_view(row) for row in db.execute(
+        "SELECT * FROM kg_relevance_runs WHERE graph_id=? ORDER BY id DESC LIMIT 3",
+        (gid,)).fetchall()]
+    graph_relevance_operation = db.execute(
+        "SELECT id,status,error FROM ai_operations WHERE operation_type='kg_relevance' "
+        "AND resource_key=? ORDER BY id DESC LIMIT 1", (f"knowledge_graph:{gid}",)).fetchone()
     role = _kg_role(graph)
     members = db.execute(
         "SELECT m.user_id, m.role, u.username, u.display_name FROM kg_members m"
@@ -4603,6 +4645,8 @@ def knowledge_graph_detail(gid):
         dedups=dedups,
         graph_dedup_operation=graph_dedup_operation,
         dedup_batch=kg_dedup_utils.DEDUP_APPLY_BATCH,
+        relevances=relevances,
+        graph_relevance_operation=graph_relevance_operation,
         archived_count=sum(1 for m in materials if m.get("archived_at")),
         archived_savings=kg_archive.archive_savings(materials),
         metrics=_kg_metrics(db, gid),
@@ -5491,6 +5535,230 @@ def knowledge_graph_dedup_discard(gid, did):
     return redirect(url_for("knowledge_graph_detail", gid=gid))
 
 
+def _kg_relevance(gid, rid):
+    row = get_db().execute(
+        "SELECT * FROM kg_relevance_runs WHERE id=? AND graph_id=?",
+        (rid, gid)).fetchone()
+    if not row:
+        abort(404)
+    return row
+
+
+def _submit_relevance_job(gid, run_id, api_url, api_key, model, created_by,
+                          failure_status):
+    """入队一次无关性分析；入队失败时把记录标记为 failure_status。"""
+    application = current_app._get_current_object()
+    db = get_db()
+
+    def runner(database, operation):
+        database.execute("UPDATE kg_relevance_runs SET operation_id=? WHERE id=?",
+                         (operation["id"], run_id))
+        database.commit()
+        try:
+            items, rejected, run_err, status = kg_relevance_utils.run_relevance_run(
+                database, gid, run_id, api_url, api_key, model,
+                usage_hook=operation["usage_hook"],
+                task_context=application.app_context)
+        except Exception as e:  # noqa: BLE001 后台任务失败写入记录，不静默崩溃
+            run_err = str(e)
+            status = kg_relevance_utils.RELEVANCE_FAILED
+            items, rejected = [], []
+            kg_log.exception("知识图谱无关性分析失败 graph=%s run=%s", gid, run_id)
+            try:
+                database.execute(
+                    "UPDATE kg_relevance_runs SET status=?,error=?,"
+                    "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (status, run_err[:500], run_id))
+                database.commit()
+            except Exception:
+                database.rollback()
+        kg_log.info("知识图谱无关性分析 user=#%s graph=%s run=%s status=%s 摘除=%s 拦截=%s",
+                    created_by, gid, run_id, status, len(items), len(rejected))
+        _finish_ai_operation(
+            operation, "failed" if status == kg_relevance_utils.RELEVANCE_FAILED
+            else "success", run_err)
+
+    operation, queue_err = _ai_task_queue.submit(
+        created_by, "kg_relevance", model=model, runner=runner,
+        resource_key=f"knowledge_graph:{gid}", dedup_key=f"kg_relevance|{gid}")
+    if queue_err:
+        db.execute("UPDATE kg_relevance_runs SET status=?,error=?,"
+                   "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+                   (failure_status, queue_err[:500], run_id))
+        db.commit()
+        return queue_err
+    db.execute("UPDATE kg_relevance_runs SET operation_id=? WHERE id=?",
+               (operation["id"], run_id))
+    db.commit()
+    return ""
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/relevance", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_relevance_run(gid):
+    """让模型分批排查与学科无关的概念：异步执行，结果保存在 kg_relevance_runs。"""
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    api_url, api_key, model, err = _ai_endpoint(g.user["id"])
+    if err:
+        db.execute(
+            "INSERT INTO kg_relevance_runs(graph_id,status,model,error,created_by,"
+            "finished_at) VALUES(?,?,?,?,?,CURRENT_TIMESTAMP)",
+            (gid, kg_relevance_utils.RELEVANCE_FAILED, "", err, g.user["id"]))
+        db.commit()
+        flash(f"无关性分析未执行：{err}")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    run_id = kg_relevance_utils.create_relevance_run(
+        db, gid, model=model, created_by=g.user["id"])
+    queue_err = _submit_relevance_job(
+        gid, run_id, api_url, api_key, model, g.user["id"],
+        kg_relevance_utils.RELEVANCE_FAILED)
+    if queue_err:
+        flash(queue_err)
+    else:
+        flash("无关性分析已加入后台队列，可离开当前页面；进度与断点会自动保留。")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/relevance/<oid:rid>/resume", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_relevance_resume(gid, rid):
+    """从断点继续未完成的批次：已完成批次复用结果，不重复调用模型。"""
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    run = _kg_relevance(gid, rid)
+    try:
+        progress = json.loads(run["progress"] or "{}")
+    except (TypeError, ValueError):
+        progress = {}
+    if not kg_relevance_utils.run_is_resumable(run["status"], progress):
+        flash("该分析记录当前不可继续")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    api_url, api_key, model, err = _ai_endpoint(g.user["id"])
+    if err:
+        flash(f"无关性分析未继续：{err}")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    db.execute("UPDATE kg_relevance_runs SET status=?,error='',finished_at=NULL WHERE id=?",
+               (kg_relevance_utils.RELEVANCE_RUNNING, rid))
+    db.commit()
+    queue_err = _submit_relevance_job(
+        gid, rid, api_url, api_key, model, g.user["id"], run["status"])
+    if queue_err:
+        flash(queue_err)
+    else:
+        flash("已从断点继续分析，已完成的批次不会重复判定。")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/relevance/<oid:rid>/apply", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_relevance_apply(gid, rid):
+    """应用选中的摘除建议：删除概念及其关系，剩余建议保留待确认。"""
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    run = _kg_relevance(gid, rid)
+    if run["status"] != kg_relevance_utils.RELEVANCE_PENDING:
+        flash("该分析结果已处理，不能重复应用")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    try:
+        items = json.loads(run["suggestions"] or "[]")
+    except (TypeError, ValueError):
+        items = []
+    if not isinstance(items, list):
+        items = []
+    selected = set()
+    for part in (request.form.get("node_ids") or "").split(","):
+        try:
+            selected.add(int(part))
+        except (TypeError, ValueError):
+            continue
+    chosen = [item for item in items
+              if not selected or item.get("node_id") in selected]
+    suggestions = [{"action": "prune_node", "node_id": item["node_id"],
+                    "reason": item.get("reason") or ""} for item in chosen]
+    if not suggestions:
+        flash("没有可应用的摘除建议")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    valid, rejected, _ = kg_utils.validate_audit_suggestions(
+        db, gid, suggestions, max_items=len(suggestions))
+    if not valid:
+        flash("这些摘除建议未通过校验，请重新分析" + (
+            f"（{rejected[0]['reason']}）" if rejected else ""))
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    snapshot = kg_utils.apply_audit(db, gid, valid, commit=False)
+    applied_ids = {item["node_id"] for item in valid}
+    remaining = [item for item in items if item.get("node_id") not in applied_ids]
+    status = (kg_relevance_utils.RELEVANCE_APPLIED if not remaining
+              else kg_relevance_utils.RELEVANCE_PENDING)
+    saved_snapshot = run["snapshot"] or json.dumps(snapshot, ensure_ascii=False)
+    db.execute(
+        "UPDATE kg_relevance_runs SET status=?,suggestions=?,snapshot=?,"
+        "applied_at=CURRENT_TIMESTAMP WHERE id=?",
+        (status, json.dumps(remaining, ensure_ascii=False), saved_snapshot, rid))
+    db.commit()
+    kg_log.info("应用知识图谱无关性分析 user=%s#%s graph=%s run=%s 摘除=%s 剩余=%s",
+                g.user["username"], g.user["id"], gid, rid, len(valid), len(remaining))
+    message = [f"已摘除 {len(valid)} 个无关概念及其关系"]
+    if rejected:
+        message.append(f"{len(rejected)} 条未通过校验，已保留")
+    message.append(f"剩余 {len(remaining)} 条待确认" if remaining
+                   else "后续没有建图或编辑时可回滚")
+    flash("；".join(message) + "。")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/relevance/<oid:rid>/discard", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_relevance_discard(gid, rid):
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    run = _kg_relevance(gid, rid)
+    if run["status"] not in (kg_relevance_utils.RELEVANCE_PENDING,
+                             kg_relevance_utils.RELEVANCE_FAILED,
+                             kg_relevance_utils.RELEVANCE_INTERRUPTED):
+        flash("该分析结果已处理")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    db.execute("UPDATE kg_relevance_runs SET status=? WHERE id=?",
+               ((kg_relevance_utils.RELEVANCE_APPLIED if run["snapshot"]
+                 else kg_relevance_utils.RELEVANCE_DISCARDED), rid))
+    db.commit()
+    flash("已忽略这次分析建议" if not run["snapshot"]
+          else "已忽略剩余分析建议；此前已应用的摘除仍可回滚")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
+@_routes.route("/knowledge-graphs/<oid:gid>/relevance/<oid:rid>/rollback", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_relevance_rollback(gid, rid):
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    run = _kg_relevance(gid, rid)
+    if run["status"] != kg_relevance_utils.RELEVANCE_APPLIED or not run["snapshot"]:
+        flash("这条分析结果没有可回滚的快照")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    later = db.execute(
+        "SELECT id FROM kg_relevance_runs WHERE graph_id=? AND id>? AND status=? LIMIT 1",
+        (gid, rid, kg_relevance_utils.RELEVANCE_APPLIED)).fetchone()
+    if later:
+        flash("之后已有新的分析结果被应用，请先回滚最新的那条")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    try:
+        snapshot = json.loads(run["snapshot"])
+    except (TypeError, ValueError):
+        snapshot = {}
+    try:
+        kg_utils.restore_snapshot(db, gid, snapshot, commit=False)
+    except ValueError as exc:
+        db.rollback()
+        flash(str(exc))
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    db.execute("UPDATE kg_relevance_runs SET status=? WHERE id=?",
+               (kg_relevance_utils.RELEVANCE_ROLLED_BACK, rid))
+    db.commit()
+    flash("已回滚到无关性分析应用前的图谱状态")
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
 @_routes.route("/knowledge-graphs/<oid:gid>/categories/analyze", methods=["POST"])
 @role_required("teacher", "admin")
 def knowledge_graph_category_run(gid):
@@ -5667,6 +5935,7 @@ def knowledge_graph_delete(gid):
     db = get_db()
     db.execute("DELETE FROM kg_audits WHERE graph_id=?", (gid,))
     db.execute("DELETE FROM kg_category_maps WHERE graph_id=?", (gid,))
+    db.execute("DELETE FROM kg_relevance_runs WHERE graph_id=?", (gid,))
     db.execute("DELETE FROM kg_members WHERE graph_id=?", (gid,))
     db.execute("DELETE FROM kg_chunks WHERE graph_id=?", (gid,))
     db.execute("DELETE FROM kg_edges WHERE graph_id=?", (gid,))

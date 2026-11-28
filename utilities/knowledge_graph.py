@@ -33,12 +33,14 @@ AUDIT_DISCARDED = "已忽略"
 AUDIT_FAILED = "失败"
 AUDIT_CLEAN = "无需调整"
 AUDIT_ROLLED_BACK = "已回滚"
-AUDIT_ACTIONS = ("merge_nodes", "reverse_edge", "delete_edge", "drop_node")
+AUDIT_ACTIONS = ("merge_nodes", "reverse_edge", "delete_edge", "drop_node",
+                 "prune_node")
 AUDIT_ACTION_LABEL = {
     "merge_nodes": "合并同义概念",
     "reverse_edge": "反向前置关系",
     "delete_edge": "删除关系",
     "drop_node": "删除孤立概念",
+    "prune_node": "摘除无关概念",
 }
 AUDIT_MAX_TOKENS = 32768
 AUDIT_MAX_ITEMS = 40
@@ -1075,6 +1077,7 @@ def validate_audit_suggestions(db, graph_id, items, max_items=None):
             continue
 
         # drop_node：只允许清理与其他节点完全无关的孤立概念
+        # prune_node：无关性分析专用，摘除概念及其全部关系（无需先删边）
         try:
             node_id = int(raw.get("node_id"))
         except (TypeError, ValueError):
@@ -1092,13 +1095,20 @@ def validate_audit_suggestions(db, graph_id, items, max_items=None):
         related = [edge_id for edge_id, edge in edges.items()
                    if edge_id not in state["deleted"]
                    and node_id in (edge["src_id"], edge["dst_id"])]
-        if related:
+        if related and action == "drop_node":
             rejected.append({"action": action, "text": f"删除「{node['name']}」",
                              "reason": f"该概念还有 {len(related)} 条关系，请先删除关系"})
             continue
         state["dropped"].add(node_id)
-        valid.append({"action": action, "node_id": node_id, "reason": reason,
-                      "label": f"删除孤立概念「{node['name']}」"})
+        if action == "prune_node":
+            valid.append({
+                "action": action, "node_id": node_id, "reason": reason,
+                "label": f"摘除概念「{node['name']}」及其 {len(related)} 条关系",
+                "edge_count": len(related),
+            })
+        else:
+            valid.append({"action": action, "node_id": node_id, "reason": reason,
+                          "label": f"删除孤立概念「{node['name']}」"})
     return valid, rejected, ""
 
 
@@ -1227,6 +1237,11 @@ def apply_audit(db, graph_id, suggestions, commit=True):
             db.execute("DELETE FROM kg_edges WHERE id=? AND graph_id=?",
                        (item.get("edge_id"), graph_id))
         elif action == "drop_node":
+            db.execute("DELETE FROM kg_nodes WHERE id=? AND graph_id=?",
+                       (item.get("node_id"), graph_id))
+        elif action == "prune_node":
+            db.execute("DELETE FROM kg_edges WHERE graph_id=? AND (src_id=? OR dst_id=?)",
+                       (graph_id, item.get("node_id"), item.get("node_id")))
             db.execute("DELETE FROM kg_nodes WHERE id=? AND graph_id=?",
                        (item.get("node_id"), graph_id))
     db.execute("UPDATE knowledge_graphs SET updated_at=CURRENT_TIMESTAMP WHERE id=?",

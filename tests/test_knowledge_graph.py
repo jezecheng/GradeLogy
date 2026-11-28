@@ -22,10 +22,10 @@ except ImportError:
 
 import app as app_module  # noqa: E402
 import db as database  # noqa: E402
-from utilities import kg_cli, kg_dedup as kd, kg_text, kg_transfer, knowledge_graph as kg  # noqa: E402
+from utilities import kg_cli, kg_dedup as kd, kg_relevance as kr, kg_text, kg_transfer, knowledge_graph as kg  # noqa: E402
 
 _TABLES = ("kg_dedup_groups", "kg_dedup_runs", "kg_category_maps", "kg_members",
-           "kg_audits", "kg_chunks", "kg_edges",
+           "kg_relevance_runs", "kg_audits", "kg_chunks", "kg_edges",
            "kg_nodes", "kg_materials", "knowledge_graphs", "tag_analyses",
            "question_assessments", "question_tags", "questions", "submissions", "lectures", "exams",
            "exam_scores", "enrollments", "course_teachers", "courses", "users",
@@ -811,6 +811,63 @@ class KGLogicTest(unittest.TestCase):
         self.assertEqual(len(valid), 45)
         self.assertEqual(rejected, [])
 
+    def test_relevance_run_prunes_irrelevant_nodes_with_edges(self):
+        """无关性分析：摘除概念时连同其关系删除，且可回滚恢复。"""
+        self._dedup_node("氧化还原反应", "反应类型")
+        drop = self._dedup_node("集训队", "化学教育/学科竞赛")
+        other = self._dedup_node("化学竞赛体系", "化学教育/课程体系")
+        self._dedup_edge(drop, other, "related")
+        reply = json.dumps({"drops": [
+            {"node_id": drop, "reason": "培训机构班型，不是学科知识",
+             "confidence": 0.95}]}, ensure_ascii=False)
+        run_id = kr.create_relevance_run(self.con, 1, model="m", created_by=2)
+        with mock.patch.object(kr.llm, "chat", return_value=(reply, "stop", "")):
+            items, rejected, error, status = kr.run_relevance_run(
+                self.con, 1, run_id, "u", "k", "m", concurrency=1)
+        self.assertEqual(status, "待确认")
+        self.assertEqual(error, "")
+        self.assertEqual([item["node_id"] for item in items], [drop])
+        self.assertEqual(items[0]["edge_count"], 1)
+        suggestions = [{"action": "prune_node", "node_id": items[0]["node_id"],
+                        "reason": items[0]["reason"]}]
+        snapshot = kg.apply_audit(self.con, 1, suggestions)
+        self.assertEqual(self.con.execute(
+            "SELECT COUNT(*) FROM kg_nodes").fetchone()[0], 2)
+        self.assertEqual(self.con.execute(
+            "SELECT COUNT(*) FROM kg_edges").fetchone()[0], 0)
+        kg.restore_snapshot(self.con, 1, snapshot)
+        self.assertEqual(self.con.execute(
+            "SELECT COUNT(*) FROM kg_nodes").fetchone()[0], 3)
+        self.assertEqual(self.con.execute(
+            "SELECT COUNT(*) FROM kg_edges").fetchone()[0], 1)
+
+    def test_relevance_resume_reuses_finished_batches(self):
+        """断点续跑：已完成批次不再调用模型，只补跑失败批次。"""
+        nodes = [self._dedup_node(f"概念{index}") for index in range(45)]
+        replies = []
+
+        def fake_chat(api, key, model, content, **kwargs):
+            text = content[0]["text"]
+            replies.append(text)
+            if "概念0" in text and len(replies) == 1:
+                raise RuntimeError("boom")
+            return json.dumps({"drops": []}), "stop", ""
+
+        run_id = kr.create_relevance_run(self.con, 1, model="m", created_by=2)
+        with mock.patch.object(kr.llm, "chat", side_effect=fake_chat):
+            kr.run_relevance_run(self.con, 1, run_id, "u", "k", "m", concurrency=1)
+        self.assertEqual(len(replies), 2)  # 45 个概念分两批
+        row = self.con.execute("SELECT status FROM kg_relevance_runs WHERE id=?",
+                               (run_id,)).fetchone()
+        self.assertEqual(row["status"], "失败")
+        with mock.patch.object(kr.llm, "chat", side_effect=fake_chat):
+            kr.run_relevance_run(self.con, 1, run_id, "u", "k", "m", concurrency=1)
+        self.assertEqual(len(replies), 3)  # 只重跑失败的第一批
+        row = self.con.execute("SELECT status FROM kg_relevance_runs WHERE id=?",
+                               (run_id,)).fetchone()
+        self.assertEqual(row["status"], "无需调整")
+        self.assertTrue(nodes)
+
     @staticmethod
     def _dedup_group(*nodes):
         return [{"id": nid, "name": name, "aliases": [], "category": "",
@@ -1337,6 +1394,58 @@ class KGRouteTest(unittest.TestCase):
             "SELECT COUNT(*) FROM kg_nodes WHERE graph_id=?",
             (graph["id"],)).fetchone()[0], 3)
         con.close()
+
+    def test_relevance_apply_prunes_and_rolls_back(self):
+        graph = self._create_graph()
+        a = self._concept(graph["id"], "氧化还原反应")
+        b = self._concept(graph["id"], "集训队")
+        c = self._concept(graph["id"], "化学竞赛体系")
+        self._link(graph["id"], b, c, "related")
+        con = self._db()
+        con.execute(
+            "INSERT INTO kg_relevance_runs(graph_id,status,model,suggestions) VALUES(?,?,?,?)",
+            (graph["id"], "待确认", "m", json.dumps([{
+                "node_id": b, "name": "集训队", "category": "化学教育/学科竞赛",
+                "reason": "培训机构班型", "confidence": 0.9, "edge_count": 1,
+            }], ensure_ascii=False)))
+        con.commit()
+        rid = con.execute(
+            "SELECT id FROM kg_relevance_runs WHERE graph_id=? ORDER BY id DESC",
+            (graph["id"],)).fetchone()["id"]
+        con.close()
+
+        html = self.client.get(
+            self.url("knowledge_graph_detail", gid=graph["id"])).get_data(as_text=True)
+        self.assertIn('data-gov-tile="relevance"', html)
+        self.assertIn('data-gov-panel="dedup"', html)
+        self.assertIn("需要摘除的概念", html)
+        self.assertIn("集训队", html)
+
+        self._post("knowledge_graph_relevance_apply", {"node_ids": str(b)},
+                   gid=graph["id"], rid=rid)
+        con = self._db()
+        names = {row["name"] for row in con.execute(
+            "SELECT name FROM kg_nodes WHERE graph_id=?", (graph["id"],))}
+        self.assertEqual(names, {"氧化还原反应", "化学竞赛体系"})
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM kg_edges WHERE graph_id=?",
+            (graph["id"],)).fetchone()[0], 0)
+        row = con.execute("SELECT status,snapshot FROM kg_relevance_runs WHERE id=?",
+                          (rid,)).fetchone()
+        con.close()
+        self.assertEqual(row["status"], "已应用")
+        self.assertTrue(row["snapshot"])
+
+        self._post("knowledge_graph_relevance_rollback", gid=graph["id"], rid=rid)
+        con = self._db()
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM kg_nodes WHERE graph_id=?",
+            (graph["id"],)).fetchone()[0], 3)
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM kg_edges WHERE graph_id=?",
+            (graph["id"],)).fetchone()[0], 1)
+        con.close()
+        self.assertTrue(a)
 
     def _concept(self, graph_id, name, category="概念"):
         con = self._db()

@@ -110,6 +110,21 @@ tr[data-material-archived="true"] { opacity: .92; }
 .kg-cat-batch[open] > summary::before { transform: rotate(90deg); }
 .kg-cat-batch-tip { margin-left: auto; color: #1456f0; font-size: 12px; }
 .kg-cat-batch .kg-audit { border-top: 0; padding-top: 2px; }
+.kg-gov-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px; margin: 4px 0 12px; }
+.kg-gov-tile { text-align: left; border: 1px solid #e5e7eb; border-radius: 12px;
+  background: #fff; padding: 12px 14px; cursor: pointer; display: flex;
+  flex-direction: column; gap: 4px; transition: border-color .15s, box-shadow .15s; }
+.kg-gov-tile strong { font-size: 14px; color: #111827; }
+.kg-gov-tile span { font-size: 12px; color: #6b7280; line-height: 1.5; }
+.kg-gov-tile:hover { border-color: #c7d2fe; }
+.kg-gov-tile.is-active { border-color: #1456f0; box-shadow: inset 0 0 0 1px #1456f0; }
+.kg-gov-tile.is-active strong { color: #1456f0; }
+.kg-gov-badge { font-style: normal; font-size: 11px; color: #b45309;
+  background: #fef3c7; border-radius: 999px; padding: 1px 8px; width: fit-content; }
+.kg-gov-badge.is-running { color: #1456f0; background: #eff4ff; }
+.kg-relevance-drops { margin: 6px 0; }
+.kg-relevance-drops > summary { cursor: pointer; }
 .kg-dedup-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
   margin: 6px 0; }
 .kg-dedup-toolbar form { display: inline-flex; margin: 0; }
@@ -515,7 +530,29 @@ tr[data-material-archived="true"] { opacity: .92; }
 {% endif %}
 
 {% if nodes %}
-<details class="card kg-fold" id="kg-audit"
+<div class="kg-gov-tiles" role="tablist" aria-label="图谱治理功能">
+  <button type="button" class="kg-gov-tile is-active" data-gov-tile="audit" role="tab" aria-selected="true">
+    <strong>图谱体检</strong><span>AI 只给建议，确认后才改图</span>
+    {% if graph_audit_operation and graph_audit_operation.status in ('queued', 'running') %}<em class="kg-gov-badge is-running">体检中</em>
+    {% elif audits and audits[0].status == '待确认' %}<em class="kg-gov-badge">建议待确认</em>{% endif %}
+  </button>
+  <button type="button" class="kg-gov-tile" data-gov-tile="dedup" role="tab" aria-selected="false">
+    <strong>智能去重</strong><span>找出疑似重复概念，逐簇确认后合并</span>
+    {% if graph_dedup_operation and graph_dedup_operation.status in ('queued', 'running') %}<em class="kg-gov-badge is-running">去重中</em>
+    {% elif dedups and dedups[0].status == '待确认' %}<em class="kg-gov-badge">{{ dedups[0].groups | length }} 簇待确认</em>{% endif %}
+  </button>
+  <button type="button" class="kg-gov-tile" data-gov-tile="category" role="tab" aria-selected="false">
+    <strong>分类重构</strong><span>把扁平分类整理成分层学科树</span>
+    {% if graph_category_operation and graph_category_operation.status in ('queued', 'running') %}<em class="kg-gov-badge is-running">整理中</em>
+    {% elif cat_maps and cat_maps[0].status == '待确认' %}<em class="kg-gov-badge">映射待确认</em>{% endif %}
+  </button>
+  <button type="button" class="kg-gov-tile" data-gov-tile="relevance" role="tab" aria-selected="false">
+    <strong>无关性分析</strong><span>排查与学科无关的概念，确认后摘除</span>
+    {% if graph_relevance_operation and graph_relevance_operation.status in ('queued', 'running') %}<em class="kg-gov-badge is-running">分析中</em>
+    {% elif relevances and relevances[0].status == '待确认' %}<em class="kg-gov-badge">{{ relevances[0]['items'] | length }} 个待确认</em>{% endif %}
+  </button>
+</div>
+<details class="card kg-fold" id="kg-audit" data-gov-panel="audit"
          {% if audits and audits[0].status == '待确认' %}open{% endif %}>
   <summary class="card-head"><h2>图谱体检 <span class="muted small">（AI 只给建议，确认后才改图）</span></h2></summary>
   {% if can_edit %}
@@ -595,7 +632,7 @@ tr[data-material-archived="true"] { opacity: .92; }
   {% endfor %}
 </details>
 
-<details class="card kg-fold" id="kg-dedup"
+<details class="card kg-fold" id="kg-dedup" data-gov-panel="dedup"
          {% if dedups and dedups[0].status in ('待确认', '进行中') %}open{% endif %}>
   <summary class="card-head"><h2>智能去重 <span class="muted small">（AI 找出疑似重复概念，逐簇确认后才合并）</span></h2></summary>
   {% if can_edit %}
@@ -613,7 +650,7 @@ tr[data-material-archived="true"] { opacity: .92; }
   </form>
   {% if graph_dedup_operation and graph_dedup_operation.status == 'failed' %}<p class="danger-text small" role="status">上次智能去重失败：{{ graph_dedup_operation.error or '请重试。' }}</p>{% endif %}
   {% if dedup_busy %}
-  <div class="kg-dedup-progress" id="kg-dedup-progress"
+  <div class="kg-dedup-progress" id="kg-dedup-progress" data-kg-progress
        data-status-url="{{ url_for('ai_operation_status', operation_id=graph_dedup_operation.id) }}">
     <div class="kg-dedup-progress-meta">
       <strong>去重进度</strong>
@@ -882,15 +919,86 @@ tr[data-material-archived="true"] { opacity: .92; }
   }
   document.querySelectorAll('[data-dedup-run]').forEach(initRun);
 
-  // 去重进度：轮询通用状态接口，原地更新进度条与逐组状态，不打断当前页面。
-  var box = document.getElementById('kg-dedup-progress');
-  if (!box) return;
+  // 治理功能 Tile：点击后在下方展开对应子页，其它子页收起。
+  var govTiles = Array.prototype.slice.call(document.querySelectorAll('[data-gov-tile]'));
+  var govPanels = Array.prototype.slice.call(document.querySelectorAll('[data-gov-panel]'));
+  function selectGovTile(key) {
+    govTiles.forEach(function (tile) {
+      var on = tile.getAttribute('data-gov-tile') === key;
+      tile.classList.toggle('is-active', on);
+      tile.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    govPanels.forEach(function (panel) {
+      var on = panel.getAttribute('data-gov-panel') === key;
+      panel.hidden = !on;
+      if (on) panel.open = true;
+    });
+  }
+  govTiles.forEach(function (tile) {
+    tile.addEventListener('click', function () {
+      selectGovTile(tile.getAttribute('data-gov-tile'));
+    });
+  });
+  if (govTiles.length) {
+    var initial = document.querySelector('[data-gov-panel][open]');
+    selectGovTile(initial ? initial.getAttribute('data-gov-panel')
+                          : govTiles[0].getAttribute('data-gov-tile'));
+  }
+
+  // 无关性分析结果：勾选同步、计数与应用确认。
+  document.querySelectorAll('[data-relevance-run]').forEach(function (run) {
+    var checks = run.querySelectorAll('.kg-relevance-check');
+    if (!checks.length) return;
+    function sync() {
+      var selected = [];
+      checks.forEach(function (cb) { if (cb.checked) selected.push(cb.value); });
+      run.querySelectorAll('.kg-relevance-node-ids').forEach(function (input) {
+        input.value = selected.join(',');
+      });
+      run.querySelectorAll('.kg-relevance-count').forEach(function (cnt) {
+        cnt.textContent = selected.length;
+      });
+      run.querySelectorAll('.kg-relevance-apply-btn').forEach(function (btn) {
+        btn.disabled = selected.length === 0;
+      });
+    }
+    checks.forEach(function (cb) { cb.addEventListener('change', sync); });
+    run.querySelectorAll('.kg-relevance-select-all').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        checks.forEach(function (cb) { cb.checked = true; });
+        sync();
+      });
+    });
+    run.querySelectorAll('.kg-relevance-clear-all').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        checks.forEach(function (cb) { cb.checked = false; });
+        sync();
+      });
+    });
+    run.querySelectorAll('.kg-relevance-apply-form').forEach(function (form) {
+      form.addEventListener('submit', function (e) {
+        var count = run.querySelectorAll('.kg-relevance-check:checked').length;
+        if (!count) {
+          e.preventDefault();
+          return;
+        }
+        if (!confirm('将摘除选中的 ' + count + ' 个概念及其全部关系；后续未建图或编辑时可回滚。继续？')) {
+          e.preventDefault();
+        }
+      });
+    });
+    sync();
+  });
+
+  // 治理任务进度：轮询通用状态接口，原地更新进度条与逐批状态，不打断当前页面。
+  document.querySelectorAll('[data-kg-progress]').forEach(function (box) {
   var statusUrl = box.getAttribute('data-status-url');
   if (!statusUrl) return;
   var bar = box.querySelector('progress');
   var text = box.querySelector('.kg-dedup-progress-text');
   var list = box.querySelector('.kg-dedup-group-list');
   var labels = {pending: '待处理', running: '判定中', done: '已完成', failed: '失败'};
+  var unit = box.getAttribute('data-unit') || '组';
   var stopped = false;
   var busy = false;
   function render(progress) {
@@ -903,9 +1011,9 @@ tr[data-material-archived="true"] { opacity: .92; }
     if (bar) bar.value = total ? Math.min(100, Math.round((done + failed) * 100 / total)) : 0;
     if (text) {
       var parts = total
-        ? ['共 ' + total + ' 组', '已完成 ' + done, '失败 ' + failed,
+        ? ['共 ' + total + ' ' + unit, '已完成 ' + done, '失败 ' + failed,
            '判定中 ' + running, '待处理 ' + pending]
-        : ['正在准备候选组…'];
+        : ['正在准备…'];
       if (progress.updated_at) parts.push('更新 ' + progress.updated_at);
       text.textContent = parts.join(' · ');
     }
@@ -918,7 +1026,7 @@ tr[data-material-archived="true"] { opacity: .92; }
       else if (g.status === 'done') li.className = 'is-done';
       var names = (g.names || []).join('、');
       var ellipsis = Number(g.count || 0) > (g.names || []).length ? '…' : '';
-      li.textContent = '第 ' + (Number(g.index) + 1) + ' 组（' + Number(g.count || 0) +
+      li.textContent = '第 ' + (Number(g.index) + 1) + ' ' + unit + '（' + Number(g.count || 0) +
         ' 个概念：' + names + ellipsis + '）· ' + (labels[g.status] || g.status) +
         (g.error ? ' · ' + g.error : '');
       list.appendChild(li);
@@ -948,10 +1056,11 @@ tr[data-material-archived="true"] { opacity: .92; }
       .finally(function () { busy = false; });
   }
   poll();
+  });
 })();
 </script>
 
-<details class="card kg-fold" id="kg-category"
+<details class="card kg-fold" id="kg-category" data-gov-panel="category"
          {% if cat_maps and cat_maps[0].status == '待确认' %}open{% endif %}>
   <summary class="card-head"><h2>分类重构 <span class="muted small">（AI 把扁平分类整理成分层学科树，确认后才改图）</span></h2></summary>
   {% if can_edit %}
@@ -1071,6 +1180,144 @@ tr[data-material-archived="true"] { opacity: .92; }
         function (input) { input.checked = checked; });
     }
   </script>
+</details>
+<details class="card kg-fold" id="kg-relevance" data-gov-panel="relevance"
+         {% if relevances and relevances[0].status in ('待确认', '进行中') %}open{% endif %}>
+  <summary class="card-head"><h2>无关性分析 <span class="muted small">（AI 分批排查与学科无关的概念，确认后才摘除）</span></h2></summary>
+  {% if can_edit %}
+  {% set relevance_busy = graph_relevance_operation and graph_relevance_operation.status in ('queued', 'running') %}
+  <form class="kg-audit-run" method="post" data-ai-queue-form data-ai-busy-label="分析中…"
+        data-ai-operation-id="{{ graph_relevance_operation.id if relevance_busy else '' }}"
+        data-ai-status-url="{{ url_for('ai_operation_status', operation_id=graph_relevance_operation.id) if relevance_busy else '' }}"
+        action="{{ url_for('knowledge_graph_relevance_run', gid=graph.id) }}">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <button class="ghost small{% if relevance_busy %} is-busy{% endif %}"
+            {% if relevance_busy %}disabled aria-busy="true"{% endif %}>
+      {% if relevance_busy %}<span class="spinner" aria-hidden="true"></span>分析中…{% else %}开始无关性分析{% endif %}
+    </button>
+    <span class="muted small">分批检查全部概念，识别培训机构、课程体系、招生政策、资料名称等与学科知识无关的条目；确认后连同其关系一起摘除，可回滚。</span>
+  </form>
+  {% if graph_relevance_operation and graph_relevance_operation.status == 'failed' %}<p class="danger-text small" role="status">上次无关性分析失败：{{ graph_relevance_operation.error or '请重试。' }}</p>{% endif %}
+  {% if relevance_busy %}
+  <div class="kg-dedup-progress" id="kg-relevance-progress" data-kg-progress data-unit="批"
+       data-status-url="{{ url_for('ai_operation_status', operation_id=graph_relevance_operation.id) }}">
+    <div class="kg-dedup-progress-meta">
+      <strong>分析进度</strong>
+      <span class="kg-dedup-progress-text">正在准备批次…</span>
+    </div>
+    <progress max="100" value="0"></progress>
+    <details>
+      <summary class="muted small">查看逐批进度</summary>
+      <ul class="kg-dedup-group-list"></ul>
+    </details>
+  </div>
+  {% endif %}
+  {% endif %}
+  {% if not relevances %}
+  <p class="muted small">还没有无关性分析记录。</p>
+  {% endif %}
+  {% for r in relevances %}
+  <div class="kg-audit" data-relevance-run="{{ r.id }}">
+    <div class="kg-audit-head">
+      <span class="kg-audit-status">{{ r.status }}</span>
+      <span class="muted small">{{ r.created_at }}{% if r.applied_at %} · 应用 {{ r.applied_at }}{% endif %}{% if r.model %} · {{ r.model }}{% endif %}</span>
+    </div>
+    {% if r.error %}<p class="kg-request-error">{{ r.error }}</p>{% endif %}
+    {% if r.progress and r.progress.total %}
+    <p class="muted small">共 {{ r.progress.total }} 批 · 已完成 {{ r.progress.done or 0 }} · 失败 {{ r.progress.failed or 0 }} · 判定中 {{ r.progress.running or 0 }} · 待处理 {{ r.progress.pending or 0 }}{% if r.progress.updated_at %} · 更新 {{ r.progress.updated_at }}{% endif %}</p>
+    <details>
+      <summary class="muted small">逐批进度</summary>
+      <ul class="kg-dedup-group-list">
+        {% for g in r.progress.groups %}
+        <li class="{% if g.status == 'failed' %}is-failed{% elif g.status == 'running' %}is-running{% elif g.status == 'done' %}is-done{% endif %}">
+          第 {{ g.index + 1 }} 批（{{ g.count }} 个概念：{{ g.names | join('、') }}{% if g.count > (g.names | length) %}…{% endif %}）· {{ {'pending': '待处理', 'running': '判定中', 'done': '已完成', 'failed': '失败'}.get(g.status, g.status) }}{% if g.error %} · {{ g.error }}{% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+    </details>
+    {% endif %}
+    {% if can_edit and r.resumable %}
+    <div class="kg-audit-actions">
+      <form method="post" data-ai-submit-form data-ai-busy-label="继续分析…"
+            action="{{ url_for('knowledge_graph_relevance_resume', gid=graph.id, rid=r.id) }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <button class="ghost small">继续分析（从 {{ r.progress.done or 0 }}/{{ r.progress.total }} 批续跑）</button>
+      </form>
+      <form method="post" action="{{ url_for('knowledge_graph_relevance_discard', gid=graph.id, rid=r.id) }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <button class="ghost small">忽略</button>
+      </form>
+    </div>
+    {% endif %}
+    {% set editable = can_edit and r.status == '待确认' %}
+    {% if r['items'] %}
+    <details class="kg-relevance-drops"{% if editable %} open{% endif %}>
+      <summary class="muted small">需要摘除的概念（{{ r['items'] | length }}）{% if not editable %} · 已处理{% endif %}</summary>
+      {% if editable %}
+      <div class="kg-dedup-toolbar">
+        <button type="button" class="ghost small kg-relevance-select-all">全选</button>
+        <button type="button" class="ghost small kg-relevance-clear-all">取消全选</button>
+        <span class="kg-dedup-count-summary">已选 <span class="kg-relevance-count">{{ r['items'] | length }}</span> / {{ r['items'] | length }} 个</span>
+      </div>
+      {% endif %}
+      <table class="kg-dedup-table">
+        <thead>
+          <tr>
+            {% if editable %}<th class="kg-dedup-col-check"></th>{% endif %}
+            <th>概念</th>
+            <th>分类</th>
+            <th>摘除理由</th>
+            <th class="kg-dedup-col-confidence">关系数</th>
+            <th class="kg-dedup-col-confidence">置信度</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for item in r['items'] %}
+          <tr>
+            {% if editable %}<td class="kg-dedup-col-check"><input type="checkbox" class="kg-relevance-check" value="{{ item.node_id }}" checked></td>{% endif %}
+            <td>{{ item.name }}</td>
+            <td>{{ item.category or '—' }}</td>
+            <td>{{ item.reason or '—' }}</td>
+            <td>{{ item.edge_count or 0 }}</td>
+            <td>{{ ((item.confidence or 0) * 100) | round(0) | int }}%</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </details>
+    {% endif %}
+    {% if r.rejected %}
+    <details>
+      <summary class="muted small">{{ r.rejected | length }} 条建议未通过校验</summary>
+      <ul class="kg-cycle-list">
+        {% for item in r.rejected %}
+        <li>摘除「{{ item.name }}」：{{ item.reason }}</li>
+        {% endfor %}
+      </ul>
+    </details>
+    {% endif %}
+    {% if editable and r['items'] %}
+    <div class="kg-audit-actions">
+      <form method="post" class="kg-relevance-apply-form"
+            action="{{ url_for('knowledge_graph_relevance_apply', gid=graph.id, rid=r.id) }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <input type="hidden" name="node_ids" class="kg-relevance-node-ids" value="">
+        <button class="ghost small kg-relevance-apply-btn">应用选中 <span class="kg-relevance-count">{{ r['items'] | length }}</span> 个摘除</button>
+      </form>
+      <form method="post" action="{{ url_for('knowledge_graph_relevance_discard', gid=graph.id, rid=r.id) }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <button class="ghost small">忽略全部</button>
+      </form>
+    </div>
+    {% elif can_edit and r.status == '已应用' and r.has_snapshot %}
+    <form method="post" action="{{ url_for('knowledge_graph_relevance_rollback', gid=graph.id, rid=r.id) }}"
+          onsubmit="return confirm('回滚会检查后续变更；没有新建图或编辑时才恢复快照。继续？')">
+      <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+      <button class="ghost small">回滚</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endfor %}
 </details>
 {% endif %}
 
