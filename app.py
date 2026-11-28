@@ -5320,6 +5320,49 @@ def _kg_dedup(gid, did):
     return row
 
 
+@_routes.route("/knowledge-graphs/<oid:gid>/dedup/<oid:did>/check", methods=["POST"])
+@role_required("teacher", "admin")
+def knowledge_graph_dedup_check(gid, did):
+    """对勾选的合并簇做一次快速校验，只提示结果，不修改图谱。"""
+    _kg_graph(gid, edit=True)
+    db = get_db()
+    dedup = _kg_dedup(gid, did)
+    if dedup["status"] != kg_dedup_utils.DEDUP_PENDING:
+        flash("该去重结果已处理，无法检查")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    try:
+        groups = json.loads(dedup["groups"] or "[]")
+    except (TypeError, ValueError):
+        groups = []
+    if not isinstance(groups, list):
+        groups = []
+    selected = set()
+    for part in (request.form.get("keep_ids") or "").split(","):
+        try:
+            selected.add(int(part))
+        except (TypeError, ValueError):
+            continue
+    chosen = [item for item in groups if item.get("keep_id") in selected]
+    if not chosen:
+        flash("请先勾选要检查的合并簇")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    batch = kg_dedup_utils.DEDUP_APPLY_BATCH
+    if len(chosen) > batch:
+        flash(f"单次最多检查 {batch} 簇，请分批勾选（本次选中 {len(chosen)} 簇）")
+        return redirect(url_for("knowledge_graph_detail", gid=gid))
+    items = kg_dedup_utils.flatten_dedup_suggestions(chosen)
+    valid, rejected, _ = kg_utils.validate_audit_suggestions(db, gid, items)
+    if rejected:
+        reasons = "；".join(str(item.get("reason") or "") for item in rejected[:3])
+        flash(f"检查完成：{len(valid)} 簇可应用，{len(rejected)} 簇未通过"
+              + (f"（{reasons}）" if reasons else ""))
+    else:
+        flash(f"检查通过：勾选的 {len(valid)} 簇均可应用")
+    kg_log.info("检查知识图谱去重 user=%s#%s graph=%s dedup=%s 通过=%s 未通过=%s",
+                g.user["username"], g.user["id"], gid, did, len(valid), len(rejected))
+    return redirect(url_for("knowledge_graph_detail", gid=gid))
+
+
 @_routes.route("/knowledge-graphs/<oid:gid>/dedup/<oid:did>/apply", methods=["POST"])
 @role_required("teacher", "admin")
 def knowledge_graph_dedup_apply(gid, did):

@@ -112,6 +112,7 @@ tr[data-material-archived="true"] { opacity: .92; }
 .kg-cat-batch .kg-audit { border-top: 0; padding-top: 2px; }
 .kg-dedup-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
   margin: 6px 0; }
+.kg-dedup-toolbar form { display: inline-flex; margin: 0; }
 .kg-dedup-toolbar .kg-dedup-count-summary { margin-left: auto; font-size: 12px; color: #4b5563; }
 .kg-dedup-toolbar .kg-dedup-count-summary.is-over { color: #b91c1c; font-weight: 600; }
 .kg-dedup-pager { display: flex; gap: 8px; align-items: center; justify-content: flex-end;
@@ -675,7 +676,18 @@ tr[data-material-archived="true"] { opacity: .92; }
     <div class="kg-dedup-toolbar">
       <button type="button" class="ghost small kg-dedup-select-all">全选本页</button>
       <button type="button" class="ghost small kg-dedup-clear-all">取消本页</button>
-      <button type="button" class="ghost small kg-dedup-invert">反选本页</button>
+      <form method="post" class="kg-dedup-check-form"
+            action="{{ url_for('knowledge_graph_dedup_check', gid=graph.id, did=d.id) }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <input type="hidden" name="keep_ids" class="kg-dedup-keep-ids" value="">
+        <button class="ghost small kg-dedup-check-btn" disabled>检查勾选</button>
+      </form>
+      <form method="post" class="kg-dedup-apply-form"
+            action="{{ url_for('knowledge_graph_dedup_apply', gid=graph.id, did=d.id) }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+        <input type="hidden" name="keep_ids" class="kg-dedup-keep-ids" value="">
+        <button class="ghost small kg-dedup-apply-btn" disabled>应用选中 <span class="kg-dedup-count">0</span> 簇合并</button>
+      </form>
       <span class="kg-dedup-count-summary">已选 <span class="kg-dedup-count">{{ [d.groups | length, dedup_batch] | min }}</span> / 共 {{ d.groups | length }} 簇 · 单次最多 {{ dedup_batch }} 簇</span>
     </div>
     {% endif %}
@@ -729,12 +741,6 @@ tr[data-material-archived="true"] { opacity: .92; }
     {% endif %}
     {% if can_edit and d.status == '待确认' and d.groups %}
     <div class="kg-audit-actions">
-      <form method="post" class="kg-dedup-apply-form"
-            action="{{ url_for('knowledge_graph_dedup_apply', gid=graph.id, did=d.id) }}">
-        <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-        <input type="hidden" name="keep_ids" class="kg-dedup-keep-ids" value="">
-        <button class="ghost small kg-dedup-apply-btn" disabled>应用选中 <span class="kg-dedup-count">0</span> 簇合并</button>
-      </form>
       <form method="post" action="{{ url_for('knowledge_graph_dedup_discard', gid=graph.id, did=d.id) }}">
         <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
         <button class="ghost small">忽略全部</button>
@@ -779,6 +785,9 @@ tr[data-material-archived="true"] { opacity: .92; }
       });
       run.querySelectorAll('.kg-dedup-apply-btn').forEach(function (btn) {
         btn.disabled = checked.length === 0 || over;
+      });
+      run.querySelectorAll('.kg-dedup-check-btn').forEach(function (btn) {
+        btn.disabled = checked.length === 0;
       });
       var summary = run.querySelector('.kg-dedup-count-summary');
       if (summary) summary.classList.toggle('is-over', over);
@@ -840,15 +849,6 @@ tr[data-material-archived="true"] { opacity: .92; }
         sync();
       });
     });
-    run.querySelectorAll('.kg-dedup-invert').forEach(function (b) {
-      b.addEventListener('click', function () {
-        pageRows().forEach(function (tr) {
-          var cb = tr.querySelector('.kg-dedup-row-check');
-          if (cb) cb.checked = !cb.checked;
-        });
-        sync();
-      });
-    });
     var prev = run.querySelector('.kg-dedup-prev');
     var next = run.querySelector('.kg-dedup-next');
     if (prev) prev.addEventListener('click', function () {
@@ -856,6 +856,14 @@ tr[data-material-archived="true"] { opacity: .92; }
     });
     if (next) next.addEventListener('click', function () {
       if (page < pages - 1) { page++; renderPage(); }
+    });
+    run.querySelectorAll('.kg-dedup-check-form').forEach(function (form) {
+      form.addEventListener('submit', function (e) {
+        if (run.querySelectorAll('.kg-dedup-row-check:checked').length === 0) {
+          e.preventDefault();
+          alert('请先勾选要检查的合并簇');
+        }
+      });
     });
     run.querySelectorAll('.kg-dedup-apply-form').forEach(function (form) {
       form.addEventListener('submit', function (e) {

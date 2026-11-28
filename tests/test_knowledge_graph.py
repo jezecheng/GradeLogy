@@ -1283,6 +1283,61 @@ class KGRouteTest(unittest.TestCase):
         self.assertEqual(json.loads(row["groups"]), [])
         self.assertEqual(node_count, 45)
 
+    def _create_dedup_run(self, graph_id, groups):
+        con = self._db()
+        con.execute(
+            "INSERT INTO kg_dedup_runs(graph_id,status,model,groups) VALUES(?,?,?,?)",
+            (graph_id, "待确认", "m", json.dumps(groups, ensure_ascii=False)))
+        con.commit()
+        run_id = con.execute(
+            "SELECT id FROM kg_dedup_runs WHERE graph_id=? ORDER BY id DESC",
+            (graph_id,)).fetchone()["id"]
+        con.close()
+        return run_id
+
+    @staticmethod
+    def _merge_group(a, b):
+        return {
+            "node_ids": [a, b], "keep_id": a, "keep_name": "甲",
+            "member_names": ["甲", "乙"], "reason": "同义", "confidence": 0.9,
+            "action": "merge_nodes",
+            "suggestion": {"action": "merge_nodes", "node_ids": [a, b],
+                           "keep_id": a, "reason": "同义"},
+        }
+
+    def test_dedup_check_reports_without_applying(self):
+        graph = self._create_graph()
+        a = self._concept(graph["id"], "甲")
+        b = self._concept(graph["id"], "乙")
+        run_id = self._create_dedup_run(graph["id"], [self._merge_group(a, b)])
+        resp = self.client.post(
+            self.url("knowledge_graph_dedup_check", gid=graph["id"], did=run_id),
+            data={"_csrf": "test-token", "keep_ids": str(a)}, follow_redirects=True)
+        self.assertIn("检查通过", resp.get_data(as_text=True))
+        con = self._db()
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM kg_nodes WHERE graph_id=?",
+            (graph["id"],)).fetchone()[0], 2)
+        con.close()
+
+    def test_dedup_check_reports_conflict_reason(self):
+        graph = self._create_graph()
+        a = self._concept(graph["id"], "甲")
+        b = self._concept(graph["id"], "乙")
+        c = self._concept(graph["id"], "丙")
+        self._link(graph["id"], a, b)
+        self._link(graph["id"], b, c)
+        run_id = self._create_dedup_run(graph["id"], [self._merge_group(a, c)])
+        resp = self.client.post(
+            self.url("knowledge_graph_dedup_check", gid=graph["id"], did=run_id),
+            data={"_csrf": "test-token", "keep_ids": str(a)}, follow_redirects=True)
+        self.assertIn("未通过", resp.get_data(as_text=True))
+        con = self._db()
+        self.assertEqual(con.execute(
+            "SELECT COUNT(*) FROM kg_nodes WHERE graph_id=?",
+            (graph["id"],)).fetchone()[0], 3)
+        con.close()
+
     def _concept(self, graph_id, name, category="概念"):
         con = self._db()
         cur = con.execute(
