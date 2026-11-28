@@ -9,6 +9,7 @@
   <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" sizes="any">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   {% if g.user and g.user.role == 'teacher' %}<link rel="stylesheet" href="{{ url_for('static', filename='teacher_ui.css') }}">{% endif %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='responsive.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='vendor/katex/katex.min.css') }}">
 </head>
 <body class="{% if g.user and g.user.role == 'teacher' %}teacher-ui{% endif %} {% block body_class %}{% endblock %}"

@@ -108,9 +108,11 @@
   .review-workspace.pdf-open .review-row { grid-template-columns: 1fr; }
 }
 @media (max-width: 767px) {
-  .teacher-ui { padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
+  .teacher-ui { padding-bottom: calc(76px + env(safe-area-inset-bottom));
+                padding-left: var(--safe-left, 0); padding-right: var(--safe-right, 0); }
   .teacher-ui .container { padding: 0 12px; }
-  .teacher-topbar { min-height: 64px; padding: 10px 12px; }
+  .teacher-topbar { min-height: 64px; padding: 10px 12px;
+                    padding-top: calc(10px + var(--safe-top, 0px)); }
   .teacher-tools button { padding: 8px 10px; font-size: 14px; }
   .teacher-account { display: none; }
   .teacher-bottom-nav { display: flex; position: fixed; bottom: 0; left: 0; right: 0; z-index: 66; background: #fff; border-top: 1px solid var(--ui-border); padding: 6px 12px calc(6px + env(safe-area-inset-bottom)); justify-content: space-around; }
@@ -121,7 +123,8 @@
   .teacher-ui .grading-queue-pop { position: fixed; top: 70px; left: 12px; right: 12px; width: auto; max-width: none; }
   .teacher-ui .assistant-fab { bottom: calc(92px + env(safe-area-inset-bottom)); }
   .teacher-ui .assistant-callout { bottom: calc(160px + env(safe-area-inset-bottom)); }
-  .teacher-ui .assistant-panel { top: 76px; bottom: calc(76px + env(safe-area-inset-bottom)); height: auto; max-height: none; width: auto; left: 12px; right: 12px; }
+  .teacher-ui .assistant-panel { top: calc(76px + var(--safe-top, 0px)); bottom: calc(76px + env(safe-area-inset-bottom)); height: auto; max-height: none; width: auto; left: 12px; right: 12px; }
+  .teacher-ui .ai-toast-container { top: calc(76px + var(--safe-top, 0px)); left: calc(12px + var(--safe-left, 0px)); right: calc(12px + var(--safe-right, 0px)); max-width: none; }
   .ui-tabs { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 5px; }
   .ui-tabs button { flex: none; }
   .ui-filter input { max-width: none; }

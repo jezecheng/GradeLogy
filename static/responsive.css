@@ -1,0 +1,202 @@
+/* =========================================================================
+   GradeLogy 全局响应式适配层
+   -------------------------------------------------------------------------
+   断点对齐目标设备（CSS 像素宽度，竖屏除非另注）：
+     ≤380  xs  — iPhone SE / 小屏安卓手机（360~375）
+     ≤522  sm  — iPhone Duo 外屏 / 大屏手机（390~522）
+     ≤768  md  — 手机 + iPad mini 竖屏 + 折叠屏内屏竖屏起点
+     ≤960  lg  — iPad 竖屏 / 折叠屏内屏竖屏(~962) / 手机横屏
+     ≤1200 xl  — iPad 横屏 / 小屏笔记本（教师侧栏隐藏）
+     >1600 2xl — 宽屏桌面（工作区扩展）
+   短高度/横屏：(orientation:landscape) and (max-height:540px)
+   本文件在 style.css / teacher_ui.css 之后加载，用于统一与补齐。
+   ========================================================================= */
+
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+}
+
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
+/* 媒体内容不撑破容器 */
+img, svg, canvas, video { max-width: 100%; }
+
+/* 长文本、链接、学号不撑破卡片 */
+.feedback, .report-body, td, th, .about-meta dd { overflow-wrap: anywhere; }
+
+/* ===== 平板 / 折叠屏内屏竖屏：769~1199（教师侧栏已隐藏，使用顶栏） ===== */
+@media (max-width: 1199px) {
+  .teacher-ui .container { max-width: 1080px; }
+}
+
+/* ===== lg：≤960（iPad 竖屏 / 折叠屏内屏竖屏 / 手机横屏） ===== */
+@media (max-width: 960px) {
+  .container { margin: 16px auto; padding: 0 18px; }
+  h1 { font-size: 22px; }
+  h2 { font-size: 16px; }
+  .card { padding: 16px; }
+  .card-table { padding: 4px 12px; }
+  .grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+  .dashboard-grid { grid-template-columns: 1fr; gap: 16px; }
+  .field-row { flex-direction: column; gap: 8px; }
+  .field-row .ai-hint { align-self: flex-start; white-space: normal; }
+  .monitor-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .monitor-health-strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .monitor-health-item { border-top: 1px solid #eef0f3; }
+  .monitor-health-item:nth-child(-n+2) { border-top: 0; }
+  .monitor-health-item + .monitor-health-item { border-left: 0; }
+  .monitor-health-item:nth-child(even) { border-left: 1px solid #eef0f3; }
+  .monitor-health-item:last-child { grid-column: 1 / -1; border-left: 0; }
+  .usage-visual-card { grid-template-columns: 1fr; gap: 18px; }
+  .usage-model-ranking { padding: 0 0 18px; border-right: 0; border-bottom: 1px solid #eef0f3; }
+  .model-rank-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 20px; }
+  /* 学生/管理员顶部导航：允许换行 */
+  .nav { flex-wrap: wrap; padding: 10px 16px; gap: 10px 16px; }
+  .nav .brand { margin-right: 0; }
+}
+
+/* ===== md：≤768（手机 / iPad mini 竖屏 / 折叠屏内屏竖屏） ===== */
+@media (max-width: 768px) {
+  .container { margin: 14px auto; padding: 0 14px; }
+  .card { padding: 14px; border-radius: 8px; margin-bottom: 14px; }
+  .card.narrow { margin: 16px auto; }
+  .card-head { flex-wrap: wrap; }
+
+  /* iOS 聚焦输入框自动缩放：表单控件字号保持 16px */
+  input, textarea, select { font-size: 16px; }
+
+  /* 触控目标：主操作不小于 44px */
+  button:not(.small):not(.difficulty-star):not(.difficulty-reset):not(.tag-knowledge):not(.kg-galaxy-crumb):not(.assistant-resize),
+  .btn-link, a.back-button, .report-download-button, .student-report-button {
+    min-height: 44px;
+  }
+
+  dialog.modal { padding: 16px; width: min(94vw, 560px); max-height: 90dvh; }
+  .modal-actions { flex-wrap: wrap; }
+  .modal-actions button { flex: 1 1 40%; }
+
+  .filter-form, .inline-form { flex-direction: column; align-items: stretch; gap: 8px; }
+  .filter-form input, .filter-form select,
+  .inline-form input:not([type=checkbox]), .inline-form select { width: 100%; }
+  .filter-actions { margin-left: 0; padding-top: 0; }
+
+  .nav { padding: 10px 12px; gap: 8px 12px; font-size: 14px; }
+  .nav .brand { font-size: 16px; }
+  .nav-right { gap: 10px; }
+
+  .monitor-heading { align-items: center; gap: 12px; }
+  .monitor-heading p { display: none; }
+  .monitor-period-row { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .period-presets { width: 100%; overflow-x: auto; box-sizing: border-box; }
+  .period-presets a { flex: 1; text-align: center; }
+  .monitor-period-note { margin-left: 0; }
+  .monitor-kpi-num { font-size: 26px; }
+  .model-rank-list { grid-template-columns: 1fr; }
+  .usage-chart-legend { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 5px; }
+  .usage-chart-legend span { flex: none; }
+  .log-toolbar { flex-direction: column; align-items: stretch; }
+  .log-filter-bar > label:first-child, .log-filter-bar .log-search { flex: 1 1 auto; }
+
+  .course-frame { padding: 0 12px; }
+  .course-frame > summary.course-frame-head { flex-wrap: wrap; }
+  .course-frame-title { font-size: 15px; }
+  .student-deadline-item { grid-template-columns: minmax(0, 1fr) auto; gap: 6px 10px; padding: 10px; }
+  .student-deadline-main, .student-deadline-meta { grid-column: 1; }
+  .student-deadline-action { grid-column: 2; grid-row: 1 / span 2; }
+
+  .stats-kpis { gap: 8px; }
+  .kpi { flex: 1 1 46%; padding: 12px; }
+  .kpi-num { font-size: 22px; }
+  .page-grid { grid-template-columns: repeat(auto-fill, minmax(86px, 1fr)); gap: 8px; }
+  .draft-grid { grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); gap: 8px; }
+  .draft-item img, .draft-file { height: 78px; }
+  .submit-actions button { flex: 1 1 46%; }
+  td.actions { gap: 6px; }
+  .feedback { padding: 10px 12px; }
+
+  /* 悬浮元素避让安全区 */
+  .assistant-fab { right: 16px; bottom: calc(16px + var(--safe-bottom)); }
+  .assistant-callout { right: 16px; max-width: calc(100vw - 32px);
+                       bottom: calc(84px + var(--safe-bottom)); }
+  .ai-toast-container { right: calc(12px + var(--safe-right)); left: calc(12px + var(--safe-left));
+                        max-width: none; top: calc(8px + var(--safe-top)); }
+}
+
+/* ===== sm：≤522（iPhone Duo 外屏 / 大屏手机） ===== */
+@media (max-width: 522px) {
+  .container { padding: 0 12px; }
+  h1 { font-size: 20px; }
+  .grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
+  .monitor-kpis { grid-template-columns: 1fr; }
+  .monitor-kpi { padding: 14px; }
+  .q-media-grid { grid-template-columns: minmax(0, 1fr); }
+  .q-img-link img { max-height: 62vh; }
+  .wrong-body { flex-direction: column; }
+  .wrong-img { width: 100%; }
+  .assistant-panel { left: 10px; right: 10px; width: auto; border-radius: 14px;
+                     bottom: calc(84px + var(--safe-bottom));
+                     height: min(72vh, 560px); height: min(72dvh, 560px); }
+  .assistant-resize { display: none; }
+  .assistant-form textarea { font-size: 16px; }
+  .lecture-summary-body table.report-table { display: block; overflow-x: auto; white-space: nowrap; }
+  .kg-galaxy { min-height: 320px; height: 56dvh; }
+  .kg-drawer { width: 100%; }
+}
+
+/* ===== xs：≤380（最小屏手机） ===== */
+@media (max-width: 380px) {
+  .container { padding: 0 10px; }
+  h1 { font-size: 18px; }
+  .card { padding: 12px; }
+  .nav { gap: 6px 10px; font-size: 13px; }
+  .nav .brand { font-size: 15px; }
+  .kpi { flex: 1 1 100%; }
+  .grid { grid-template-columns: 1fr; }
+  .monitor-health-strip { grid-template-columns: 1fr; }
+  .monitor-health-item:nth-child(even) { border-left: 0; }
+  .usage-chart-y { width: 34px; }
+  .usage-chart-stack { width: 22px; }
+  .kg-galaxy { min-height: 280px; height: 52dvh; }
+}
+
+/* ===== 手机横屏 / 短高度视口：压缩垂直 chrome ===== */
+@media (orientation: landscape) and (max-height: 540px) {
+  .teacher-topbar { min-height: 48px; padding: 6px 16px; gap: 10px; }
+  .teacher-tools button { padding: 6px 10px; font-size: 13px; }
+  .teacher-bottom-nav { padding-top: 4px; padding-bottom: calc(4px + var(--safe-bottom)); }
+  .teacher-bottom-nav a, .teacher-bottom-nav button { min-height: 38px; padding: 4px 8px; }
+  .review-toolbar { top: 48px; }
+  .teacher-ui .container { padding: 0 16px; }
+  .kg-galaxy { min-height: 240px; height: 60vh; height: 60dvh; }
+  .teacher-ui .assistant-panel { top: 56px; bottom: calc(60px + var(--safe-bottom)); }
+  .assistant-fab { width: 48px; height: 48px; bottom: calc(12px + var(--safe-bottom)); }
+  .log-viewer { height: 46vh; }
+}
+
+/* ===== 折叠屏内屏竖屏 ~962：两栏内容可并排，但顶栏导航保持紧凑 ===== */
+@media (min-width: 769px) and (max-width: 1100px) {
+  .review-row { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 860px) {
+  .review-row { grid-template-columns: 1fr; }
+}
+
+/* ===== 宽屏桌面 >1600：工作区扩展 ===== */
+@media (min-width: 1601px) {
+  .teacher-ui .container { max-width: 1560px; }
+  .review-workspace .container, .graph-workspace .container { max-width: 1820px; }
+}
+
+/* 全高面板使用动态视口高度，避让移动浏览器地址栏 */
+.pdf-panel { height: 100vh; height: 100dvh; }
+@media (max-width: 1100px) {
+  .pdf-panel { height: 100vh; height: 100dvh; }
+}
+
+/* 尊重“减少动态效果”偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; }
+}
